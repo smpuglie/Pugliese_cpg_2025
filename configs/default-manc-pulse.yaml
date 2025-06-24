@@ -1,0 +1,31 @@
+---
+wPath: "../data/manc t1 connectome data/W_20231020_DNtoMN_unsorted.csv"
+dfPath: "../data/manc t1 connectome data/wTable_20231020_DNtoMN_unsorted_withModules.csv"
+paramsToIterate: []
+
+stimNeurons: []
+removeNeurons: []
+stimI: 200
+seed: None
+saveFigs: True
+useTsp: True
+
+T: 2.0
+dt: 0.001
+pulseStart: 0.02
+pulseEnd: 1.999
+
+tauMean: 0.02
+tauStdv: 0.002
+aMean: 1
+aStdv: 0.1
+thresholdMean: 7.5
+thresholdStdv: 0.6
+frcapMean: 200
+frcapStdv: 10
+
+excitatoryMultiplier: 0.03
+inhibitoryMultiplier: 0.03
+
+adjustStimI: False
+...

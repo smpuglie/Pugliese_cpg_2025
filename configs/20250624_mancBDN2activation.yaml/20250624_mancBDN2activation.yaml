@@ -1,0 +1,69 @@
+wPath: ../data/manc t1 connectome data/W_20231020_DNtoMN_unsorted.csv
+dfPath: ../data/manc t1 connectome data/wTable_20231020_DNtoMN_unsorted_withModules.csv
+paramsToIterate:
+- stimI
+- seed
+stimNeurons:
+- 31
+- 132
+removeNeurons: []
+stimI:
+- 200.43847822682918
+- 267.22610437453
+- 238.1356831061879
+- 235.23504524744666
+- 235.38785527912412
+- 272.1752796726327
+- 232.60391504859683
+- 224.74281045378268
+- 217.05232558176886
+- 265.36365416451116
+- 193.50307073756593
+- 237.83313064716324
+- 238.3660403582632
+- 246.63017599806707
+- 244.9906359699627
+- 241.3957743269068
+- 269.0386698974907
+- 242.41021515799412
+- 272.69165780451414
+- 228.8878514420603
+seed:
+- 5567
+- 7383
+- 115
+- 9574
+- 6556
+- 3370
+- 8959
+- 7616
+- 5107
+- 6563
+- 9509
+- 5297
+- 4413
+- 932
+- 321
+- 1912
+- 1993
+- 2794
+- 9595
+- 7237
+saveFigs: true
+useTsp: true
+T: 2.0
+dt: 0.001
+pulseStart: 0.02
+pulseEnd: 1.999
+tauMean: 0.02
+tauStdv: 0.002
+aMean: 1
+aStdv: 0.1
+thresholdMean: 7.5
+thresholdStdv: 0.6
+frcapMean: 200
+frcapStdv: 10
+excitatoryMultiplier: 0.03
+inhibitoryMultiplier: 0.03
+adjustStimI: false
+name: 20250624_mancBDN2activation
