@@ -1,0 +1,30 @@
+wPath: ../data/MANC weights/20231020_DNtoMN/W_20231020_DNtoMN_unsorted.csv
+dfPath: ../data/MANC weights/20231020_DNtoMN/wTable_20231020_DNtoMN_unsorted_withModules.csv
+paramsToIterate: []
+stimNeurons:
+- 31
+removeNeurons: []
+stimI: 250
+seed: 99508
+saveFigs: false
+useTsp: true
+T: 0.75
+dt: 0.001
+pulseStart: 0.02
+pulseEnd: 1
+tauMean: 0.02
+tauStdv: 0.002
+aMean: 1
+aStdv: 0.1
+thresholdMean: 7.5
+thresholdStdv: 0.6
+frcapMean: 200
+frcapStdv: 10
+excitatoryMultiplier: 0.03
+inhibitoryMultiplier: 0.03
+adjustStimI: false
+maxIters: 5
+nActiveUpper: 500
+nActiveLower: 5
+nHighFrUpper: 100
+name: 20250306_mancBDN2LpruningINs_0

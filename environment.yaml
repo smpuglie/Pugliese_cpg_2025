@@ -1,0 +1,14 @@
+name: bdn2cpg
+channels:
+  - https://repo.anaconda.com/pkgs/main
+dependencies:
+  - git
+  - jupyter
+  - matplotlib
+  - numpy
+  - pandas
+  - scikit-learn
+  - scipy
+  - seaborn
+  - pip:
+    - "jax[cuda12]"
