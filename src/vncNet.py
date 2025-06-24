@@ -12,7 +12,7 @@ import numpy as np
 # from numpy import random
 from scipy.stats import truncnorm
 import matplotlib.pyplot as plt
-from numba import jit
+# from numba import jit
 
 def arrayInterp(x, xp, fp):
     """Interpolate an array over one dimension"""
@@ -204,7 +204,7 @@ class Simulation():
 
 
 
-    def run(self,clampedNeurons=[],clampedRates=None,form="half-tanh"):
+    def run(self,clampedNeurons=[],clampedRates=None,form="half-tanh",runQuick=False):
         """run the simulation"""
         Wt = np.transpose(self.W) # correct orientation for matrix multiplication
 
@@ -237,8 +237,10 @@ class Simulation():
         # R = self.run_helper(R,nT,dt,tau,inputs,Wt_reweighted,threshold,a,frCap,clampedNeurons=clampedNeurons)
 
         # self.R = R
-
-        odeSolution = solve_ivp(rate_equation,[0,T],R0,method="RK45",args=(tAxis,inputs,tau,Wt_reweighted,threshold,a,frCap,form),rtol=1e-7, atol=1e-9)
+        if runQuick:
+            odeSolution = solve_ivp(rate_equation,[0,T],R0,method="RK45",args=(tAxis,inputs,tau,Wt_reweighted,threshold,a,frCap,form))
+        else:
+            odeSolution = solve_ivp(rate_equation,[0,T],R0,method="RK45",args=(tAxis,inputs,tau,Wt_reweighted,threshold,a,frCap,form),rtol=1e-7, atol=1e-9)
 
         outputR = odeSolution.y
         outputTAxis = odeSolution.t
