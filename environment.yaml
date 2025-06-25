@@ -1,14 +1,20 @@
 name: bdn2cpg
 channels:
-  - https://repo.anaconda.com/pkgs/main
+  - conda-forge
 dependencies:
-  - git
   - jupyter
   - matplotlib
+  - numba
   - numpy
   - pandas
   - scikit-learn
   - scipy
   - seaborn
+  - omegaconf
+  - sparse
+  - pip
   - pip:
-    - "jax[cuda12]"
+    - "--editable=."
+    - hydra-core
+    - diffrax
+    - jax[cuda12]
