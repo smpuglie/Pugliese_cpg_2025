@@ -316,6 +316,7 @@ def generate_params_from_config(wTable, params, nSims, nNeurons, stimNeurons):
     pulseStart = params["pulseStart"]
     pulseEnd = params["pulseEnd"]-params["dt"] #To keep consistency with old input method
 
+    #Get indices of each neuron type for shuffling
     excDnIdxs = jnp.array(wTable.loc[(wTable["class"]=="descending neuron") & (wTable["predictedNt"]=="acetylcholine")].index)
     inhDnIdxs = jnp.array(wTable.loc[(wTable["class"]=="descending neuron") & ~(wTable["predictedNt"]=="acetylcholine")].index)
     excInIdxs = jnp.array(wTable.loc[~(wTable["class"].isin(["descending neuron","motor neuron"]))
