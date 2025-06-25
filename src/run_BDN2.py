@@ -137,6 +137,8 @@ def run_screen():
             loadFile = f'{screenStr}_{i}.yaml'
         paramPath = loadDir + screenStr + '/' + loadFile
         params = load_params(paramPath)
+        params["wPath"] = 'data/manc t1 connectome data/W_20231020_DNtoMN_unsorted.csv'
+        params["dfPath"] = 'data/manc t1 connectome data/wTable_20231020_DNtoMN_unsorted_withModules.csv'
 
         #Run Sim
         Rs, params_arr, params = run_sim_from_params(params)
