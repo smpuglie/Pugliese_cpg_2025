@@ -11,8 +11,10 @@ dependencies:
   - scipy
   - seaborn
   - omegaconf
+  - sparse
   - pip
   - pip:
     - "--editable=."
     - hydra-core
+    - diffrax
     - jax[cuda12]
