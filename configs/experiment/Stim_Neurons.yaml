@@ -1,0 +1,12 @@
+# This is the default configuration for the experiment.
+name: Stim_Neurons
+
+wPath: ${paths.data_dir}/manc t1 connectome data/20231020_DNtoMN/W_20231020_DNtoMN_unsorted.csv
+dfPath: ${paths.data_dir}/manc t1 connectome data/20231020_DNtoMN/wTable_20231020_DNtoMN_unsorted_withModules.csv
+paramsToIterate: []
+stimNeurons: [31]
+removeNeurons: []
+stimI: 200
+seed: None
+saveFigs: True
+useTsp: True

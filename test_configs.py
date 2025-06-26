@@ -12,6 +12,7 @@ def my_app(cfg: DictConfig) -> None:
             
     # Set the current working directory to the cwd_dir specified in the config
     cfg.paths.cwd_dir = Path.cwd()
+    cfg.experiment.stimNeurons 
     print(OmegaConf.to_yaml(cfg,resolve=True))
     OmegaConf.save(cfg, cfg.paths.save_dir / 'run_config.yaml',resolve=True)
 
