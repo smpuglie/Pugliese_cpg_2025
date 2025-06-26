@@ -1,0 +1,12 @@
+# This file contains the default parameters for the neuron model.
+name: TestingNeuronParams
+tauMean: 0.02
+tauStdv: 0.002
+aMean: 1
+aStdv: 0.1
+thresholdMean: 7.5
+thresholdStdv: 0.6
+frcapMean: 200
+frcapStdv: 10
+excitatoryMultiplier: 0.03
+inhibitoryMultiplier: 0.03

@@ -1,0 +1,8 @@
+# Default configuration for the simulation
+name: TestingSimulationParams
+
+T: 2.0
+dt: 0.001
+pulseStart: 0.02
+pulseEnd: 1.999
+adjustStimI: False
