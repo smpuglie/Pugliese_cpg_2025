@@ -1,0 +1,35 @@
+##### Easy Access Variables #####
+# if set to positive integer, overrides the default
+version: 'debug'
+seed: 42
+num_gpus: ''
+run_id: 'Testing'
+load_jobid: ''
+note: ''
+ckpt_list: []
+
+# set default task and default training config based on dataset
+defaults:
+  - _self_
+  - neuron_params: default
+  - paths: glados
+  - sim: default
+  - experiment: default
+
+
+# set the directory where the output files get saved
+hydra:
+  job:
+      config:
+        override_dirname:
+          exclude_keys:
+            - paths
+            - version
+            - dataset
+
+  run:
+    # dir: ${paths.base_dir}/${hydra:job.override_dirname}
+    dir: ${paths.base_dir}/run_id=${run_id}
+  sweep:
+    dir: ${paths.base_dir}
+    subdir: ${hydra.job.override_dirname}

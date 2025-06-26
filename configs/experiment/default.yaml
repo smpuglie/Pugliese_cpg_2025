@@ -1,0 +1,10 @@
+# This is the default configuration for the experiment.
+name: TestingExperimentParams
+
+paramsToIterate: []
+stimNeurons: []
+removeNeurons: []
+stimI: 200
+seed: None
+saveFigs: True
+useTsp: True
