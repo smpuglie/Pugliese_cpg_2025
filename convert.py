@@ -1,10 +1,11 @@
 from pathlib import Path
 from omegaconf import DictConfig, OmegaConf
+from typing import Dict, List, Any
 import yaml
 import sys
 
 # Property mapping
-CONFIG_MAPPING = {
+CONFIG_MAPPING: Dict[str, List[str]] = {
     "neuron_params": [
         "name",
         "tauMean",
@@ -46,8 +47,8 @@ CONFIG_MAPPING = {
 
 
 def migrate_config_section(
-    old_config: dict, cfg: DictConfig, section: str, props: list
-):
+    old_config: Dict[str, Any], cfg: DictConfig, section: str, props: List[str]
+) -> None:
     """Copy properties from old_config to cfg.section"""
 
     section_cfg = getattr(cfg, section)
@@ -56,14 +57,15 @@ def migrate_config_section(
             section_cfg[prop] = old_config[prop]
 
 
-def migrate_config(old_config_path: str, base_config_path: str):
+def migrate_config(old_config_path: str, base_config_path: str) -> None:
+    """Migrate configuration from old format to new format"""
     # Load base config
     with open(base_config_path, "r") as f:
         cfg = OmegaConf.load(f)
 
     # Load old config
     with open(old_config_path, "r") as f:
-        old_config = yaml.safe_load(f)
+        old_config: Dict[str, Any] = yaml.safe_load(f)
 
     # Migrate sections
     for section, props in CONFIG_MAPPING.items():
