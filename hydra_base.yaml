@@ -1,0 +1,52 @@
+version: debug
+seed: 42
+num_gpus: ''
+run_id: Testing
+load_jobid: ''
+note: ''
+ckpt_list: []
+neuron_params:
+  name: TestingNeuronParams
+  tauMean: 0.02
+  tauStdv: 0.002
+  aMean: 1
+  aStdv: 0.1
+  thresholdMean: 7.5
+  thresholdStdv: 0.6
+  frcapMean: 200
+  frcapStdv: 10
+  excitatoryMultiplier: 0.03
+  inhibitoryMultiplier: 0.03
+paths:
+  user: dsamy
+  cwd_dir: /home/${paths.user}/Research/Github/Pugliese_2025/
+  base_dir: /data/users/${paths.user}/Pugliese_2025/${experiment.name}/${version}
+  save_dir: ${paths.base_dir}/run_id=${run_id}
+  log_dir: ${paths.save_dir}/logs/
+  ckpt_dir: ${paths.save_dir}/ckpt/
+  fig_dir: ${paths.save_dir}/figures/
+  data_dir: /home/${paths.user}/bdn2cpg/data
+sim:
+  name: TestingSimulationParams
+  T: 2.0
+  dt: 0.001
+  pulseStart: 0.02
+  pulseEnd: 1.999
+  adjustStimI: false
+  maxIters: = 10
+  nActiveUpper: 500
+  nActiveLower: 5
+  nHighFrUpper: 100
+experiment:
+  name: TestingExperimentParams
+  wPath: ${paths.data_dir}/manc t1 connectome data/W_20231020_DNtoMN_unsorted.csv
+  dfPath: ${paths.data_dir}/manc t1 connectome data/wTable_20231020_DNtoMN_unsorted_withModules.csv
+  paramsToIterate: []
+  stimNeurons:
+  - 31
+  - 132
+  removeNeurons: []
+  stimI: 200
+  seed: None
+  saveFigs: true
+  useTsp: true
