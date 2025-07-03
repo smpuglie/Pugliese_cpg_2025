@@ -9,4 +9,4 @@ removeNeurons: []
 stimI: 200
 seed: None
 saveFigs: True
-useTsp: True
+useTsp: False
