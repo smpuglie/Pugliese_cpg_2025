@@ -12,6 +12,7 @@ from src.sim_utils import (
     rate_equation_half_tanh,
     sample_positive_truncnorm,
     set_sizes,
+    generate_pulse_input,
 )
 
 
@@ -154,51 +155,9 @@ class VNCNet:
         self.exc_synapse_multiplier = float(np_cfg.excitatoryMultiplier)
         self.inh_synapse_multiplier = float(np_cfg.inhibitoryMultiplier)
 
-    def _generate_pulse_input(
-        self,
-        start_time: float,
-        stop_time: float,
-        amplitudes: np.ndarray,
-        stim_neurons: np.ndarray,
-    ) -> np.ndarray:
-        """
-        Generate pulse input for neural network simulation.
-
-        Args:
-            start_time: Pulse start time (seconds)
-            stop_time: Pulse stop time (seconds)
-            amplitudes: Array of pulse amplitudes for each simulation [nSims,]
-            stim_neurons: Array of neuron indices to stimulate [nStimNeurons,]
-
-        Returns:
-            Input array of shape [nSims, nNeurons, nTimeSteps]
-        """
-        # Calculate time indices
-        start_idx = int(np.round(start_time / self.dt))
-        stop_idx = int(np.round(stop_time / self.dt))
-
-        # Ensure indices are within bounds
-        start_idx = max(0, start_idx)
-        stop_idx = min(len(self.t_axis), stop_idx)
-
-        # Initialize input array
-        input_array = np.zeros((self.num_sims, self.n_neurons, len(self.t_axis)))
-
-        # Vectorized assignment using broadcasting
-        # Shape: [nSims, 1, 1] * [1, nStimNeurons, 1] -> [nSims, nStimNeurons, nTimeSteps]
-        input_array[
-            np.ix_(
-                range(self.num_sims),  # All simulations
-                stim_neurons,  # Stimulated neurons
-                range(start_idx, stop_idx),  # Time window
-            )
-        ] = amplitudes[:, np.newaxis, np.newaxis]
-
-        return input_array
-
     def _generate_input(self) -> np.ndarray:
         """Generate input matrix for all simulations using improved pulse method."""
-        return self._generate_pulse_input(
+        return generate_pulse_input(
             start_time=self.pulse_start,
             stop_time=self.pulse_end,
             amplitudes=self.stim_input,
