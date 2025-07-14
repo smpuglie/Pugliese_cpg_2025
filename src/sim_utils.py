@@ -2,11 +2,12 @@ import time
 
 import jax.numpy as jnp
 import numpy as np
-from jax import vmap
+from jax import vmap, jit
 from scipy.stats import truncnorm
 
 import os
 import pandas as pd
+from jax.lax import cond
 
 
 def sample_positive_truncnorm(mean, stdev, nSamples, nSims, seeds=None):
@@ -38,10 +39,11 @@ def arrayInterpJax(x, xp, fp):
 
 
 def rate_equation_half_tanh(t, R, args):
+    inputs, pulseStart, pulseEnd, tau, weightedW, threshold, a, frCap = args
 
-    timePoints, inputs, tau, weightedW, threshold, a, frCap = args
+    pulse_active = (t >= pulseStart) & (t <= pulseEnd)
+    I = inputs * pulse_active
 
-    I = arrayInterpJax(t, timePoints, inputs)  # interpolate to get input values
     totalInput = I + jnp.dot(weightedW, R)
     activation = jnp.maximum(
         frCap * jnp.tanh((a / frCap) * (totalInput - threshold)), 0
@@ -91,30 +93,7 @@ def load_wTable(dfPath):
     return wTable
 
 
-def generate_pulse_input(
-    self,
-    start_time: float,
-    stop_time: float,
-    amplitudes: np.ndarray,
-    stim_neurons: np.ndarray,
-) -> np.ndarray:
-
-    # Calculate time indices
-    start_idx = int(np.round(start_time / self.dt))
-    stop_idx = int(np.round(stop_time / self.dt))
-
-    start_idx = max(0, start_idx)
-    stop_idx = min(len(self.t_axis), stop_idx)
-
-    # Initialize input array
-    input_array = np.zeros((self.num_sims, self.n_neurons, len(self.t_axis)))
-
-    input_array[
-        np.ix_(
-            range(self.num_sims),  # All simulations
-            stim_neurons,  # Stimulated neurons
-            range(start_idx, stop_idx),  # Time window
-        )
-    ] = amplitudes[:, np.newaxis, np.newaxis]
-
-    return input_array
+def make_input(nNeurons, stimNeurons, stimI):
+    input = np.zeros(nNeurons)
+    input[stimNeurons] = stimI
+    return jnp.array(input)

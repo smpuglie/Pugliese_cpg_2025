@@ -1,50 +1,94 @@
 import time
-
+from typing import NamedTuple, Dict, Any
 import jax.numpy as jnp
 import numpy as np
 from diffrax import Dopri5, ODETerm, PIDController, SaveAt, diffeqsolve
-from jax import vmap
+from jax import vmap, jit, random
 from omegaconf import DictConfig
-
+from jax.lax import cond
+from src.shuffle_utils import extract_shuffle_indices, full_shuffle
 from src.sim_utils import (
     load_W,
     load_wTable,
-    rate_equation_half_tanh,
     sample_positive_truncnorm,
     set_sizes,
-    generate_pulse_input,
+    make_input,
 )
+
+
+class NeuronConfig(NamedTuple):
+
+    W: jnp.ndarray
+    W_table: Any
+    tau: jnp.ndarray
+    a: jnp.ndarray
+    threshold: jnp.ndarray
+    fr_cap: jnp.ndarray
+    input_currents: jnp.ndarray
+    seeds: jnp.ndarray
+    stim_neurons: jnp.ndarray
+    exc_dn_idxs: jnp.ndarray
+    inh_dn_idxs: jnp.ndarray
+    exc_in_idxs: jnp.ndarray
+    inh_in_idxs: jnp.ndarray
+    mn_idxs: jnp.ndarray
+
+
+class SimConfig(NamedTuple):
+
+    n_neurons: int
+    num_sims: int
+    T: float
+    dt: float
+    pulse_start: float
+    pulse_end: float
+    t_axis: jnp.ndarray
+    stim_input: float
+    shuffle: bool
+    noise: bool
+    noise_stdv_prop: float
+    exc_synapse_multiplier: float
+    inh_synapse_multiplier: float
+    r_tol: float
+    a_tol: float
+
+
+def rate_equation_half_tanh(t, R, args):
+    inputs, pulseStart, pulseEnd, tau, weightedW, threshold, a, frCap = args
+
+    pulse_active = (t >= pulseStart) & (t <= pulseEnd)
+    I = inputs * pulse_active
+
+    totalInput = I + jnp.dot(weightedW, R)
+    activation = jnp.maximum(
+        frCap * jnp.tanh((a / frCap) * (totalInput - threshold)), 0
+    )
+
+    return (activation - R) / tau
 
 
 def run(
     W,
+    R0,
     tAxis,
     T,
     dt,
     inputs,
+    pulseStart,
+    pulseEnd,
     tau,
     threshold,
     a,
     frCap,
-    excSynapseMultiplier,
-    inhSynapseMultiplier,
     r_tol=1e-7,
     a_tol=1e-9,
 ):
-    """Run the simulation for a single parameter set."""
-    Wt = jnp.transpose(W)  # correct orientation for matrix multiplication
-
-    # Reweight W
-    Wt_exc = jnp.maximum(Wt, 0)
-    Wt_inh = jnp.minimum(Wt, 0)
-    Wt_reweighted = excSynapseMultiplier * Wt_exc + inhSynapseMultiplier * Wt_inh
-
-    R0 = jnp.zeros([len(W[0])])  # initialize firing rates
-
-    # Solve using Diffrax
+    """Pure jax function that runs the actual simulation"""
     term = ODETerm(rate_equation_half_tanh)
     solver = Dopri5()
     saveat = SaveAt(ts=jnp.array(tAxis))
+    controller = PIDController(rtol=r_tol, atol=a_tol)
+
     odeSolution = diffeqsolve(
         term,
         solver,
@@ -52,258 +96,424 @@ def run(
         T,
         dt,
         R0,
-        args=(tAxis, inputs, tau, Wt_reweighted, threshold, a, frCap),
+        args=(inputs, pulseStart, pulseEnd, tau, W, threshold, a, frCap),
         saveat=saveat,
-        stepsize_controller=PIDController(rtol=r_tol, atol=a_tol),
+        stepsize_controller=controller,
         max_steps=5000000,
     )
 
-    return jnp.transpose(jnp.array(odeSolution.ys))
+    return jnp.transpose(odeSolution.ys)
 
 
-class VNCNet:
+def run_shuffle(
+    W,
+    R0,
+    tAxis,
+    T,
+    dt,
+    inputs,
+    pulseStart,
+    pulseEnd,
+    tau,
+    threshold,
+    a,
+    frCap,
+    seed,
+    extra,
+    excDnIdxs,
+    inhDnIdxs,
+    excInIdxs,
+    inhInIdxs,
+    mnIdxs,
+    r_tol=1e-7,
+    a_tol=1e-9,
+):
+    """Pure jax function that shuffles the weight matrix"""
+    W_shuffled = full_shuffle(
+        W, seed, excDnIdxs, inhDnIdxs, excInIdxs, inhInIdxs, mnIdxs
+    )
 
-    def __init__(self, cfg: DictConfig):
-        """Initialize VNCNet with hydra config"""
-        self.cfg = cfg
-        self._validate_config()
-        self._load_connectivity()
-        self._setup_simulation_parameters()
-        self._setup_neuron_parameters()
+    return run(
+        W_shuffled,
+        R0,
+        tAxis,
+        T,
+        dt,
+        inputs,
+        pulseStart,
+        pulseEnd,
+        tau,
+        threshold,
+        a,
+        frCap,
+        r_tol,
+        a_tol,
+    )
 
-    def _validate_config(self) -> None:
-        required_sections = {
-            "experiment": ["name", "wPath", "dfPath", "stimNeurons", "stimI", "seed"],
-            "sim": ["T", "dt", "pulseStart", "pulseEnd"],
-            "neuron_params": [
-                "tauMean",
-                "tauStdv",
-                "aMean",
-                "aStdv",
-                "thresholdMean",
-                "thresholdStdv",
-                "frcapMean",
-                "frcapStdv",
-                "excitatoryMultiplier",
-                "inhibitoryMultiplier",
-            ],
-        }
 
-        for section, keys in required_sections.items():
-            if not hasattr(self.cfg, section):
-                raise ValueError(f"Missing required config section: {section}")
-            section_cfg = getattr(self.cfg, section)
-            for key in keys:
-                if not hasattr(section_cfg, key):
-                    raise ValueError(f"Missing required config section: {section}")
+def run_noise(
+    W,
+    R0,
+    tAxis,
+    T,
+    dt,
+    inputs,
+    pulseStart,
+    pulseEnd,
+    tau,
+    threshold,
+    a,
+    frCap,
+    seed,
+    stdvProp,
+    excDnIdxs,  # Added to match signature (ignored)
+    inhDnIdxs,  # Added to match signature (ignored)
+    excInIdxs,  # Added to match signature (ignored)
+    inhInIdxs,  # Added to match signature (ignored)
+    mnIdxs,  # Added to match signature (ignored)
+    r_tol=1e-7,
+    a_tol=1e-9,
+):
+    """Pure jax function that adds noise to the weight matrix"""
+    W_noisy = resample_W(W, seed, stdvProp)
 
-    def _load_connectivity(self) -> None:
-        """Load connections"""
+    return run(
+        W_noisy,
+        R0,
+        tAxis,
+        T,
+        dt,
+        inputs,
+        pulseStart,
+        pulseEnd,
+        tau,
+        threshold,
+        a,
+        frCap,
+        r_tol,
+        a_tol,
+    )
 
-        w_path = self.cfg.experiment.wPath
-        df_path = self.cfg.experiment.dfPath
 
-        self.W = load_W(w_path)
-        self.W_table = load_wTable(df_path)
+def run_no_shuffle(
+    W,
+    R0,
+    tAxis,
+    T,
+    dt,
+    inputs,
+    pulseStart,
+    pulseEnd,
+    tau,
+    threshold,
+    a,
+    frCap,
+    seed,  # Added to match signature (ignored)
+    stdvProp,  # Added to match signature (ignored)
+    excDnIdxs,  # Added to match signature (ignored)
+    inhDnIdxs,  # Added to match signature (ignored)
+    excInIdxs,  # Added to match signature (ignored)
+    inhInIdxs,  # Added to match signature (ignored)
+    mnIdxs,  # Added to match signature (ignored)
+    r_tol=1e-7,
+    a_tol=1e-9,
+):
+    """Wrapper for run that ignores shuffle and noise parameters."""
+    return run(
+        W,
+        R0,
+        tAxis,
+        T,
+        dt,
+        inputs,
+        pulseStart,
+        pulseEnd,
+        tau,
+        threshold,
+        a,
+        frCap,
+        r_tol,
+        a_tol,
+    )
 
-    def _setup_simulation_parameters(self) -> None:
-        """Setup simulation parameters from config"""
-        self.n_neurons = self.W.shape[0]
 
-        # Handle stimulation parameters
-        self.stim_neurons = np.array(self.cfg.experiment.stimNeurons, dtype=np.int64)
-        self.stim_input = np.array(self.cfg.experiment.stimI)
+def validate_config(cfg: DictConfig) -> None:
+    """Check if config has everything."""
+    required_sections = {
+        "experiment": ["name", "wPath", "dfPath", "stimNeurons", "stimI", "seed"],
+        "sim": ["T", "dt", "pulseStart", "pulseEnd"],
+        "neuron_params": [
+            "tauMean",
+            "tauStdv",
+            "aMean",
+            "aStdv",
+            "thresholdMean",
+            "thresholdStdv",
+            "frcapMean",
+            "frcapStdv",
+            "excitatoryMultiplier",
+            "inhibitoryMultiplier",
+        ],
+    }
 
-        self.seeds = np.array(self.cfg.experiment.seed)
-
-        self.num_sims = len(self.seeds)
-
-        # Simulation timing
-        self.T = float(self.cfg.sim.T)
-        self.dt = float(self.cfg.sim.dt)
-        self.pulse_start = float(self.cfg.sim.pulseStart)
-        self.pulse_end = float(self.cfg.sim.pulseEnd)
-
-        # Create time axis
-        self.t_axis = np.arange(0, self.T, self.dt)
-
-        # Optional parameters with defaults
-        self.adjust_stim_I = getattr(self.cfg.sim, "adjustStimI", False)
-        self.max_iters = getattr(self.cfg.sim, "maxIters", 10)
-        self.n_active_upper = getattr(self.cfg.sim, "nActiveUpper", 500)
-        self.n_active_lower = getattr(self.cfg.sim, "nActiveLower", 5)
-        self.n_high_fr_upper = getattr(self.cfg.sim, "nHighFrUpper", 100)
-
-        # Remove neurons if specified
-        self.remove_neurons = getattr(self.cfg.experiment, "removeNeurons", [])
-
-    def _setup_neuron_parameters(self) -> None:
-        """Setup neuron parameters from config"""
-        np_cfg = self.cfg.neuron_params
-
-        # Store parameter means and standard deviations
-        self.tau_mean = float(np_cfg.tauMean)
-        self.tau_stdv = float(np_cfg.tauStdv)
-        self.a_mean = float(np_cfg.aMean)
-        self.a_stdv = float(np_cfg.aStdv)
-        self.threshold_mean = float(np_cfg.thresholdMean)
-        self.threshold_stdv = float(np_cfg.thresholdStdv)
-        self.fr_cap_mean = float(np_cfg.frcapMean)
-        self.fr_cap_stdv = float(np_cfg.frcapStdv)
-
-        # multipliers
-        self.exc_synapse_multiplier = float(np_cfg.excitatoryMultiplier)
-        self.inh_synapse_multiplier = float(np_cfg.inhibitoryMultiplier)
-
-    def _generate_input(self) -> np.ndarray:
-        """Generate input matrix for all simulations using improved pulse method."""
-        return generate_pulse_input(
-            start_time=self.pulse_start,
-            stop_time=self.pulse_end,
-            amplitudes=self.stim_input,
-            stim_neurons=self.stim_neurons,
-        )
-
-    def simulate(self) -> dict:
-        """Run the Simulation"""
-        try:
-            # Sample neuron parameters
-            # TODO: fix this logic:
-            neuron_seeds = np.zeros([4, self.num_sims], dtype=int)
-            for sim in range(self.num_sims):
-                neuron_seeds[:, sim] = np.random.default_rng(self.seeds[sim]).integers(
-                    10000, size=4
+    for section, keys in required_sections.items():
+        if not hasattr(cfg, section):
+            raise ValueError(f"Missing required config section: {section}")
+        section_cfg = getattr(cfg, section)
+        for key in keys:
+            if not hasattr(section_cfg, key):
+                raise ValueError(
+                    f"Missing required config key '{key}' in section '{section}'"
                 )
 
-            tau = sample_positive_truncnorm(
-                self.tau_mean,
-                self.tau_stdv,
-                self.n_neurons,
-                self.num_sims,
-                seeds=neuron_seeds[0],
-            )
-            a = sample_positive_truncnorm(
-                self.a_mean,
-                self.a_stdv,
-                self.n_neurons,
-                self.num_sims,
-                seeds=neuron_seeds[1],
-            )
-            threshold = sample_positive_truncnorm(
-                self.threshold_mean,
-                self.threshold_stdv,
-                self.n_neurons,
-                self.num_sims,
-                seeds=neuron_seeds[2],
-            )
-            fr_cap = sample_positive_truncnorm(
-                self.fr_cap_mean,
-                self.fr_cap_stdv,
-                self.n_neurons,
-                self.num_sims,
-                seeds=neuron_seeds[3],
-            )
 
-            if "size" in self.W_table:
-                a, threshold = set_sizes(self.W_table["size"], a, threshold)
-            else:
-                a, threshold = set_sizes(self.W_table["surf_area_um2"], a, threshold)
+def load_connectivity(cfg: DictConfig) -> tuple[jnp.ndarray, Any]:
+    """Load connectivity matrix and the data."""
+    w_path = cfg.experiment.wPath
+    df_path = cfg.experiment.dfPath
+    W = load_W(w_path)
+    W_table = load_wTable(df_path)
+    return jnp.array(W), W_table
 
-            # Generate input I
-            input_currents = self._generate_input()
 
-            # Convert to JAX arrays
-            W_jax = jnp.array(self.W)
-            t_axis_jax = jnp.array(self.t_axis)
-            input_jax = jnp.array(input_currents)
-            tau_jax = jnp.array(tau)
-            threshold_jax = jnp.array(threshold)
-            a_jax = jnp.array(a)
-            fr_cap_jax = jnp.array(fr_cap)
+def sample_neuron_parameters(
+    cfg: DictConfig, n_neurons: int, num_sims: int, seeds: np.ndarray
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Sample neuron parameters based on configuration."""
+    np_cfg = cfg.neuron_params
 
-            # Setup vmap axes based on W dimensionality
-            # TODO: fix this
-            if W_jax.ndim == 3:
-                vmap_axes = (0, None, None, None, 0, 0, 0, 0, 0, None, None)
-            else:
-                vmap_axes = (None, None, None, None, 0, 0, 0, 0, 0, None, None)
+    neuron_seeds = np.zeros([4, num_sims], dtype=int)
+    for sim in range(num_sims):
+        neuron_seeds[:, sim] = np.random.default_rng(int(seeds[sim])).integers(
+            10000, size=4
+        )
 
-            # Run parallel simulations (JAX)
-            start_time = time.time()
+    tau = sample_positive_truncnorm(
+        float(np_cfg.tauMean),
+        float(np_cfg.tauStdv),
+        n_neurons,
+        num_sims,
+        seeds=neuron_seeds[0],
+    )
+    a = sample_positive_truncnorm(
+        float(np_cfg.aMean),
+        float(np_cfg.aStdv),
+        n_neurons,
+        num_sims,
+        seeds=neuron_seeds[1],
+    )
+    threshold = sample_positive_truncnorm(
+        float(np_cfg.thresholdMean),
+        float(np_cfg.thresholdStdv),
+        n_neurons,
+        num_sims,
+        seeds=neuron_seeds[2],
+    )
+    fr_cap = sample_positive_truncnorm(
+        float(np_cfg.frcapMean),
+        float(np_cfg.frcapStdv),
+        n_neurons,
+        num_sims,
+        seeds=neuron_seeds[3],
+    )
 
-            Rs = vmap(run, in_axes=vmap_axes)(
-                W_jax,
-                t_axis_jax,
-                self.T,
-                self.dt,
-                input_jax,
-                tau_jax,
-                threshold_jax,
-                a_jax,
-                fr_cap_jax,
-                self.exc_synapse_multiplier,
-                self.inh_synapse_multiplier,
-            )
+    return jnp.array(tau), jnp.array(a), jnp.array(threshold), jnp.array(fr_cap)
 
-            end_time = time.time()
 
-            print(
-                f"Time to solve system with vmap: {end_time - start_time:.3f} seconds"
-            )
+def create_sim_config(cfg: DictConfig, W: jnp.ndarray) -> SimConfig:
+    """Create simulation configuration from config and connectivity matrix."""
+    n_neurons = W.shape[0]
+    seeds = np.array(cfg.experiment.seed)
+    num_sims = len(seeds)
 
-            # Convert results back to numpy
-            result = np.array(Rs)
+    T = float(cfg.sim.T)
+    dt = float(cfg.sim.dt)
+    pulse_start = float(cfg.sim.pulseStart)
+    pulse_end = float(cfg.sim.pulseEnd)
+    t_axis = jnp.array(np.arange(0, T, dt))
 
-            results = {
-                "result": result,
-                "input_currents": input_currents,
-                "tau": tau,
-                "a": a,
-                "threshold": threshold,
-                "fr_cap": fr_cap,
-                "t_axis": self.t_axis,
-                "W": self.W,
-                "W_table": self.W_table,
-                "stim_neurons": self.stim_neurons,
-                "stim_input": self.stim_input,
-                "seeds": self.seeds,
-                "n_neurons": self.n_neurons,
-                "num_sims": self.num_sims,
-                "config": self.cfg,
-                "simulation_time": end_time - start_time,
-            }
+    stim_input = cfg.experiment.stimI
+    shuffle = getattr(cfg.sim, "shuffle", False)
+    noise = getattr(cfg.sim, "noise", False)
+    noise_stdv_prop = getattr(cfg.sim, "noiseStdvProp", 0.1)
 
-            return results
+    exc_synapse_multiplier = float(cfg.neuron_params.excitatoryMultiplier)
+    inh_synapse_multiplier = float(cfg.neuron_params.inhibitoryMultiplier)
 
-        except Exception as e:
-            raise RuntimeError(f"Simulation failed: {e}")
+    r_tol = getattr(cfg.sim, "rtol", 1e-7)
+    a_tol = getattr(cfg.sim, "atol", 1e-9)
 
-    def __str__(self):
-        return str(self.info)
+    return SimConfig(
+        n_neurons=n_neurons,
+        num_sims=num_sims,
+        T=T,
+        dt=dt,
+        pulse_start=pulse_start,
+        pulse_end=pulse_end,
+        t_axis=t_axis,
+        stim_input=stim_input,
+        shuffle=shuffle,
+        noise=noise,
+        noise_stdv_prop=noise_stdv_prop,
+        exc_synapse_multiplier=exc_synapse_multiplier,
+        inh_synapse_multiplier=inh_synapse_multiplier,
+        r_tol=r_tol,
+        a_tol=a_tol,
+    )
 
-    @property
-    def info(self) -> dict:
-        return {
-            "experiment_name": self.cfg.experiment.name,
-            "n_neurons": self.n_neurons,
-            "num_sims": self.num_sims,
-            "stim_neurons": self.stim_neurons.tolist(),
-            "simulation_time": self.T,
-            "time_step": self.dt,
-            "pulse_duration": self.pulse_end - self.pulse_start,
-            "neuron_params": {
-                "tau_mean": self.tau_mean,
-                "tau_stdv": self.tau_stdv,
-                "a_mean": self.a_mean,
-                "a_stdv": self.a_stdv,
-                "threshold_mean": self.threshold_mean,
-                "threshold_stdv": self.threshold_stdv,
-                "fr_cap_mean": self.fr_cap_mean,
-                "fr_cap_stdv": self.fr_cap_stdv,
-                "exc_multiplier": self.exc_synapse_multiplier,
-                "inh_multiplier": self.inh_synapse_multiplier,
-            },
-            "connectivity_shape": self.W.shape,
-            "seeds": self.seeds.tolist(),
-            "stim_input": self.stim_input.tolist(),
-        }
+
+def load_vnc_net(cfg: DictConfig) -> tuple[NeuronConfig, SimConfig]:
+    """Load and configure VNC network parameters and simulation settings."""
+    validate_config(cfg)
+
+    W, W_table = load_connectivity(cfg)
+    sim_config = create_sim_config(cfg, W)
+
+    stim_neurons = jnp.array(cfg.experiment.stimNeurons, dtype=jnp.int64)
+    seeds = np.array(cfg.experiment.seed)
+
+    tau, a, threshold, fr_cap = sample_neuron_parameters(
+        cfg, sim_config.n_neurons, sim_config.num_sims, seeds
+    )
+
+    if "size" in W_table:
+        a, threshold = set_sizes(W_table["size"], a, threshold)
+    else:
+        a, threshold = set_sizes(W_table["surf_area_um2"], a, threshold)
+
+    input_currents = jnp.array(
+        make_input(sim_config.n_neurons, stim_neurons, sim_config.stim_input)
+    )
+
+    exc_dn_idxs, inh_dn_idxs, exc_in_idxs, inh_in_idxs, mn_idxs = (
+        extract_shuffle_indices(W_table)
+    )
+
+    params = NeuronConfig(
+        W=W,
+        W_table=W_table,
+        tau=tau,
+        a=a,
+        threshold=threshold,
+        fr_cap=fr_cap,
+        input_currents=input_currents,
+        seeds=jnp.array(seeds),
+        stim_neurons=stim_neurons,
+        exc_dn_idxs=exc_dn_idxs,
+        inh_dn_idxs=inh_dn_idxs,
+        exc_in_idxs=exc_in_idxs,
+        inh_in_idxs=inh_in_idxs,
+        mn_idxs=mn_idxs,
+    )
+
+    return params, sim_config
+
+
+def resample_W(W, seed, stdvProp):
+    """Add noise to weight matrix."""
+    stdvs = W * stdvProp
+    key = random.key(seed)
+    samples = random.truncated_normal(
+        key, lower=-1.0 / stdvProp, upper=float("inf"), shape=W.shape
+    )
+    return W + stdvs * samples
+
+
+@jit
+def reweight_connectivity(
+    W: jnp.ndarray, exc_multiplier: float, inh_multiplier: float
+) -> jnp.ndarray:
+    """Reweight connectivity matrix with excitatory and inhibitory multipliers."""
+    Wt_exc = jnp.maximum(W, 0)
+    Wt_inh = jnp.minimum(W, 0)
+    W_rw = jnp.transpose(exc_multiplier * Wt_exc + inh_multiplier * Wt_inh)
+    return W_rw
+
+
+def simulate_vnc_net(params: NeuronConfig, config: SimConfig) -> np.ndarray:
+    """Simulate the VNC network with given parameters and configuration."""
+    try:
+        start_time = time.time()
+
+        W_rw = reweight_connectivity(
+            params.W, config.exc_synapse_multiplier, config.inh_synapse_multiplier
+        )
+
+        R0 = jnp.zeros((W_rw.shape[1],))
+
+        # Determine which run function to use based on configuration
+        if config.shuffle:
+            run_func = run_shuffle
+            print("Running simulation with shuffle")
+        elif config.noise:
+            run_func = run_noise
+            print("Running simulation with noise")
+        else:
+            run_func = run_no_shuffle
+            print("Running simulation without shuffle or noise")
+
+        vmap_axes = (
+            None,  # W
+            None,  # R0
+            None,  # tAxis
+            None,  # T
+            None,  # dt
+            None,  # inputs
+            None,  # pulseStart
+            None,  # pulseEnd
+            0,  # tau
+            0,  # threshold
+            0,  # a
+            0,  # frCap
+            0,  # seed
+            None,  # stdvProp or shuffle indices (depends on function)
+            None,  # excDnIdxs
+            None,  # inhDnIdxs
+            None,  # excInIdxs
+            None,  # inhInIdxs
+            None,  # mnIdxs
+        )
+
+        # Prepare additional parameter based on simulation type
+        if config.noise:
+            additional_param = config.noise_stdv_prop
+        else:
+            additional_param = None
+
+        Rs = jit(vmap(run_func, in_axes=vmap_axes))(
+            W_rw,
+            R0,
+            config.t_axis,
+            config.T,
+            config.dt,
+            params.input_currents,
+            config.pulse_start,
+            config.pulse_end,
+            params.tau,
+            params.threshold,
+            params.a,
+            params.fr_cap,
+            params.seeds,
+            additional_param,
+            params.exc_dn_idxs,
+            params.inh_dn_idxs,
+            params.exc_in_idxs,
+            params.inh_in_idxs,
+            params.mn_idxs,
+        )
+
+        end_time = time.time()
+
+        print(f"Time to solve system with vmap: {end_time - start_time:.3f} seconds")
+
+        return np.array(Rs)
+
+    except Exception as e:
+        raise RuntimeError(f"Simulation failed: {e}")
+
+
+def run_vnc_simulation(cfg: DictConfig) -> np.ndarray:
+    """Run a complete VNC simulation with the given configuration."""
+    params, config = load_vnc_net(cfg)
+    results = simulate_vnc_net(params, config)
+    return results

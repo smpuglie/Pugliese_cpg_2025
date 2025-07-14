@@ -10,3 +10,6 @@ maxIters: = 10
 nActiveUpper: 500
 nActiveLower: 5
 nHighFrUpper: 100
+shuffle: False
+noise: False
+noiseStdvProp: 0.1

@@ -1,19 +1,14 @@
 import hydra
 from omegaconf import DictConfig
-from src.vnc import VNCNet
+from src.vnc import run_vnc_simulation
 import sparse
 
 
 @hydra.main(version_base=None, config_path="../configs", config_name="config")
 def main(cfg: DictConfig):
-        
-    mynet: VNCNet = VNCNet(cfg)
 
-    result = mynet.run()
-
-    print(result)
-
-    sparse.save_npz(f'bdn2.npz', sparse.COO.from_numpy(result['result']))
+    results = run_vnc_simulation(cfg)
+    sparse.save_npz(f"bdn2.npz", sparse.COO.from_numpy(results))
 
 
 if __name__ == "__main__":
