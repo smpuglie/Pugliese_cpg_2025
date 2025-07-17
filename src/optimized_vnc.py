@@ -51,7 +51,7 @@ class SimConfig(NamedTuple):
     pulse_start: float
     pulse_end: float
     t_axis: jnp.ndarray
-    stim_input: float
+    stim_input: list
     shuffle: bool
     noise: bool
     noise_stdv_prop: float
@@ -562,9 +562,10 @@ def load_vnc_net(cfg: DictConfig) -> tuple[NeuronConfig, SimConfig]:
     
     # Create input currents for each stimulus configuration
     input_currents_list = []
-    for stim_neurons in stimNeurons:
+    for stim_neurons, stim_input in zip(stimNeurons, cfg.experiment.stimI):
         stim_neurons_array = jnp.array(stim_neurons, dtype=jnp.int32)
-        input_currents = jnp.array(make_input(sim_config.n_neurons, stim_neurons_array, sim_config.stim_input))
+        stim_input = jnp.array(stim_input, dtype=jnp.int32)
+        input_currents = jnp.array(make_input(sim_config.n_neurons, stim_neurons_array, stim_input))
         input_currents_list.append(input_currents)
     
     newkey, subkey = jax.random.split(sim_config.rng_key)
