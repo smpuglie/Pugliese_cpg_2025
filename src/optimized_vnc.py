@@ -234,11 +234,12 @@ class OptimizedSimulator:
             additional_param = self.config.noise_stdv_prop
         else:
             additional_param = 0.0
-        
+        ntotal = 0
         # Create work items: (stim_idx, param_idx, parameters)
         for stim_idx in range(self.n_stim_configs):
             for param_idx in range(self.n_param_sets):
                 work_item = {
+                    'total_count': ntotal,
                     'param_idx': param_idx,
                     'stim_idx': stim_idx,
                     'tau': self.params.tau[param_idx],
@@ -250,6 +251,7 @@ class OptimizedSimulator:
                     'inputs': self.params.input_currents_list[stim_idx]
                 }
                 work_queue.append(work_item)
+                ntotal += 1
         
         return work_queue
     
@@ -331,7 +333,7 @@ class OptimizedSimulator:
         }
         
         batch_metadata = [
-            {'param_idx': item['param_idx'], 'stim_idx': item['stim_idx']} 
+            {'param_idx': item['param_idx'], 'stim_idx': item['stim_idx'], 'total_count': item['total_count']} 
             for item in batch_work
         ]
         
@@ -366,11 +368,12 @@ class OptimizedSimulator:
         """Organize results by stimulus configuration using metadata."""
         
         results_by_stim = {}
-        
+        results_by_stim_total_ind = {}
         # Initialize result containers
         for stim_idx in range(self.n_stim_configs):
             results_by_stim[stim_idx] = [None] * self.n_param_sets
-        
+            results_by_stim_total_ind[stim_idx] = [None] * self.n_param_sets
+            
         # Place results in correct positions using metadata
         for result, metadata in zip(all_results, all_metadata):
             param_idx = metadata['param_idx']
@@ -380,13 +383,16 @@ class OptimizedSimulator:
             if param_idx >= self.n_param_sets or stim_idx >= self.n_stim_configs:
                 print(f"Warning: Invalid indices param_idx={param_idx}, stim_idx={stim_idx}")
                 continue
-            
+            results_by_stim_total_ind[stim_idx][param_idx] = metadata['total_count']
             results_by_stim[stim_idx][param_idx] = result
         
         # Convert to arrays and validate completeness
         for stim_idx in results_by_stim:
             results_list = results_by_stim[stim_idx]
-            
+            result_inds = results_by_stim_total_ind[stim_idx]
+            if (jnp.diff(jnp.array(result_inds)) > 1).any():
+                print(f"Warning: Inconsistent results for stimulus {stim_idx}, indices: {result_inds}")
+                
             # Check for missing results
             missing_indices = [i for i, result in enumerate(results_list) if result is None]
             if missing_indices:
