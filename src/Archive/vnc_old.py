@@ -1,17 +1,16 @@
 import time
 from typing import NamedTuple, Dict, Any
-import jax
 import jax.numpy as jnp
-# import numpy as np
+import numpy as np
 from diffrax import Dopri5, ODETerm, PIDController, SaveAt, diffeqsolve
 from jax import vmap, jit, random
 from omegaconf import DictConfig
 from jax.lax import cond
 from src.shuffle_utils import extract_shuffle_indices, full_shuffle
-from src.sim_utils import (
+from src.sim_utils_old import (
     load_W,
     load_wTable,
-    sample_trunc_normal,
+    sample_positive_truncnorm,
     set_sizes,
     make_input,
 )
@@ -52,7 +51,6 @@ class SimConfig(NamedTuple):
     inh_synapse_multiplier: float
     r_tol: float
     a_tol: float
-    rng_key: jax.random.PRNGKey
 
 
 def rate_equation_half_tanh(t, R, args):
@@ -279,35 +277,44 @@ def load_connectivity(cfg: DictConfig) -> tuple[jnp.ndarray, Any]:
 
 
 def sample_neuron_parameters(
-    cfg: DictConfig, n_neurons: int, num_sims: int, seeds: jnp.ndarray
+    cfg: DictConfig, n_neurons: int, num_sims: int, seeds: np.ndarray
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Sample neuron parameters based on configuration."""
     np_cfg = cfg.neuron_params
 
-    keys = jax.random.split(seeds, 4)
-    tau = sample_trunc_normal(
-        key = keys[0],
-        mean = float(np_cfg.tauMean),
-        stdev = float(np_cfg.tauStdv),
-        shape = (num_sims, n_neurons)
+    neuron_seeds = np.zeros([4, num_sims], dtype=int)
+    for sim in range(num_sims):
+        neuron_seeds[:, sim] = np.random.default_rng(int(seeds[sim])).integers(
+            10000, size=4
+        )
+
+    tau = sample_positive_truncnorm(
+        float(np_cfg.tauMean),
+        float(np_cfg.tauStdv),
+        n_neurons,
+        num_sims,
+        seeds=neuron_seeds[0],
     )
-    a = sample_trunc_normal(
-        key = keys[1],
-        mean = float(np_cfg.aMean),
-        stdev = float(np_cfg.aStdv),
-        shape = (num_sims, n_neurons)
+    a = sample_positive_truncnorm(
+        float(np_cfg.aMean),
+        float(np_cfg.aStdv),
+        n_neurons,
+        num_sims,
+        seeds=neuron_seeds[1],
     )
-    threshold = sample_trunc_normal(
-        key = keys[2],
-        mean = float(np_cfg.thresholdMean),
-        stdev = float(np_cfg.thresholdStdv),
-        shape = (num_sims, n_neurons)
+    threshold = sample_positive_truncnorm(
+        float(np_cfg.thresholdMean),
+        float(np_cfg.thresholdStdv),
+        n_neurons,
+        num_sims,
+        seeds=neuron_seeds[2],
     )
-    fr_cap = sample_trunc_normal(
-        key = keys[3],
-        mean = float(np_cfg.frcapMean),
-        stdev = float(np_cfg.frcapStdv),
-        shape = (num_sims, n_neurons)
+    fr_cap = sample_positive_truncnorm(
+        float(np_cfg.frcapMean),
+        float(np_cfg.frcapStdv),
+        n_neurons,
+        num_sims,
+        seeds=neuron_seeds[3],
     )
 
     return jnp.array(tau), jnp.array(a), jnp.array(threshold), jnp.array(fr_cap)
@@ -316,15 +323,14 @@ def sample_neuron_parameters(
 def create_sim_config(cfg: DictConfig, W: jnp.ndarray) -> SimConfig:
     """Create simulation configuration from config and connectivity matrix."""
     n_neurons = W.shape[0]
-    num_sims = cfg.experiment.n_replicates
-    rng_key = jax.random.PRNGKey(cfg.experiment.seed)
-    # seeds = jnp.array(cfg.experiment.seed)
+    seeds = np.array(cfg.experiment.seed)
+    num_sims = len(seeds)
 
     T = float(cfg.sim.T)
     dt = float(cfg.sim.dt)
     pulse_start = float(cfg.sim.pulseStart)
     pulse_end = float(cfg.sim.pulseEnd)
-    t_axis = jnp.array(jnp.arange(0, T, dt))
+    t_axis = jnp.array(np.arange(0, T, dt))
 
     stim_input = cfg.experiment.stimI
     shuffle = getattr(cfg.sim, "shuffle", False)
@@ -353,7 +359,6 @@ def create_sim_config(cfg: DictConfig, W: jnp.ndarray) -> SimConfig:
         inh_synapse_multiplier=inh_synapse_multiplier,
         r_tol=r_tol,
         a_tol=a_tol,
-        rng_key=rng_key,
     )
 
 
@@ -364,17 +369,17 @@ def load_vnc_net(cfg: DictConfig) -> tuple[NeuronConfig, SimConfig]:
     W, W_table = load_connectivity(cfg)
     sim_config = create_sim_config(cfg, W)
 
-    stim_neurons = jnp.array(cfg.experiment.stimNeurons, dtype=jnp.int32)
-    # seeds = np.array(cfg.experiment.seed)
-    newkey, subkey = jax.random.split(sim_config.rng_key)
+    stim_neurons = jnp.array(cfg.experiment.stimNeurons, dtype=jnp.int64)
+    seeds = np.array(cfg.experiment.seed)
+
     tau, a, threshold, fr_cap = sample_neuron_parameters(
-        cfg, sim_config.n_neurons, sim_config.num_sims, subkey
+        cfg, sim_config.n_neurons, sim_config.num_sims, seeds
     )
 
     if "size" in W_table:
-        a, threshold = set_sizes(W_table["size"].values, a, threshold)
+        a, threshold = set_sizes(W_table["size"], a, threshold)
     else:
-        a, threshold = set_sizes(W_table["surf_area_um2"].values, a, threshold)
+        a, threshold = set_sizes(W_table["surf_area_um2"], a, threshold)
 
     input_currents = jnp.array(
         make_input(sim_config.n_neurons, stim_neurons, sim_config.stim_input)
@@ -392,7 +397,7 @@ def load_vnc_net(cfg: DictConfig) -> tuple[NeuronConfig, SimConfig]:
         threshold=threshold,
         fr_cap=fr_cap,
         input_currents=input_currents,
-        seeds=newkey,
+        seeds=jnp.array(seeds),
         stim_neurons=stim_neurons,
         exc_dn_idxs=exc_dn_idxs,
         inh_dn_idxs=inh_dn_idxs,
@@ -400,6 +405,7 @@ def load_vnc_net(cfg: DictConfig) -> tuple[NeuronConfig, SimConfig]:
         inh_in_idxs=inh_in_idxs,
         mn_idxs=mn_idxs,
     )
+
     return params, sim_config
 
 
@@ -424,7 +430,7 @@ def reweight_connectivity(
     return W_rw
 
 
-def simulate_vnc_net(params: NeuronConfig, config: SimConfig) -> jnp.ndarray:
+def simulate_vnc_net(params: NeuronConfig, config: SimConfig) -> np.ndarray:
     """Simulate the VNC network with given parameters and configuration."""
     try:
         start_time = time.time()
@@ -500,13 +506,13 @@ def simulate_vnc_net(params: NeuronConfig, config: SimConfig) -> jnp.ndarray:
 
         print(f"Time to solve system with vmap: {end_time - start_time:.3f} seconds")
 
-        return jnp.array(Rs)
+        return np.array(Rs)
 
     except Exception as e:
         raise RuntimeError(f"Simulation failed: {e}")
 
 
-def run_vnc_simulation(cfg: DictConfig) -> jnp.ndarray:
+def run_vnc_simulation(cfg: DictConfig) -> np.ndarray:
     """Run a complete VNC simulation with the given configuration."""
     params, config = load_vnc_net(cfg)
     results = simulate_vnc_net(params, config)

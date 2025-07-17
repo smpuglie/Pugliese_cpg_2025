@@ -3,7 +3,7 @@ import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
 from matplotlib import colors
-from src import vncNet
+# from src import vncNet
 
 def get_module_colors():
     swingColorMap = sns.blend_palette(["#B33B24","#FF8833","#F2C649"],4)
@@ -259,7 +259,9 @@ def add_tAxis(ax,T,nTicks,decimalPlaces=2,rotation=0,defaultLen=0):
         return ax
         
     dt = T / nTimeSteps
-    dataTAxis = vncNet.create_time_axis(T,dt)
+    # dataTAxis = vncNet.create_time_axis(T,dt)
+    dataTAxis = np.array(np.arange(0, T, dt))
+    
 
     tickIdxs = np.arange(0,nTimeSteps,int(nTimeSteps/nTicks)).astype(int)
     ax.set_xticks(tickIdxs,labels=np.round(dataTAxis[tickIdxs],decimalPlaces),rotation=rotation)
