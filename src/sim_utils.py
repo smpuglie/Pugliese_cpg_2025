@@ -84,11 +84,11 @@ def set_sizes(sizes, a, threshold):
     sizes[np.isnan(sizes)] = normSize
     sizes[sizes == 0] = normSize  # TODO this isn't great
     sizes = sizes / normSize
-    sizes = jnp.asarray(sizes)
+    sizes = np.asarray(sizes)
 
     a = a / sizes[None,:]  # broadcasting to match shape
     threshold = threshold * sizes[None,:]  # broadcasting to match shape
-    return a, threshold
+    return jnp.asarray(a), jnp.asarray(threshold)
 
 
 def load_W(wPath):

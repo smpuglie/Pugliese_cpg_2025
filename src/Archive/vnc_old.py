@@ -7,7 +7,7 @@ from jax import vmap, jit, random
 from omegaconf import DictConfig
 from jax.lax import cond
 from src.shuffle_utils import extract_shuffle_indices, full_shuffle
-from src.sim_utils_old import (
+from src.Archive.sim_utils_old import (
     load_W,
     load_wTable,
     sample_positive_truncnorm,
