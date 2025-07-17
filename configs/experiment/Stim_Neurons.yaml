@@ -4,7 +4,6 @@ name: Stim_Neurons
 wPath: ${paths.data_dir}/manc t1 connectome data/W_20231020_DNtoMN_unsorted.csv
 dfPath: ${paths.data_dir}/manc t1 connectome data/wTable_20231020_DNtoMN_unsorted_withModules.csv
 n_replicates: 1000
-batch_size: 250
 paramsToIterate: []
 stimNeurons: [31, 132]
 removeNeurons: []
@@ -12,3 +11,4 @@ stimI: 250
 seed: 1
 saveFigs: True
 useTsp: False
+save_checkpoints: False

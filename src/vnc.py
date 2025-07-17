@@ -612,9 +612,7 @@ def process_sequential_minibatches(params: NeuronConfig, config: SimConfig,
             
             # Optional: Save intermediate results
             if save_intermediate and checkpoint_dir:
-                import os
-                os.makedirs(checkpoint_dir, exist_ok=True)
-                checkpoint_path = os.path.join(checkpoint_dir, f"batch_{batch_idx:04d}.npy")
+                checkpoint_path = checkpoint_dir / f"batch_{batch_idx:04d}.npy"
                 jnp.save(checkpoint_path, batch_results_trimmed)
                 print(f"  Saved checkpoint: {checkpoint_path}")
             
@@ -899,14 +897,24 @@ def simulate_vnc_net(params: NeuronConfig, config: SimConfig, batch_size: int = 
     Returns:
         Simulation results array
     """
-    return async_process_batches(params, config, batch_size)
-    # return process_sequential_minibatches(
-    #     params, config, batch_size, save_checkpoints, checkpoint_dir
-    # )
+    num_devices = jax.device_count()
+    print(f"Number of devices available: {num_devices}")
+    if num_devices > 1:
+        print("Running simulation with multiple devices (pmap)")
+        # Use async processing for multi-device setup
+        return async_process_batches(params, config, batch_size, max_concurrent_batches=2)
+    else:
+        print("Running simulation with single device (sequential minibatches)")
+        # Use sequential minibatch processing for single device
+        return process_sequential_minibatches(params, config, batch_size, save_checkpoints, checkpoint_dir)
 
 
 def run_vnc_simulation(cfg: DictConfig) -> jnp.ndarray:
     """Run a complete VNC simulation with the given configuration."""
     params, config = load_vnc_net(cfg)
-    results = simulate_vnc_net(params, config, batch_size=cfg.experiment.batch_size)
+    results = simulate_vnc_net(params, 
+                               config,
+                               batch_size=cfg.experiment.batch_size,
+                               save_checkpoints=cfg.experiment.save_checkpoints,
+                               checkpoint_dir=cfg.paths.ckpt_dir)
     return results
