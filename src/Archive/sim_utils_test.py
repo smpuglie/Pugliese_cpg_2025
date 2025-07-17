@@ -81,6 +81,37 @@ def save_config(params,dir="../../configs"):
 
     return fullConfigPath
 
+def neuron_oscillation_score_old(activity,calculateFrequency=False):
+    """calculate oscillation score for a neuron"""
+    
+    # Normalize
+    activity = activity-np.min(activity)
+    activity = activity/np.max(activity)
+    
+    # Get autocorrelation
+    autocorr = signal.correlate(activity,activity)
+    lags = signal.correlation_lags(len(activity),len(activity))
+    autocorr = autocorr[lags>0]
+    lags = lags[lags>0]
+    
+    peaks, peakProperties = signal.find_peaks(autocorr,height=(None,None),prominence=(None,None))
+
+    if len(peaks) > 1:
+        oscillationScore = np.max(peakProperties["prominences"])
+    else:
+        oscillationScore = 0
+
+    if calculateFrequency:
+        peaks = signal.find_peaks(activity,prominence=0.2)[0]
+        try:
+            frequency = np.mean(1/np.diff(peaks))
+        except:
+            frequency = np.nan
+        
+        return oscillationScore, frequency
+
+    return oscillationScore
+
 def neuron_oscillation_score_helper(activity,prominence):
     activity = activity-np.min(activity)
     activity = 2 * activity/np.max(activity) - 1
@@ -115,37 +146,6 @@ def neuron_oscillation_score(activity,returnFrequency=False,prominence=0.05):
         return score, frequency
     else:
         return score
-
-def neuron_oscillation_score_old(activity,calculateFrequency=False):
-    """calculate oscillation score for a neuron"""
-    
-    # Normalize
-    activity = activity-np.min(activity)
-    activity = activity/np.max(activity)
-    
-    # Get autocorrelation
-    autocorr = signal.correlate(activity,activity)
-    lags = signal.correlation_lags(len(activity),len(activity))
-    autocorr = autocorr[lags>0]
-    lags = lags[lags>0]
-    
-    peaks, peakProperties = signal.find_peaks(autocorr,height=(None,None),prominence=(None,None))
-
-    if len(peaks) > 1:
-        oscillationScore = np.max(peakProperties["prominences"])
-    else:
-        oscillationScore = 0
-
-    if calculateFrequency:
-        peaks = signal.find_peaks(activity,prominence=0.2)[0]
-        try:
-            frequency = np.mean(1/np.diff(peaks))
-        except:
-            frequency = np.nan
-        
-        return oscillationScore, frequency
-
-    return oscillationScore
 
 def sim_oscillation_score(R,activeMnIdxs,start=None,end=None,returnFrequency=False):
     """calculate oscillation score for a simulation"""

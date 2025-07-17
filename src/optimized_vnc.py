@@ -1,3 +1,4 @@
+# Add these modifications to your existing code
 import time
 from typing import NamedTuple, Dict, Any, Optional
 import jax
@@ -25,7 +26,7 @@ from src.sim_utils import (
     make_input,
 )
 
-# Keep your existing config classes
+# Modified NeuronConfig to handle multiple stimulus configurations
 class NeuronConfig(NamedTuple):
     W: jnp.ndarray
     W_table: Any
@@ -33,9 +34,9 @@ class NeuronConfig(NamedTuple):
     a: jnp.ndarray
     threshold: jnp.ndarray
     fr_cap: jnp.ndarray
-    input_currents: jnp.ndarray
+    input_currents_list: list  # Changed from single input_currents to list
     seeds: jnp.ndarray
-    stim_neurons: jnp.ndarray
+    stim_neurons_list: list  # Changed from single stim_neurons to list
     exc_dn_idxs: jnp.ndarray
     inh_dn_idxs: jnp.ndarray
     exc_in_idxs: jnp.ndarray
@@ -138,36 +139,34 @@ def calculate_optimal_batch_size(n_neurons: int, n_timepoints: int, n_devices: i
     
     return optimal_batch_size
 
-# OPTIMIZATION 2: Improved vmapping with better memory layout
-@partial(jit, static_argnums=(19,))  # JIT compile with static run_func
-def run_batch_optimized(W, R0, tAxis, T, dt, inputs, pulseStart, pulseEnd,
-                       tau_batch, threshold_batch, a_batch, frCap_batch, seed_batch, stdvProp_batch,
-                       excDnIdxs, inhDnIdxs, excInIdxs, inhInIdxs, mnIdxs, run_func, r_tol=1e-7, a_tol=1e-9):
-    """Optimized batch processing with better memory layout."""
+# Modified batch processing function to handle multiple stimuli
+@partial(jit, static_argnums=(19,))  # Updated static_argnums index
+def run_batch_optimized_multi_stim(W, R0, tAxis, T, dt, inputs_batch, pulseStart, pulseEnd,
+                                  tau_batch, threshold_batch, a_batch, fr_cap_batch, seed_batch, stdvProp_batch,
+                                  excDnIdxs, inhDnIdxs, excInIdxs, inhInIdxs, mnIdxs, run_func, r_tol=1e-7, a_tol=1e-9):
+    """Optimized batch processing with multiple stimulus configurations."""
     
-    # Use tree_map for better memory handling
     batch_params = {
         'tau': tau_batch,
         'threshold': threshold_batch, 
         'a': a_batch,
-        'fr_cap': frCap_batch,
+        'fr_cap': fr_cap_batch,
         'seed': seed_batch,
-        'stdv_prop': stdvProp_batch
+        'stdv_prop': stdvProp_batch,
+        'inputs': inputs_batch  # Add inputs to batch params
     }
     
     def single_run(params):
         return run_func(
-            W, R0, tAxis, T, dt, inputs, pulseStart, pulseEnd,
+            W, R0, tAxis, T, dt, params['inputs'], pulseStart, pulseEnd,
             params['tau'], params['threshold'], params['a'], params['fr_cap'],
             params['seed'], params['stdv_prop'],
             excDnIdxs, inhDnIdxs, excInIdxs, inhInIdxs, mnIdxs, r_tol, a_tol
         )
     
-    # Use tree_map for efficient vmapping
     batch_results = vmap(single_run)(batch_params)
     return batch_results
 
-# OPTIMIZATION 3: Pipeline processing with overlapped computation and I/O
 class OptimizedSimulator:
     def __init__(self, params: NeuronConfig, config: SimConfig):
         self.params = params
@@ -185,183 +184,175 @@ class OptimizedSimulator:
         else:
             self.run_func = run_no_shuffle
         
+        # Calculate numbers
+        self.n_stim_configs = len(params.input_currents_list)
+        self.n_param_sets = len(params.tau)
+        self.total_combinations = self.n_stim_configs * self.n_param_sets
+        
         # Pre-compile functions
         self._compile_functions()
     
-    def _compile_functions(self):
-        """Pre-compile all JAX functions for better performance."""
-        print("Pre-compiling JAX functions...")
-        
-        # Create dummy data for compilation
-        dummy_size = min(4, len(self.params.tau))
-        dummy_batch = {
-            'tau': self.params.tau[:dummy_size],
-            'threshold': self.params.threshold[:dummy_size],
-            'a': self.params.a[:dummy_size],
-            'fr_cap': self.params.fr_cap[:dummy_size],
-            'seed': self.params.seeds[:dummy_size],
-            'stdv_prop': jnp.array([self.config.noise_stdv_prop] * dummy_size)
-        }
-        
-        # Compile batch function
-        _ = run_batch_optimized(
-            self.W_rw, self.R0, self.config.t_axis, self.config.T, self.config.dt,
-            self.params.input_currents, self.config.pulse_start, self.config.pulse_end,
-            dummy_batch['tau'], dummy_batch['threshold'], dummy_batch['a'], 
-            dummy_batch['fr_cap'], dummy_batch['seed'], dummy_batch['stdv_prop'],
-            self.params.exc_dn_idxs, self.params.inh_dn_idxs, self.params.exc_in_idxs,
-            self.params.inh_in_idxs, self.params.mn_idxs, self.run_func
-        )
-        
-        print("Compilation complete.")
-    
     def process_with_pipeline(self, batch_size: Optional[int] = None, 
                              save_checkpoints: bool = False,
-                             checkpoint_dir: Optional[str] = None) -> jnp.ndarray:
-        """Process simulation with overlapped computation and I/O."""
+                             checkpoint_dir: Optional[str] = None) -> dict:
+        """
+        Process simulation with efficient mixed batching and stimulus tracking.
+        """
         
         n_devices = jax.device_count()
-        n_samples = len(self.params.tau)
         
         if batch_size is None:
             batch_size = calculate_optimal_batch_size(
                 self.config.n_neurons, len(self.config.t_axis), n_devices
             )
         
-        print(f"Processing {n_samples} samples with batch size {batch_size} on {n_devices} devices")
+        print(f"Processing {self.total_combinations} total combinations:")
+        print(f"  {self.n_stim_configs} stimulus configurations")
+        print(f"  {self.n_param_sets} parameter sets per stimulus")
+        print(f"  Batch size: {batch_size}")
+        print(f"  Devices: {n_devices}")
         
-        # Prepare additional parameters
-        if self.config.noise:
-            additional_param = jnp.array([self.config.noise_stdv_prop] * n_samples)
-        else:
-            additional_param = jnp.array([0] * n_samples)
+        # Create work queue with stimulus tracking
+        work_queue = self._create_work_queue()
         
-        # Create batches
-        n_batches = (n_samples + batch_size - 1) // batch_size
-        all_results = []
+        # Process with mixed batching
+        all_results, all_metadata = self._process_multi_device_mixed_batching(
+            work_queue, batch_size, save_checkpoints, checkpoint_dir
+        )
         
-        # Pipeline processing with overlapped I/O
-        if n_devices > 1:
-            results = self._process_multi_device_pipeline(
-                batch_size, n_batches, additional_param, save_checkpoints, checkpoint_dir
-            )
-        else:
-            results = self._process_single_device_pipeline(
-                batch_size, n_batches, additional_param, save_checkpoints, checkpoint_dir
-            )
+        # Organize results by stimulus using metadata
+        results_by_stim = self._organize_results_by_stimulus(all_results, all_metadata)
         
-        return jnp.array(results)
+        return results_by_stim
     
-    def _process_multi_device_pipeline(self, batch_size: int, n_batches: int, 
-                                     additional_param: jnp.ndarray,
-                                     save_checkpoints: bool, checkpoint_dir: Optional[str]) -> list:
-        """Multi-device pipeline processing with pmap."""
+    def _create_work_queue(self) -> list:
+        """Create a work queue with stimulus tracking metadata."""
+        work_queue = []
+        
+        # Prepare standard deviation propagation parameters
+        if self.config.noise:
+            additional_param = self.config.noise_stdv_prop
+        else:
+            additional_param = 0.0
+        
+        # Create work items: (stim_idx, param_idx, parameters)
+        for stim_idx in range(self.n_stim_configs):
+            for param_idx in range(self.n_param_sets):
+                work_item = {
+                    'param_idx': param_idx,
+                    'stim_idx': stim_idx,
+                    'tau': self.params.tau[param_idx],
+                    'threshold': self.params.threshold[param_idx],
+                    'a': self.params.a[param_idx],
+                    'fr_cap': self.params.fr_cap[param_idx],
+                    'seed': self.params.seeds[param_idx],
+                    'stdvProp': additional_param,
+                    'inputs': self.params.input_currents_list[stim_idx]
+                }
+                work_queue.append(work_item)
+        
+        return work_queue
+    
+    
+    def _process_multi_device_mixed_batching(self, work_queue: list, batch_size: int,
+                                            save_checkpoints: bool, checkpoint_dir: Optional[str]) -> tuple:
+        """Process work queue with mixed batching across multiple devices."""
         
         n_devices = jax.device_count()
         
         # Create pmap function
         pmap_run = pmap(
-            lambda tau_batch, threshold_batch, a_batch, frCap_batch, seed_batch, stdvProp_batch: run_batch_optimized(
+            lambda tau_batch, threshold_batch, a_batch, fr_cap_batch, seed_batch, stdvProp_batch, inputs_batch: run_batch_optimized_multi_stim(
                 self.W_rw, self.R0, self.config.t_axis, self.config.T, self.config.dt,
-                self.params.input_currents, self.config.pulse_start, self.config.pulse_end,
-                tau_batch, threshold_batch, a_batch, frCap_batch, seed_batch, stdvProp_batch,
-                excDnIdxs=self.params.exc_dn_idxs, inhDnIdxs=self.params.inh_dn_idxs,
-                excInIdxs=self.params.exc_in_idxs, inhInIdxs=self.params.inh_in_idxs, mnIdxs=self.params.mn_idxs,
-                run_func=self.run_func
+                inputs_batch, self.config.pulse_start, self.config.pulse_end,
+                tau_batch, threshold_batch, a_batch, fr_cap_batch, seed_batch, stdvProp_batch,
+                self.params.exc_dn_idxs, self.params.inh_dn_idxs, self.params.exc_in_idxs,
+                self.params.inh_in_idxs, self.params.mn_idxs, self.run_func
             ),
             axis_name='device'
         )
         
         all_results = []
+        all_metadata = []
         
-        # Process batches with device parallelization
+        n_batches = (len(work_queue) + batch_size - 1) // batch_size
+        
         for batch_idx in range(n_batches):
             start_idx = batch_idx * batch_size
-            end_idx = min((batch_idx + 1) * batch_size, len(self.params.tau))
+            end_idx = min((batch_idx + 1) * batch_size, len(work_queue))
+            actual_batch_size = end_idx - start_idx
             
-            # Extract batch data
-            batch_data = self._extract_batch_data(start_idx, end_idx, additional_param)
+            batch_work = work_queue[start_idx:end_idx]
+            
+            # Extract batch parameters and metadata
+            batch_params, batch_metadata = self._extract_batch_params_and_metadata(batch_work)
             
             # Distribute across devices
-            device_data = self._distribute_to_devices(batch_data, n_devices)
+            device_data = self._distribute_to_devices_mixed_batch(batch_params, n_devices)
             
             # Run on all devices
             batch_results = pmap_run(**device_data)
             
-            # Flatten results
+            # Flatten and trim results
             batch_results_flat = batch_results.reshape(-1, *batch_results.shape[2:])
-            actual_batch_size = end_idx - start_idx
             batch_results_trimmed = batch_results_flat[:actual_batch_size]
-
-            all_results.extend(jax.device_put(batch_results_trimmed,jax.devices('cpu')[0]))
-
-            # Async checkpoint saving
-            if save_checkpoints and checkpoint_dir:
-                self._save_checkpoint_async(batch_results_trimmed, batch_idx, checkpoint_dir)
             
-            del batch_results_trimmed, batch_results_flat
-            gc.collect()  # Force garbage collection
-            print(f"Batch {batch_idx + 1}/{n_batches} completed")
-        
-        return all_results
-    
-    def _process_single_device_pipeline(self, batch_size: int, n_batches: int,
-                                      additional_param: jnp.ndarray,
-                                      save_checkpoints: bool, checkpoint_dir: Optional[str]) -> list:
-        """Single device pipeline processing."""
-        
-        all_results = []
-        
-        for batch_idx in range(n_batches):
-            start_idx = batch_idx * batch_size
-            end_idx = min((batch_idx + 1) * batch_size, len(self.params.tau))
-            
-            # Extract batch data
-            batch_data = self._extract_batch_data(start_idx, end_idx, additional_param)
-            
-            # Run batch
-            batch_results = run_batch_optimized(
-                self.W_rw, self.R0, self.config.t_axis, self.config.T, self.config.dt,
-                self.params.input_currents, self.config.pulse_start, self.config.pulse_end,
-                **batch_data, excDnIdxs=self.params.exc_dn_idxs, inhDnIdxs=self.params.inh_dn_idxs,
-                excInIdxs=self.params.exc_in_idxs, inhInIdxs=self.params.inh_in_idxs, mnIdxs=self.params.mn_idxs,
-                run_func=self.run_func
+            # Clean up NaN/Inf values
+            batch_results_trimmed = jax.device_put(batch_results_trimmed, jax.devices('cpu')[0])
+            batch_results_trimmed = jnp.where(
+                jnp.isinf(batch_results_trimmed) | jnp.isnan(batch_results_trimmed), 
+                0, batch_results_trimmed
             )
             
-            all_results.extend(jax.device_put(batch_results,jax.devices('cpu')[0]))
+            all_results.extend(batch_results_trimmed)
+            all_metadata.extend(batch_metadata)
+            
             # Async checkpoint saving
             if save_checkpoints and checkpoint_dir:
-                self._save_checkpoint_async(batch_results, batch_idx, checkpoint_dir)
+                self._save_checkpoint_async(batch_results_trimmed, f"mixed_batch_{batch_idx}", checkpoint_dir)
             
-            del batch_results
-            gc.collect()  # Force garbage collection
-            print(f"Batch {batch_idx + 1}/{n_batches} completed")
+            del batch_results_trimmed, batch_results_flat
+            gc.collect()
+            print(f"Mixed batch {batch_idx + 1}/{n_batches} completed")
         
-        return all_results
+        return all_results, all_metadata
     
-    def _extract_batch_data(self, start_idx: int, end_idx: int, additional_param: jnp.ndarray) -> dict:
-        """Extract batch data efficiently."""
-        return {
-            'tau_batch': self.params.tau[start_idx:end_idx],
-            'threshold_batch': self.params.threshold[start_idx:end_idx],
-            'a_batch': self.params.a[start_idx:end_idx],
-            'frCap_batch': self.params.fr_cap[start_idx:end_idx],
-            'seed_batch': self.params.seeds[start_idx:end_idx],
-            'stdvProp_batch': additional_param[start_idx:end_idx]
+    def _extract_batch_params_and_metadata(self, batch_work: list) -> tuple:
+        """Extract batch parameters and metadata from work items."""
+        
+        batch_params = {
+            'tau_batch': jnp.array([item['tau'] for item in batch_work]),
+            'threshold_batch': jnp.array([item['threshold'] for item in batch_work]),
+            'a_batch': jnp.array([item['a'] for item in batch_work]),
+            'fr_cap_batch': jnp.array([item['fr_cap'] for item in batch_work]),
+            'seed_batch': jnp.array([item['seed'] for item in batch_work]),
+            'stdvProp_batch': jnp.array([item['stdvProp'] for item in batch_work]),
+            'inputs_batch': jnp.array([item['inputs'] for item in batch_work])
         }
+        
+        batch_metadata = [
+            {'param_idx': item['param_idx'], 'stim_idx': item['stim_idx']} 
+            for item in batch_work
+        ]
+        
+        return batch_params, batch_metadata
     
-    def _distribute_to_devices(self, batch_data: dict, n_devices: int) -> dict:
-        """Distribute batch data across devices for pmap."""
-        batch_size = len(batch_data['tau_batch'])
-
+    def _distribute_to_devices_mixed_batch(self, batch_params: dict, n_devices: int) -> dict:
+        """Distribute mixed batch parameters across devices."""
+        
+        batch_size = len(batch_params['tau_batch'])
+        
         # Pad to make divisible by n_devices
         pad_size = n_devices - (batch_size % n_devices) if batch_size % n_devices != 0 else 0
         
         device_data = {}
-        for key, data in batch_data.items():
+        for key, data in batch_params.items():
             if pad_size > 0:
                 # Pad with the last element
-                padding = jnp.repeat(data[-1:], pad_size, axis=0)
+                if data.ndim == 1:
+                    padding = jnp.repeat(data[-1:], pad_size, axis=0)
+                else:
+                    padding = jnp.repeat(data[-1:], pad_size, axis=0)
                 data_padded = jnp.concatenate([data, padding])
             else:
                 data_padded = data
@@ -371,30 +362,86 @@ class OptimizedSimulator:
         
         return device_data
     
-    def _save_checkpoint_async(self, results: jnp.ndarray, batch_idx: int, checkpoint_dir: str):
+    def _organize_results_by_stimulus(self, all_results: list, all_metadata: list) -> dict:
+        """Organize results by stimulus configuration using metadata."""
+        
+        results_by_stim = {}
+        
+        # Initialize result containers
+        for stim_idx in range(self.n_stim_configs):
+            results_by_stim[stim_idx] = [None] * self.n_param_sets
+        
+        # Place results in correct positions using metadata
+        for result, metadata in zip(all_results, all_metadata):
+            param_idx = metadata['param_idx']
+            stim_idx = metadata['stim_idx']
+            
+            # Validate indices
+            if param_idx >= self.n_param_sets or stim_idx >= self.n_stim_configs:
+                print(f"Warning: Invalid indices param_idx={param_idx}, stim_idx={stim_idx}")
+                continue
+            
+            results_by_stim[stim_idx][param_idx] = result
+        
+        # Convert to arrays and validate completeness
+        for stim_idx in results_by_stim:
+            results_list = results_by_stim[stim_idx]
+            
+            # Check for missing results
+            missing_indices = [i for i, result in enumerate(results_list) if result is None]
+            if missing_indices:
+                print(f"Warning: Missing results for stimulus {stim_idx} at parameter indices: {missing_indices}")
+                # Fill missing with zeros (same shape as other results)
+                ref_shape = next(r.shape for r in results_list if r is not None)
+                for idx in missing_indices:
+                    results_list[idx] = jnp.zeros(ref_shape)
+            
+            results_by_stim[stim_idx] = jnp.array(results_list)
+        
+        return results_by_stim
+    
+    def _save_checkpoint_async(self, results: jnp.ndarray, checkpoint_name: str, checkpoint_dir: str):
         """Save checkpoint asynchronously."""
-        def save_fn():
-            checkpoint_path = Path(checkpoint_dir) / f"batch_{batch_idx:04d}.npy"
-            checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+        def save_checkpoint():
+            os.makedirs(checkpoint_dir, exist_ok=True)
+            checkpoint_path = os.path.join(checkpoint_dir, f"{checkpoint_name}.npy")
             jnp.save(checkpoint_path, results)
         
-        # Run in separate thread
-        threading.Thread(target=save_fn, daemon=True).start()
-
-# OPTIMIZATION 4: Main simulation function with automatic optimization selection
-def simulate_vnc_net_optimized(params: NeuronConfig, config: SimConfig, 
-                              batch_size: Optional[int] = None,
-                              save_checkpoints: bool = False,
-                              checkpoint_dir: Optional[str] = "./checkpoints") -> jnp.ndarray:
-    """
-    Optimized VNC network simulation with automatic performance tuning.
+        # Run in separate thread to avoid blocking
+        threading.Thread(target=save_checkpoint, daemon=True).start()
     
-    Key optimizations:
-    1. Memory-aware batch sizing
-    2. Pre-compiled JAX functions
-    3. Improved vmapping with better memory layout
-    4. Pipeline processing with overlapped I/O
-    5. Efficient device utilization
+    def _compile_functions(self):
+        """Pre-compile all JAX functions for better performance."""
+        print("Pre-compiling JAX functions...")
+        
+        # Create dummy data for compilation
+        dummy_size = min(4, self.total_combinations)
+        dummy_inputs = jnp.array([self.params.input_currents_list[0]] * dummy_size)
+        
+        # Compile batch function
+        _ = run_batch_optimized_multi_stim(
+            self.W_rw, self.R0, self.config.t_axis, self.config.T, self.config.dt,
+            dummy_inputs, self.config.pulse_start, self.config.pulse_end,
+            self.params.tau[:dummy_size], self.params.threshold[:dummy_size], 
+            self.params.a[:dummy_size], self.params.fr_cap[:dummy_size], 
+            self.params.seeds[:dummy_size], 
+            jnp.array([self.config.noise_stdv_prop] * dummy_size),
+            self.params.exc_dn_idxs, self.params.inh_dn_idxs, self.params.exc_in_idxs,
+            self.params.inh_in_idxs, self.params.mn_idxs, self.run_func
+        )
+        
+        print("Compilation complete.")
+
+# Modified main simulation function
+def simulate_vnc_net_optimized_multi_stim(params: NeuronConfig, config: SimConfig, 
+                                         batch_size: Optional[int] = None,
+                                         save_checkpoints: bool = False,
+                                         checkpoint_dir: Optional[str] = "./checkpoints") -> dict:
+    """
+    Optimized VNC network simulation with multiple stimulus configurations.
+    
+    Returns:
+        dict: Results organized by stimulus configuration index
     """
     
     start_time = time.time()
@@ -410,13 +457,15 @@ def simulate_vnc_net_optimized(params: NeuronConfig, config: SimConfig,
     )
     
     total_time = time.time() - start_time
-    n_samples = len(params.tau)
     
-    print(f"\nOptimized simulation completed:")
+    print(f"\nOptimized multi-stimulus simulation completed:")
     print(f"  Total time: {total_time:.2f} seconds")
-    print(f"  Final result shape: {results.shape}")
-    print(f"  Average time per sample: {total_time/n_samples:.4f} seconds")
-    print(f"  Throughput: {n_samples/total_time:.2f} samples/second")
+    print(f"  Stimulus configurations: {len(results)}")
+    for stim_idx, stim_results in results.items():
+        print(f"    Stimulus {stim_idx}: {stim_results.shape}")
+    print(f"  Total combinations: {simulator.total_combinations}")
+    print(f"  Average time per combination: {total_time/simulator.total_combinations:.4f} seconds")
+    print(f"  Throughput: {simulator.total_combinations/total_time:.2f} combinations/second")
     
     return results
 
@@ -503,9 +552,21 @@ def load_vnc_net(cfg: DictConfig) -> tuple[NeuronConfig, SimConfig]:
     validate_config(cfg)
     
     W, W_table = load_connectivity(cfg)
+    if cfg.experiment.dn_screen:
+        allExcDNs = W_table.loc[(W_table["class"] == "descending neuron") & (W_table["predictedNt"] == "acetylcholine")]
+        stimNeurons = allExcDNs.index.to_list()
+        stimNeurons = [[neuron] for neuron in stimNeurons]
+    else:
+        stimNeurons = cfg.experiment.stimNeurons
     sim_config = create_sim_config(cfg, W)
     
-    stim_neurons = jnp.array(cfg.experiment.stimNeurons, dtype=jnp.int32)
+    # Create input currents for each stimulus configuration
+    input_currents_list = []
+    for stim_neurons in stimNeurons:
+        stim_neurons_array = jnp.array(stim_neurons, dtype=jnp.int32)
+        input_currents = jnp.array(make_input(sim_config.n_neurons, stim_neurons_array, sim_config.stim_input))
+        input_currents_list.append(input_currents)
+    
     newkey, subkey = jax.random.split(sim_config.rng_key)
     newkey = jax.random.split(newkey, sim_config.num_sims)
     tau, a, threshold, fr_cap = sample_neuron_parameters(cfg, sim_config.n_neurons, sim_config.num_sims, subkey)
@@ -515,27 +576,56 @@ def load_vnc_net(cfg: DictConfig) -> tuple[NeuronConfig, SimConfig]:
     else:
         a, threshold = set_sizes(W_table["surf_area_um2"].values, a, threshold)
     
-    input_currents = jnp.array(make_input(sim_config.n_neurons, stim_neurons, sim_config.stim_input))
     exc_dn_idxs, inh_dn_idxs, exc_in_idxs, inh_in_idxs, mn_idxs = extract_shuffle_indices(W_table)
     
     params = NeuronConfig(
         W=W, W_table=W_table, tau=tau, a=a, threshold=threshold, fr_cap=fr_cap,
-        input_currents=input_currents, seeds=newkey, stim_neurons=stim_neurons,
+        input_currents_list=input_currents_list, seeds=newkey, 
+        stim_neurons_list=cfg.experiment.stimNeurons,
         exc_dn_idxs=exc_dn_idxs, inh_dn_idxs=inh_dn_idxs, exc_in_idxs=exc_in_idxs,
         inh_in_idxs=inh_in_idxs, mn_idxs=mn_idxs,
     )
     return params, sim_config
 
-def run_vnc_simulation_optimized(cfg: DictConfig) -> jnp.ndarray:
-    """Run an optimized VNC simulation with the given configuration."""
+# Usage example function
+def run_vnc_simulation_optimized(cfg: DictConfig) -> dict:
+    """
+    Run an optimized VNC simulation with multiple stimulus configurations.
+    
+    Args:
+        cfg: Configuration
+        stim_neurons_list: List of stimulus configurations, e.g., [[31, 132], [1208]]
+    
+    Returns:
+        dict: Results organized by stimulus configuration index
+    """
     params, config = load_vnc_net(cfg)
     
-    # Use optimized simulation function
-    results = simulate_vnc_net_optimized(
+    # Use optimized multi-stimulus simulation function
+    results = simulate_vnc_net_optimized_multi_stim(
         params, config,
         batch_size=getattr(cfg.experiment, 'batch_size', None),
         save_checkpoints=getattr(cfg.experiment, 'save_checkpoints', False),
         checkpoint_dir=getattr(cfg.paths, 'ckpt_dir', './checkpoints')
     )
-    
-    return results
+    results2 = jnp.stack([results[n] for n in results.keys()])
+
+    return results2
+
+# Example usage:
+"""
+# Example usage in your main script:
+
+# Define your stimulus configurations
+stim_configs = [[31, 132], [1208]]
+
+# Run the simulation
+results = run_vnc_simulation_multi_stim(cfg, stim_configs)
+
+# Access results for each stimulus configuration
+results_stim_0 = results[0]  # Results for stimulus [31, 132]
+results_stim_1 = results[1]  # Results for stimulus [1208]
+
+print(f"Results for stimulus [31, 132]: {results_stim_0.shape}")
+print(f"Results for stimulus [1208]: {results_stim_1.shape}")
+"""

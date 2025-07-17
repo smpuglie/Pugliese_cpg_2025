@@ -1,5 +1,5 @@
 import time
-from typing import NamedTuple, Dict, Any
+from typing import List, NamedTuple, Dict, Any
 import jax
 import jax.numpy as jnp
 # import numpy as np
@@ -31,7 +31,7 @@ class NeuronConfig(NamedTuple):
     fr_cap: jnp.ndarray
     input_currents: jnp.ndarray
     seeds: jnp.ndarray
-    stim_neurons: jnp.ndarray
+    stim_neurons: List[int]
     exc_dn_idxs: jnp.ndarray
     inh_dn_idxs: jnp.ndarray
     exc_in_idxs: jnp.ndarray
@@ -43,6 +43,7 @@ class SimConfig(NamedTuple):
 
     n_neurons: int
     num_sims: int
+    n_replicates: int
     T: float
     dt: float
     pulse_start: float
@@ -320,7 +321,7 @@ def sample_neuron_parameters(
 def create_sim_config(cfg: DictConfig, W: jnp.ndarray) -> SimConfig:
     """Create simulation configuration from config and connectivity matrix."""
     n_neurons = W.shape[0]
-    num_sims = cfg.experiment.n_replicates
+    num_sims = cfg.experiment.n_replicates * len(cfg.experiment.stimNeurons)
     rng_key = jax.random.PRNGKey(cfg.experiment.seed)
     # seeds = jnp.array(cfg.experiment.seed)
 
@@ -344,6 +345,7 @@ def create_sim_config(cfg: DictConfig, W: jnp.ndarray) -> SimConfig:
     return SimConfig(
         n_neurons=n_neurons,
         num_sims=num_sims,
+        n_replicates=cfg.experiment.n_replicates,
         T=T,
         dt=dt,
         pulse_start=pulse_start,
