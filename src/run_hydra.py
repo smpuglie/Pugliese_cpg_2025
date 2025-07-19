@@ -33,7 +33,7 @@ def main(cfg: DictConfig):
     results = run_vnc_simulation_optimized(cfg)
 
     ##### Save results #####
-    save_path = cfg.paths.ckpt_dir  / "bdn2.npz"
+    save_path = cfg.paths.ckpt_dir  / f"{cfg.experiment.name}.npz"
     print('Saving results to:', save_path)
     sparse.save_npz(save_path, sparse.COO.from_numpy(results))
 

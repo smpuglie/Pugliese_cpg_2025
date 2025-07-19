@@ -3,8 +3,8 @@ import jax.numpy as jnp
 from omegaconf import DictConfig, OmegaConf
 
 
-def shuffle_W(W, seed, idxs, independent: bool = False):
-    key = random.key(seed)
+def shuffle_W(W, key, idxs, independent: bool = False):
+    
     return W.at[:, idxs].set(
         random.permutation(key, W[:, idxs], axis=1, independent=independent)
     )
@@ -12,7 +12,7 @@ def shuffle_W(W, seed, idxs, independent: bool = False):
 
 def full_shuffle(
     W,
-    seedOfSeeds,
+    base_key,
     excDnIdxs,
     inhDnIdxs,
     excInIdxs,
@@ -20,14 +20,13 @@ def full_shuffle(
     mnIdxs,
     independent: bool = False,
 ):
-    keyOfKeys = random.key(seedOfSeeds)
-    seeds = random.randint(keyOfKeys, 5, 0, 100000)
+    keys = random.split(base_key, 5)
 
-    W = shuffle_W(W, seeds[0], excDnIdxs, independent)
-    W = shuffle_W(W, seeds[1], inhDnIdxs, independent)
-    W = shuffle_W(W, seeds[2], excInIdxs, independent)
-    W = shuffle_W(W, seeds[3], inhInIdxs, independent)
-    return shuffle_W(W, seeds[4], mnIdxs, independent)
+    W = shuffle_W(W, keys[0], excDnIdxs, independent)
+    W = shuffle_W(W, keys[1], inhDnIdxs, independent)
+    W = shuffle_W(W, keys[2], excInIdxs, independent)
+    W = shuffle_W(W, keys[3], inhInIdxs, independent)
+    return shuffle_W(W, keys[4], mnIdxs, independent)
 
 
 def extract_shuffle_indices(
