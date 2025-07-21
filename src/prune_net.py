@@ -60,19 +60,20 @@ def update_single_sim_state(state, R, mn_idxs, oscillation_threshold, clip_start
     # Compute oscillation score
     oscillation_score, _ = compute_oscillation_score(R[..., clip_start:], active_mask, prominence=0.05)
 
-    # Initialze removed_stim_neurons
+    # Initialize removed_stim_neurons
     removed_stim_continue, removed_stim_reset = removed_stim_neurons.copy(), removed_stim_neurons.copy()
 
     # Check if oscillation is below threshold
     reset_condition = (oscillation_score < oscillation_threshold) | jnp.isnan(oscillation_score)
-    # print(f"Reset condition: {reset_condition}, Oscillation score: {oscillation_score}")
+
     # === PERMANENTLY REMOVE SILENT INTERNEURONS ===
     # Identify currently silent interneurons - these get permanently added to total_removed_neurons
-    current_silent_interneurons = interneuron_mask & (max_frs <= 0)
+    silent_interneurons = interneuron_mask & (max_frs <= 0)
     # Add silent interneurons to the permanent removal list
-    permanently_removed_base = total_removed_neurons | current_silent_interneurons
+    permanently_removed_base = total_removed_neurons | silent_interneurons
 
     key_next, subkey_continue, subkey_reset = random.split(key, 3)
+
     # === CONTINUE BRANCH LOGIC ===
     # Update probabilities based on firing rates - exclude non-interneurons and permanently removed
     exclude_mask_continue = (~interneuron_mask) | permanently_removed_base
@@ -83,8 +84,12 @@ def update_single_sim_state(state, R, mn_idxs, oscillation_threshold, clip_start
     # Update removed_stim_neurons to include the newly selected neuron
     last_removed_continue = jnp.full(removed_stim_neurons.shape, False, dtype=jnp.bool_)
     last_removed_continue = last_removed_continue.at[neuron_idx_continue].set(True)
+
+    # Only include newly silenced interneurons (not already permanently removed)
+    new_silent_interneurons = silent_interneurons & (~total_removed_neurons)
+    last_removed_continue = last_removed_continue | new_silent_interneurons
+
     removed_stim_continue = removed_stim_continue.at[neuron_idx_continue].set(True)
-    # print(f"Neuron index to continue: {neuron_idx_continue}")
 
     # Update total removed neurons: permanently removed + new stimulated neuron
     total_removed_continue = permanently_removed_base | removed_stim_continue
@@ -94,19 +99,34 @@ def update_single_sim_state(state, R, mn_idxs, oscillation_threshold, clip_start
 
     # Check convergence for continue branch - no new neurons put back
     converged_continue = False
+    
+    # Increment level if a new neuron was removed
+    level_continue = level + 1
 
     # === RESET BRANCH LOGIC ===
-    # In reset: keep permanently removed neurons, but allow re-selection of stimulated neurons
-    # Only restore the last stimulated neuron, keep all silent neurons permanently removed
-    restored_total_removed = jnp.where(last_removed, False, permanently_removed_base)
-    removed_stim_neurons = jnp.where(last_removed, False, removed_stim_neurons)
+    # In reset: restore the last_removed neurons (both stimulated and newly silent)
+    # but keep the permanently silent neurons from previous iterations
 
-    # Track which stimulated neurons are being put back (restored)
-    # Neurons that were in removed_stim_neurons but are NOT in permanently_removed_base are being restored
+    # Separate the components of last_removed
+    last_removed_stim = last_removed & removed_stim_neurons  # stimulated neurons from last_removed
+    last_removed_silent = last_removed & (~removed_stim_neurons)  # silent neurons from last_removed
+
+    # Restore stimulated neurons from last_removed
+    removed_stim_reset = removed_stim_neurons & (~last_removed_stim)
+
+    # For total_removed_neurons: keep permanently silent, but restore the newly silent from last iteration
+    # Keep neurons that were permanently removed before this iteration
+    previously_permanent = total_removed_neurons & (~last_removed)
+    # Keep newly silent neurons that are NOT in last_removed (i.e., current newly silent)
+    current_new_silent = silent_interneurons & (~last_removed)
+
+    total_removed_reset = previously_permanent | current_new_silent
+
+    # Track which neurons are being put back (both stimulated and newly silent from last iteration)
     neurons_put_back_reset = neurons_put_back | last_removed
 
-    # Update probabilities - exclude non-interneurons and permanently removed (including silent)
-    exclude_mask_reset = (~interneuron_mask) | restored_total_removed
+    # Update probabilities - exclude non-interneurons and currently removed
+    exclude_mask_reset = (~interneuron_mask) | total_removed_reset
     p_reset = removal_probability(jnp.ones(len(total_removed_neurons)), exclude_mask_reset)
 
     # Select a new neuron to remove (from remaining active interneurons only)
@@ -114,14 +134,17 @@ def update_single_sim_state(state, R, mn_idxs, oscillation_threshold, clip_start
     last_removed_reset = jnp.full(removed_stim_neurons.shape, False, dtype=jnp.bool_)
     last_removed_reset = last_removed_reset.at[neuron_idx_reset].set(True)
 
-    # print(f"Neuron index to reset: {neuron_idx_reset}")
+    # Add newly selected neuron to stimulated removals
+    removed_stim_reset = removed_stim_reset.at[neuron_idx_reset].set(True)
 
-    # Update total removed neurons: permanently removed + new stimulated
-    total_removed_reset = restored_total_removed | removed_stim_reset
+    # Update total removed neurons: include the newly selected neuron
+    total_removed_reset = total_removed_reset | removed_stim_reset
 
-    # Check convergence for reset branch - no new neurons put back
-    # converged_reset = (neurons_put_back_reset == neurons_put_back).all()
+    # Check convergence for reset branch
     converged_reset = (total_removed_reset == total_removed_neurons).all() & (neurons_put_back_reset == neurons_put_back).all()
+
+    # Keep level the same in reset branch
+    level_reset = level
 
     # === SELECT BETWEEN BRANCHES ===
     # Use jax.lax.select to choose between continue and reset results
@@ -131,18 +154,20 @@ def update_single_sim_state(state, R, mn_idxs, oscillation_threshold, clip_start
     final_p = jax.lax.select(reset_condition, p_reset, p_continue)
     final_min_circuit = jax.lax.select(reset_condition, converged_reset, converged_continue)
     final_neurons_put_back = jax.lax.select(reset_condition, neurons_put_back_reset, neurons_put_back_continue)
+    final_level = jax.lax.select(reset_condition, level_reset, level_continue)
 
     available_neurons = jnp.sum(interneuron_mask & (~final_total_removed) & (~neurons_put_back))
-    final_final_mini_curcuit = final_min_circuit & (available_neurons <= 0)
-    
+    # final_final_mini_circuit = final_min_circuit & (available_neurons <= 0)
+    final_final_mini_circuit = (available_neurons <= 0)
+
     # Update W_mask to reflect all permanently removed neurons
     W_mask_init = jnp.ones_like(W_mask, dtype=jnp.float32)
     removed_float = final_total_removed.astype(jnp.float32)
     kept_mask = 1.0 - removed_float
     W_mask_new = W_mask_init * kept_mask[:, None] * kept_mask[None, :]
-
+    
     # Debug prints to track silent neuron removal
-    jax.debug.print("Silent interneurons found: {count}", count=jnp.sum(current_silent_interneurons))
+    jax.debug.print("Silent interneurons found: {count}", count=jnp.sum(current_new_silent))
     jax.debug.print("Total permanently removed: {count}", count=jnp.sum(final_total_removed))
     jax.debug.print("Available for testing: {count}", count=available_neurons)
     jax.debug.print("Oscillation score: {score}", score=oscillation_score)
@@ -151,14 +176,14 @@ def update_single_sim_state(state, R, mn_idxs, oscillation_threshold, clip_start
     jax.debug.print("Neurons put back: {count}", count=jnp.sum(final_neurons_put_back))
 
     # Ensure min_circuit is a scalar for jax.lax.select
-    min_circuit_scalar = jnp.squeeze(final_final_mini_curcuit)
+    min_circuit_scalar = jnp.squeeze(final_final_mini_circuit)
 
     # Select each field individually based on min_circuit condition
     # If min_circuit is True, keep original values; otherwise use updated values
     return Pruning_state(
         W_mask=jax.lax.select(min_circuit_scalar, W_mask, W_mask_new),
         interneuron_mask=interneuron_mask,  # This never changes
-        level=level,  # This never changes
+        level=final_level,
         total_removed_neurons=jax.lax.select(min_circuit_scalar, total_removed_neurons, final_total_removed),
         neurons_put_back=jax.lax.select(min_circuit_scalar, neurons_put_back, final_neurons_put_back),
         removed_stim_neurons=jax.lax.select(min_circuit_scalar, removed_stim_neurons, final_removed_stim),
@@ -306,7 +331,7 @@ def run_prune_batched(
     return results.reshape(
         sim_params.n_stim_configs, sim_params.n_param_sets,
         sim_params.n_neurons, len(sim_params.t_axis)
-    ), state.W_mask, state.total_removed_neurons
+    ), state
 
 # Main interface function
 def run_vnc_prune_optimized(cfg: DictConfig) -> jnp.ndarray:
@@ -351,7 +376,7 @@ def run_vnc_prune_optimized(cfg: DictConfig) -> jnp.ndarray:
     
     # Run simulation
     start_time = time.time()
-    results, W_mask, total_removed_neurons = run_prune_batched(
+    results, state = run_prune_batched(
         neuron_params, sim_params, simulation_type,
         batch_size=getattr(cfg.experiment, "batch_size", None)
     )
@@ -365,4 +390,30 @@ def run_vnc_prune_optimized(cfg: DictConfig) -> jnp.ndarray:
     print(f"  Time per simulation: {elapsed/total_sims:.4f} seconds")
     print(f"  Results shape: {results.shape}")
 
-    return results, W_mask, total_removed_neurons
+    return results, state
+
+def save_state(state: Pruning_state, path: str):
+    """
+    Save the pruning state to a file.
+    
+    Args:
+        state: Pruning_state object containing simulation state
+    """
+    import pickle
+    with open(path, "wb") as f:
+        pickle.dump(state, f)
+
+def load_state(path: str) -> Pruning_state:
+    """
+    Load the pruning state from a file.
+
+    Args:
+        path: Path to the file containing the pruning state
+
+    Returns:
+        Pruning_state object with the loaded state
+    """
+
+    import pickle
+    with open(path, "rb") as f:
+        return pickle.load(f)
