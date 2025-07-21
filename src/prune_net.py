@@ -43,6 +43,7 @@ def jax_choice(key, a, p):
     # Use categorical sampling
     return random.categorical(key, jnp.log(p_normalized + 1e-10))
 
+
 @partial(jax.jit, static_argnames=('oscillation_threshold', 'clip_start'))
 def update_single_sim_state(state, R, mn_idxs, oscillation_threshold, clip_start=120):
     """Update state for a single simulation - vmap-friendly version with permanent silent neuron removal"""
@@ -62,12 +63,9 @@ def update_single_sim_state(state, R, mn_idxs, oscillation_threshold, clip_start
     # Check if oscillation is below threshold
     reset_condition = (oscillation_score < oscillation_threshold) | jnp.isnan(oscillation_score)
     
-    # Get max firing rates for all neurons
-    max_frs = jnp.max(R, axis=-1)
-    
     # === PERMANENTLY REMOVE SILENT INTERNEURONS ===
     # Identify currently silent interneurons - these get permanently added to total_removed_neurons
-    current_silent_interneurons = (max_frs <= 0) & interneuron_mask
+    current_silent_interneurons = interneuron_mask & (max_frs <= 0)
     # Add silent interneurons to the permanent removal list
     permanently_removed_base = total_removed_neurons | current_silent_interneurons
     
@@ -86,15 +84,21 @@ def update_single_sim_state(state, R, mn_idxs, oscillation_threshold, clip_start
     # Update total removed neurons: permanently removed + new stimulated neuron
     total_removed_continue = permanently_removed_base | removed_stim_continue
     
-    # Check convergence for continue branch
-    available_for_removal_continue = interneuron_mask & (~total_removed_continue)
-    no_more_neurons_continue = ~jnp.any(available_for_removal_continue)
-    converged_continue = no_more_neurons_continue
+    # neurons_put_back remains unchanged in continue branch
+    neurons_put_back_continue = neurons_put_back
+    
+    # Check convergence for continue branch - no new neurons put back
+    converged_continue = False
     
     # === RESET BRANCH LOGIC ===
     # In reset: keep permanently removed neurons, but allow re-selection of stimulated neurons
     # Only restore the last stimulated neuron, keep all silent neurons permanently removed
     restored_total_removed = permanently_removed_base  # Keep all silent neurons removed
+    
+    # Track which stimulated neurons are being put back (restored)
+    # Neurons that were in removed_stim_neurons but are NOT in permanently_removed_base are being restored
+    previously_stimulated_neurons = removed_stim_neurons & (~permanently_removed_base)
+    neurons_put_back_reset = neurons_put_back | previously_stimulated_neurons
     
     # Clear stimulated neuron selections and pick a new one
     reset_removed_stim_neurons = jnp.full_like(removed_stim_neurons, False, dtype=jnp.bool_)
@@ -111,11 +115,8 @@ def update_single_sim_state(state, R, mn_idxs, oscillation_threshold, clip_start
     # Update total removed neurons: permanently removed + new stimulated
     total_removed_reset = restored_total_removed | removed_stim_reset
     
-    # Check convergence for reset branch
-    available_for_removal_reset = interneuron_mask & (~total_removed_reset)
-    no_more_neurons_reset = ~jnp.any(available_for_removal_reset)
-    same_selection = (removed_stim_reset == last_removed).all()
-    converged_reset = same_selection | no_more_neurons_reset
+    # Check convergence for reset branch - no new neurons put back
+    converged_reset = (neurons_put_back_reset == neurons_put_back).all()
     
     # === SELECT BETWEEN BRANCHES ===
     # Use jax.lax.select to choose between continue and reset results
@@ -125,6 +126,7 @@ def update_single_sim_state(state, R, mn_idxs, oscillation_threshold, clip_start
     final_key = jax.lax.select(reset_condition, key_reset, key_continue)
     final_p = jax.lax.select(reset_condition, p_reset, p_continue)
     final_min_circuit = jax.lax.select(reset_condition, converged_reset, converged_continue)
+    final_neurons_put_back = jax.lax.select(reset_condition, neurons_put_back_reset, neurons_put_back_continue)
     
     # Update W_mask to reflect all permanently removed neurons
     W_mask_init = jnp.ones_like(W_mask, dtype=jnp.float32)
@@ -137,7 +139,9 @@ def update_single_sim_state(state, R, mn_idxs, oscillation_threshold, clip_start
     jax.debug.print("Total permanently removed: {count}", count=jnp.sum(final_total_removed))
     jax.debug.print("Available for testing: {count}", count=jnp.sum(interneuron_mask & (~final_total_removed)))
     jax.debug.print("Oscillation score: {score}", score=oscillation_score)
+    jax.debug.print("Reset condition: {condition}", condition=reset_condition)
     jax.debug.print("Converged mini_circuit: {converged}", converged=final_min_circuit)
+    jax.debug.print("Neurons put back: {count}", count=jnp.sum(final_neurons_put_back))
     
     # Ensure min_circuit is a scalar for jax.lax.select
     min_circuit_scalar = jnp.squeeze(min_circuit)
@@ -149,7 +153,7 @@ def update_single_sim_state(state, R, mn_idxs, oscillation_threshold, clip_start
         interneuron_mask=interneuron_mask,  # This never changes
         level=level,  # This never changes
         total_removed_neurons=jax.lax.select(min_circuit_scalar, total_removed_neurons, final_total_removed),
-        neurons_put_back=neurons_put_back,  # This never changes in this function
+        neurons_put_back=jax.lax.select(min_circuit_scalar, neurons_put_back, final_neurons_put_back),
         removed_stim_neurons=jax.lax.select(min_circuit_scalar, removed_stim_neurons, final_removed_stim),
         last_removed=jax.lax.select(min_circuit_scalar, last_removed, final_last_removed),
         remove_p=jax.lax.select(min_circuit_scalar, remove_p, final_p),
@@ -261,7 +265,7 @@ def run_prune_batched(
         # Main pruning loop
         iteration = iter_start
         max_iterations = 200  # Safety limit
-        while ~jnp.all(min_circuit) & (iteration < max_iterations):
+        while ~jnp.all(state.min_circuit) & (iteration < max_iterations):
             start_time = time.time()
             print(f"Iteration {iteration}")
             # Update neuron parameters W_mask based on the current state
@@ -280,7 +284,7 @@ def run_prune_batched(
             iteration += 1
             
             elapsed = time.time() - start_time
-            print(f"  Total time: {elapsed:.2f} seconds")
+            print(f"  Sim time: {elapsed:.2f} seconds")
         
         batch_results = jax.device_put(batch_results, jax.devices("cpu")[0])
         all_results.append(batch_results)
@@ -353,7 +357,6 @@ def run_vnc_prune_optimized(cfg: DictConfig) -> jnp.ndarray:
     print(f"  Total time: {elapsed:.2f} seconds")
     print(f"  Total simulations: {total_sims}")
     print(f"  Time per simulation: {elapsed/total_sims:.4f} seconds")
-    print(f"  Throughput: {total_sims/elapsed:.2f} sims/second")
     print(f"  Results shape: {results.shape}")
 
     return results, W_mask, total_removed_neurons
