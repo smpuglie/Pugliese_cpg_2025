@@ -20,17 +20,18 @@ from src.sim_utils import (
 class NeuronParams(NamedTuple):
     """Immutable neuron parameters for JIT compilation."""
     W: jnp.ndarray
-    tau: jnp.ndarray
-    a: jnp.ndarray
-    threshold: jnp.ndarray
-    fr_cap: jnp.ndarray
+    W_mask: jnp.ndarray # Mask for connectivity
+    tau: jnp.ndarray # Time constants for neurons
+    a: jnp.ndarray # Activation parameters
+    threshold: jnp.ndarray # Thresholds for activation
+    fr_cap: jnp.ndarray # Firing rate caps
     input_currents: jnp.ndarray  # Shape: (n_stim_configs, n_neurons)
-    seeds: jnp.ndarray
-    exc_dn_idxs: jnp.ndarray
-    inh_dn_idxs: jnp.ndarray
-    exc_in_idxs: jnp.ndarray
-    inh_in_idxs: jnp.ndarray
-    mn_idxs: jnp.ndarray
+    seeds: jnp.ndarray # Random seeds for reproducibility
+    exc_dn_idxs: jnp.ndarray # Indices of excitatory descending neurons
+    inh_dn_idxs: jnp.ndarray # Indices of inhibitory descending neurons
+    exc_in_idxs: jnp.ndarray # Indices of excitatory interneurons
+    inh_in_idxs: jnp.ndarray # Indices of inhibitory interneurons
+    mn_idxs: jnp.ndarray # Indices of motor neurons
 
 
 class SimParams(NamedTuple):
@@ -49,6 +50,34 @@ class SimParams(NamedTuple):
     r_tol: float
     a_tol: float
 
+def update_neuron_params(params: NeuronParams, **kwargs) -> NeuronParams:
+    """
+    Update specific parameters of a NeuronParams instance.
+    
+    Args:
+        params: The original NeuronParams instance
+        **kwargs: Keyword arguments specifying which parameters to update
+                 (parameter_name=new_value)
+    
+    Returns:
+        New NeuronParams instance with updated parameters
+        
+    Example:
+        # Update tau and threshold parameters
+        new_params = update_neuron_params(
+            old_params, 
+            tau=new_tau_array,
+            threshold=new_threshold_array
+        )
+    """
+    # Get current values as a dict
+    current_dict = params._asdict()
+    
+    # Update with new values
+    current_dict.update(kwargs)
+    
+    # Create new instance
+    return NeuronParams(**current_dict)
 
 # Core simulation functions - all JIT compiled
 @jit
@@ -67,9 +96,10 @@ def rate_equation_half_tanh(t, R, args):
 @jit
 def reweight_connectivity(W: jnp.ndarray, exc_mult: float, inh_mult: float) -> jnp.ndarray:
     """Reweight connectivity matrix with multipliers."""
-    W_exc = jnp.maximum(W, 0)
-    W_inh = jnp.minimum(W, 0)
-    return jnp.transpose(exc_mult * W_exc + inh_mult * W_inh)
+    Wt = jnp.transpose(W)
+    W_exc = jnp.maximum(Wt, 0)
+    W_inh = jnp.minimum(Wt, 0)
+    return exc_mult * W_exc + inh_mult * W_inh
 
 
 @jit
@@ -186,7 +216,55 @@ def run_baseline(
     )
 
 
+@jit
+def run_with_prune(
+    W: jnp.ndarray,
+    W_mask: jnp.ndarray,
+    tau: jnp.ndarray,
+    a: jnp.ndarray,
+    threshold: jnp.ndarray,
+    fr_cap: jnp.ndarray,
+    inputs: jnp.ndarray,
+    sim_params: SimParams
+) -> jnp.ndarray:
+    """Run pruning simulation."""
+    
+    W_masked = W * W_mask
+    W_reweighted = reweight_connectivity(W_masked, sim_params.exc_multiplier, sim_params.inh_multiplier)
+    return run_single_simulation(
+        W_reweighted, tau, a, threshold, fr_cap, inputs,
+        sim_params.t_axis, sim_params.T, sim_params.dt,
+        sim_params.pulse_start, sim_params.pulse_end,
+        sim_params.r_tol, sim_params.a_tol
+    )
+
+
 # Vectorized batch processing functions
+@jit
+def process_batch_prune(
+    neuron_params: NeuronParams,
+    sim_params: SimParams,
+    batch_indices: jnp.ndarray
+) -> jnp.ndarray:
+    """Process a batch of simulations with pruning."""
+    
+    def single_sim(idx):
+        param_idx = idx % sim_params.n_param_sets
+        stim_idx = idx // sim_params.n_param_sets
+        
+        return run_with_prune(
+            neuron_params.W,
+            neuron_params.W_mask[param_idx],
+            neuron_params.tau[param_idx],
+            neuron_params.a[param_idx],
+            neuron_params.threshold[param_idx],
+            neuron_params.fr_cap[param_idx],
+            neuron_params.input_currents[stim_idx],
+            sim_params
+        )
+    
+    return vmap(single_sim)(batch_indices)
+
 @jit
 def process_batch_shuffle(
     neuron_params: NeuronParams,
@@ -322,6 +400,8 @@ def run_simulation_batched(
         batch_func = process_batch_shuffle
     elif simulation_type == "noise":
         batch_func = process_batch_noise
+    elif simulation_type == "prune":
+        batch_func = process_batch_prune
     else:
         batch_func = process_batch_baseline
     
@@ -381,7 +461,6 @@ def prepare_neuron_params(cfg: DictConfig, W_table: Any) -> NeuronParams:
     
     # Load connectivity
     W = jnp.array(load_W(cfg.experiment.wPath))
-    
     # Sample parameters
     num_sims = cfg.experiment.n_replicates
     n_neurons = W.shape[0]
@@ -423,10 +502,10 @@ def prepare_neuron_params(cfg: DictConfig, W_table: Any) -> NeuronParams:
     
     # Extract shuffle indices
     exc_dn_idxs, inh_dn_idxs, exc_in_idxs, inh_in_idxs, mn_idxs = extract_shuffle_indices(W_table)
-    
+    W_mask = jnp.ones((num_sims, W.shape[0], W.shape[1]), dtype=jnp.float32)
     return NeuronParams(
-        W=W, tau=tau, a=a, threshold=threshold, fr_cap=fr_cap,
-        input_currents=input_currents, seeds=jnp.array([s[0] for s in seeds]),
+        W=W, W_mask=W_mask, tau=tau, a=a, threshold=threshold, fr_cap=fr_cap,
+        input_currents=input_currents, seeds=seeds,
         exc_dn_idxs=exc_dn_idxs, inh_dn_idxs=inh_dn_idxs,
         exc_in_idxs=exc_in_idxs, inh_in_idxs=inh_in_idxs, mn_idxs=mn_idxs
     )

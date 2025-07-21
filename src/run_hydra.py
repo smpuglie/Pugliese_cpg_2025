@@ -1,5 +1,5 @@
 import os 
-# os.environ["CUDA_VISIBLE_DEVICES"] = "0"  # Use GPU 0
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"  # Use GPU 0
 os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.95"
 import jax
 print("JAX backend:", jax.lib.xla_bridge.get_backend().platform)
@@ -10,6 +10,7 @@ from omegaconf import DictConfig, OmegaConf
 from pathlib import Path
 # from src.vnc import run_vnc_simulation
 from src.optimized_vnc import run_vnc_simulation_optimized
+from src.prune_net import run_vnc_prune_optimized
 
 @hydra.main(version_base=None, config_path="../configs", config_name="config")
 def main(cfg: DictConfig):
@@ -29,14 +30,16 @@ def main(cfg: DictConfig):
     ##### Run the simulation #####
     print("Running VNC simulation with the following configuration:")
     # print(OmegaConf.to_yaml(cfg))
-
-    results = run_vnc_simulation_optimized(cfg)
+    if cfg.experiment.name == 'BND2_Stim_Test':
+        results = run_vnc_simulation_optimized(cfg)
+    elif cfg.experiment.name == 'Prune_Test':
+        results, W_mask, total_removed = run_vnc_prune_optimized(cfg)
 
     ##### Save results #####
-    save_path = cfg.paths.ckpt_dir  / f"{cfg.experiment.name}.npz"
-    print('Saving results to:', save_path)
-    sparse.save_npz(save_path, sparse.COO.from_numpy(results))
-
+    print('Saving results to:', cfg.paths.ckpt_dir)
+    sparse.save_npz(cfg.paths.ckpt_dir / f"{cfg.experiment.name}_Rs.npz", sparse.COO.from_numpy(results))
+    sparse.save_npz(cfg.paths.ckpt_dir / f"{cfg.experiment.name}_W_mask.npz", sparse.COO.from_numpy(W_mask))
+    sparse.save_npz(cfg.paths.ckpt_dir / f"{cfg.experiment.name}_total_removed.npz", sparse.COO.from_numpy(total_removed))
 
 if __name__ == "__main__":
     main()

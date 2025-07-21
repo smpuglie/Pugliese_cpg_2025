@@ -1,0 +1,359 @@
+import jax
+import jax.numpy as jnp
+from jax import random
+from functools import partial
+from src.sim_utils import *
+from src.optimized_vnc import *
+
+
+class Pruning_state(NamedTuple):
+    """Parameters for pruning simulation."""
+    W_mask: jnp.ndarray
+    interneuron_mask: jnp.ndarray
+    level: jnp.ndarray
+    total_removed_neurons: jnp.ndarray
+    removed_stim_neurons: jnp.ndarray
+    neurons_put_back: jnp.ndarray
+    last_removed: jnp.ndarray
+    remove_p: jnp.ndarray
+    min_circuit: jnp.ndarray
+    keys: jnp.ndarray
+    
+
+@jax.jit
+def removal_probability(max_frs, neurons_to_exclude_mask):
+    """Assign a probability of removal to each neuron based on their max FR"""
+    tmp = 1.0 / jnp.where(max_frs > 0, max_frs, 1.0)  # Avoid division by zero
+    tmp = jnp.where(jnp.isfinite(tmp), tmp, 0.0)
+    tmp = jnp.where(neurons_to_exclude_mask, 0.0, tmp)
+    
+    # Normalize probabilities
+    p_sum = jnp.sum(tmp)
+    p = jnp.where(p_sum > 0, tmp / p_sum, 0.0)
+    
+    return p
+
+@jax.jit
+def jax_choice(key, a, p):
+    """JAX-compatible choice function"""
+    # Handle edge case where all probabilities are zero
+    p_sum = jnp.sum(p)
+    p_normalized = jnp.where(p_sum > 0, p, jnp.ones_like(p) / len(p))
+    
+    # Use categorical sampling
+    return random.categorical(key, jnp.log(p_normalized + 1e-10))
+
+@partial(jax.jit, static_argnames=('oscillation_threshold', 'clip_start'))
+def update_single_sim_state(state, R, mn_idxs, oscillation_threshold, clip_start=120):
+    """Update state for a single simulation - vmap-friendly version with permanent silent neuron removal"""
+    
+    # Unpack state first to check min_circuit condition
+    (W_mask, interneuron_mask, level, total_removed_neurons, removed_stim_neurons,
+     neurons_put_back, last_removed, remove_p, min_circuit, key) = state
+    
+    # Get active MN activity using JAX-compatible approach
+    max_frs = jnp.max(R, axis=-1)
+    mn_mask = jnp.isin(jnp.arange(R.shape[0]), mn_idxs)
+    active_mask = ((max_frs>0) & mn_mask)
+    
+    # Compute oscillation score
+    oscillation_score, _ = compute_oscillation_score(R[..., clip_start:], active_mask, prominence=0.05)
+    
+    # Check if oscillation is below threshold
+    reset_condition = (oscillation_score < oscillation_threshold) | jnp.isnan(oscillation_score)
+    
+    # Get max firing rates for all neurons
+    max_frs = jnp.max(R, axis=-1)
+    
+    # === PERMANENTLY REMOVE SILENT INTERNEURONS ===
+    # Identify currently silent interneurons - these get permanently added to total_removed_neurons
+    current_silent_interneurons = (max_frs <= 0) & interneuron_mask
+    # Add silent interneurons to the permanent removal list
+    permanently_removed_base = total_removed_neurons | current_silent_interneurons
+    
+    # === CONTINUE BRANCH LOGIC ===
+    # Update probabilities based on firing rates - exclude non-interneurons and permanently removed
+    exclude_mask_continue = (~interneuron_mask) | permanently_removed_base
+    p_continue = removal_probability(max_frs, exclude_mask_continue)
+    
+    # Sample new neuron to remove (only from available interneurons)
+    key_continue, subkey_continue = random.split(key)
+    neuron_idx_continue = jax_choice(subkey_continue, jnp.arange(len(max_frs)), p_continue)
+    
+    # Update removed_stim_neurons to include the newly selected neuron
+    removed_stim_continue = removed_stim_neurons.at[neuron_idx_continue].set(True)
+    
+    # Update total removed neurons: permanently removed + new stimulated neuron
+    total_removed_continue = permanently_removed_base | removed_stim_continue
+    
+    # Check convergence for continue branch
+    available_for_removal_continue = interneuron_mask & (~total_removed_continue)
+    no_more_neurons_continue = ~jnp.any(available_for_removal_continue)
+    converged_continue = no_more_neurons_continue
+    
+    # === RESET BRANCH LOGIC ===
+    # In reset: keep permanently removed neurons, but allow re-selection of stimulated neurons
+    # Only restore the last stimulated neuron, keep all silent neurons permanently removed
+    restored_total_removed = permanently_removed_base  # Keep all silent neurons removed
+    
+    # Clear stimulated neuron selections and pick a new one
+    reset_removed_stim_neurons = jnp.full_like(removed_stim_neurons, False, dtype=jnp.bool_)
+    
+    # Update probabilities - exclude non-interneurons and permanently removed (including silent)
+    exclude_mask_reset = (~interneuron_mask) | restored_total_removed
+    p_reset = removal_probability(jnp.ones(len(total_removed_neurons)), exclude_mask_reset)
+    
+    # Select a new neuron to remove (from remaining active interneurons only)
+    key_reset, subkey_reset = random.split(key)
+    neuron_idx_reset = jax_choice(subkey_reset, jnp.arange(len(total_removed_neurons)), p_reset)
+    removed_stim_reset = reset_removed_stim_neurons.at[neuron_idx_reset].set(True)
+    
+    # Update total removed neurons: permanently removed + new stimulated
+    total_removed_reset = restored_total_removed | removed_stim_reset
+    
+    # Check convergence for reset branch
+    available_for_removal_reset = interneuron_mask & (~total_removed_reset)
+    no_more_neurons_reset = ~jnp.any(available_for_removal_reset)
+    same_selection = (removed_stim_reset == last_removed).all()
+    converged_reset = same_selection | no_more_neurons_reset
+    
+    # === SELECT BETWEEN BRANCHES ===
+    # Use jax.lax.select to choose between continue and reset results
+    final_total_removed = jax.lax.select(reset_condition, total_removed_reset, total_removed_continue)
+    final_removed_stim = jax.lax.select(reset_condition, removed_stim_reset, removed_stim_continue)
+    final_last_removed = jax.lax.select(reset_condition, removed_stim_reset, removed_stim_continue)
+    final_key = jax.lax.select(reset_condition, key_reset, key_continue)
+    final_p = jax.lax.select(reset_condition, p_reset, p_continue)
+    final_min_circuit = jax.lax.select(reset_condition, converged_reset, converged_continue)
+    
+    # Update W_mask to reflect all permanently removed neurons
+    W_mask_init = jnp.ones_like(W_mask, dtype=jnp.float32)
+    removed_float = final_total_removed.astype(jnp.float32)
+    kept_mask = 1.0 - removed_float
+    W_mask_new = W_mask_init * kept_mask[:, None] * kept_mask[None, :]
+    
+    # Debug prints to track silent neuron removal
+    jax.debug.print("Silent interneurons found: {count}", count=jnp.sum(current_silent_interneurons))
+    jax.debug.print("Total permanently removed: {count}", count=jnp.sum(final_total_removed))
+    jax.debug.print("Available for testing: {count}", count=jnp.sum(interneuron_mask & (~final_total_removed)))
+    jax.debug.print("Oscillation score: {score}", score=oscillation_score)
+    jax.debug.print("Converged mini_circuit: {converged}", converged=final_min_circuit)
+    
+    # Ensure min_circuit is a scalar for jax.lax.select
+    min_circuit_scalar = jnp.squeeze(min_circuit)
+    
+    # Select each field individually based on min_circuit condition
+    # If min_circuit is True, keep original values; otherwise use updated values
+    return Pruning_state(
+        W_mask=jax.lax.select(min_circuit_scalar, W_mask, W_mask_new),
+        interneuron_mask=interneuron_mask,  # This never changes
+        level=level,  # This never changes
+        total_removed_neurons=jax.lax.select(min_circuit_scalar, total_removed_neurons, final_total_removed),
+        neurons_put_back=neurons_put_back,  # This never changes in this function
+        removed_stim_neurons=jax.lax.select(min_circuit_scalar, removed_stim_neurons, final_removed_stim),
+        last_removed=jax.lax.select(min_circuit_scalar, last_removed, final_last_removed),
+        remove_p=jax.lax.select(min_circuit_scalar, remove_p, final_p),
+        min_circuit=jax.lax.select(min_circuit_scalar, min_circuit_scalar, final_min_circuit),
+        keys=jax.lax.select(min_circuit_scalar, key, final_key)
+    )
+    
+# Main simulation orchestration functions
+def run_prune_batched(
+    neuron_params: NeuronParams,
+    sim_params: SimParams,
+    simulation_type: str = "baseline",
+    batch_size: Optional[int] = None,
+    oscillation_threshold: float = 0.2,
+    ) -> jnp.ndarray:
+    """
+    Run complete simulation with efficient batching.
+    
+    Args:
+        neuron_params: Neuron parameters
+        sim_params: Simulation parameters
+        simulation_type: "baseline", "shuffle", or "noise"
+        batch_size: Batch size (auto-calculated if None)
+    
+    Returns:
+        Results array of shape (n_stim_configs, n_param_sets, n_neurons, n_timepoints)
+    """
+    
+    total_sims = sim_params.n_stim_configs * sim_params.n_param_sets
+    
+    if batch_size is None:
+        batch_size = calculate_optimal_batch_size(
+            sim_params.n_neurons, len(sim_params.t_axis)
+        )
+    
+    # Select batch processing function
+    if simulation_type == "shuffle":
+        batch_func = process_batch_shuffle
+    elif simulation_type == "noise":
+        batch_func = process_batch_noise
+    elif simulation_type == "prune":
+        batch_func = process_batch_prune
+    else:
+        batch_func = process_batch_baseline
+    
+    # Create parallel version for multiple devices
+    if jax.device_count() > 1:
+        batch_func = pmap(batch_func, axis_name="device", in_axes=(None, None, 0))
+        batch_size = (batch_size // jax.device_count()) * jax.device_count()
+    
+    print(f"Running {total_sims} simulations with batch size {batch_size}")
+    
+    # Process in batches
+    all_results = []
+    n_batches = (total_sims + batch_size - 1) // batch_size
+    
+    for i in range(n_batches):
+        start_idx = i * batch_size
+        end_idx = min((i + 1) * batch_size, total_sims)
+        
+        batch_indices = jnp.arange(start_idx, end_idx)
+        
+        # Pad if necessary for pmap
+        if jax.device_count() > 1 and len(batch_indices) < batch_size:
+            pad_size = batch_size - len(batch_indices)
+            batch_indices = jnp.concatenate([
+                batch_indices, 
+                jnp.repeat(batch_indices[-1], pad_size)
+            ])
+        
+        
+        # mn_idxs = jnp.asarray(w_table.loc[w_table["class"]=="motor neuron"].index.values)
+        mn_idxs = neuron_params.mn_idxs
+        all_neurons = jnp.arange(neuron_params.W.shape[-1])
+        in_idxs = jnp.setdiff1d(all_neurons, mn_idxs)
+
+        clip_start = int(sim_params.pulse_start / sim_params.dt) + 100
+        # Initialize state
+        n_sims = sim_params.n_param_sets * sim_params.n_stim_configs
+        W_mask = jnp.full((n_sims, neuron_params.W.shape[0], neuron_params.W.shape[1]), 1, dtype=jnp.float32)
+        interneuron_mask = jnp.full((n_sims, W_mask.shape[-1]),fill_value=False, dtype=jnp.bool_)
+        interneuron_mask = interneuron_mask.at[:,in_idxs].set(True)
+        level = jnp.zeros((n_sims,1), dtype=jnp.int32)
+        total_removed_neurons = jnp.full((n_sims, W_mask.shape[-1]), False, dtype=jnp.bool)
+        removed_stim_neurons = jnp.full([n_sims, total_removed_neurons.shape[-1]], False, dtype=jnp.bool)
+        neurons_put_back =  jnp.full([n_sims, total_removed_neurons.shape[-1]], False, dtype=jnp.bool)
+        last_removed =  jnp.full([n_sims, total_removed_neurons.shape[-1]], False, dtype=jnp.bool) # Use False for None
+        min_circuit = jnp.full((n_sims,1), False)
+
+        # Initialize probabilities
+        exclude_mask = (~interneuron_mask)
+        p_arrays = jax.vmap(removal_probability)(jnp.ones(len(interneuron_mask)), exclude_mask)
+
+        # initialize pruning state
+        state = Pruning_state(
+            W_mask=W_mask,
+            interneuron_mask=interneuron_mask,
+            level=level,
+            total_removed_neurons=total_removed_neurons,
+            removed_stim_neurons=removed_stim_neurons,
+            neurons_put_back=neurons_put_back,
+            last_removed=last_removed,
+            remove_p=p_arrays,
+            min_circuit=min_circuit,
+            keys=neuron_params.seeds
+        )
+
+        iter_start = 0  # Starting iteration
+        # Main pruning loop
+        iteration = iter_start
+        max_iterations = 200  # Safety limit
+        while ~jnp.all(min_circuit) & (iteration < max_iterations):
+            start_time = time.time()
+            print(f"Iteration {iteration}")
+            # Update neuron parameters W_mask based on the current state
+            neuron_params = update_neuron_params(neuron_params, W_mask=state.W_mask)
+            # Run simulation (this would call your simulation function)
+            # Reshape for devices if using pmap
+            if jax.device_count() > 1:
+                batch_indices = batch_indices.reshape(jax.device_count(), -1)
+                batch_results = batch_func(neuron_params, sim_params, batch_indices)
+                batch_results = batch_results.reshape(-1, *batch_results.shape[2:])
+                batch_results = batch_results[:end_idx - start_idx]  # Remove padding
+            else:
+                batch_results = batch_func(neuron_params, sim_params, batch_indices)
+            
+            state = jax.vmap(update_single_sim_state, in_axes=(0, 0, None, None, None))(state, batch_results, mn_idxs, oscillation_threshold, clip_start)
+            iteration += 1
+            
+            elapsed = time.time() - start_time
+            print(f"  Total time: {elapsed:.2f} seconds")
+        
+        batch_results = jax.device_put(batch_results, jax.devices("cpu")[0])
+        all_results.append(batch_results)
+        print(f"Batch {i + 1}/{n_batches} completed")
+        
+        del batch_results  # Free memory
+        gc.collect()  # Force garbage collection
+    
+    # Combine results
+    results = jnp.concatenate(all_results, axis=0)
+    
+    # Reshape to (n_stim_configs, n_param_sets, n_neurons, n_timepoints)
+    return results.reshape(
+        sim_params.n_stim_configs, sim_params.n_param_sets,
+        sim_params.n_neurons, len(sim_params.t_axis)
+    ), state.W_mask, state.total_removed_neurons
+
+# Main interface function
+def run_vnc_prune_optimized(cfg: DictConfig) -> jnp.ndarray:
+    """
+    Main function to run optimized VNC pruning simulation.
+
+    Args:
+        cfg: Configuration containing all simulation parameters
+        
+    Returns:
+        Results array of shape (n_stim_configs, n_param_sets, n_neurons, n_timepoints)
+    """
+    
+    print("Loading network configuration...")
+    W_table = load_wTable(cfg.experiment.dfPath)
+    
+    # Handle DN screening if specified
+    if getattr(cfg.experiment, "dn_screen", False):
+        all_exc_dns = W_table.loc[
+            (W_table["class"] == "descending neuron") & 
+            (W_table["predictedNt"] == "acetylcholine")
+        ]
+        stim_neurons = [[neuron] for neuron in all_exc_dns.index.to_list()]
+        stim_inputs = [cfg.experiment.stimI[0]] * len(stim_neurons)
+        cfg.experiment.stimNeurons = stim_neurons
+        cfg.experiment.stimI = stim_inputs
+    
+    n_stim_configs = len(cfg.experiment.stimNeurons)
+    
+    # Prepare parameters
+    neuron_params = prepare_neuron_params(cfg, W_table)
+    sim_params = prepare_sim_params(cfg, n_stim_configs, neuron_params.W.shape[0])
+    
+    # Determine simulation type
+    simulation_type = "prune"
+
+    print(f"Running {simulation_type} simulation with:")
+    print(f"  {n_stim_configs} stimulus configurations")
+    print(f"  {sim_params.n_param_sets} parameter sets")
+    print(f"  {sim_params.n_neurons} neurons")
+    print(f"  {len(sim_params.t_axis)} time points")
+    
+    # Run simulation
+    start_time = time.time()
+    results, W_mask, total_removed_neurons = run_prune_batched(
+        neuron_params, sim_params, simulation_type,
+        batch_size=getattr(cfg.experiment, "batch_size", None)
+    )
+    
+    elapsed = time.time() - start_time
+    total_sims = n_stim_configs * sim_params.n_param_sets
+    
+    print(f"\nSimulation completed:")
+    print(f"  Total time: {elapsed:.2f} seconds")
+    print(f"  Total simulations: {total_sims}")
+    print(f"  Time per simulation: {elapsed/total_sims:.4f} seconds")
+    print(f"  Throughput: {total_sims/elapsed:.2f} sims/second")
+    print(f"  Results shape: {results.shape}")
+
+    return results, W_mask, total_removed_neurons

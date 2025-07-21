@@ -125,8 +125,6 @@ def neuron_oscillation_score_helper_jax(activity, prominence):
     frequency = 1 / peak_indices[peak_prominences.argmax(axis=-1)]
     return score, frequency
 
-
-
 @jit
 def neuron_oscillation_score(activity, prominence=0.05):
     """JAX-compatible neuron oscillation score calculation."""
@@ -156,6 +154,41 @@ def neuron_oscillation_score(activity, prominence=0.05):
     )
     
     return score, frequency
+
+@jax.jit
+def compute_oscillation_score(activity, active_mask, prominence=0.05):
+    # Compute scores for all neurons (will be NaN for inactive ones)
+    scores = jax.vmap(
+        lambda activity_row, mask: jax.lax.cond(
+            mask,
+            lambda x: neuron_oscillation_score(x, prominence=prominence),
+            lambda x: (jnp.nan, jnp.nan),
+            activity_row
+        ),
+        in_axes=(0, 0)
+    )(activity, active_mask)
+    score_values, frequencies = scores
+    # Compute mean of valid scores
+    oscillation_score = jnp.nanmean(score_values)
+    frequencies = jnp.nanmean(frequencies)
+    return oscillation_score, frequencies
+
+def extract_nth_filtered_pytree(pytree, n, path_filter, key_list=['tau', 'threshold', 'a', 'fr_cap', 'W_mask']):
+    """
+    path_filter: function that takes key_path tuple and returns True/False
+    """
+    def process_leaf(key_path, leaf):
+        if path_filter(key_path, key_list):
+            return leaf[n:n+1]
+        return leaf
+
+    return jax.tree.map_with_path(process_leaf, pytree)
+
+def path_filter(key_path, key_list):
+    """
+    Filter function that checks if the key_path contains specific keys.
+    """
+    return key_path[0].name in key_list and key_path != []
 
 def load_W(wPath):
     wExt = os.path.splitext(wPath)[1]
