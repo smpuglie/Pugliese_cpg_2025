@@ -43,12 +43,11 @@ def jax_choice(key, a, p):
     # Use categorical sampling
     return random.categorical(key, jnp.log(p_normalized + 1e-10))
 
-
 @partial(jax.jit, static_argnames=('oscillation_threshold', 'clip_start'))
 def update_single_sim_state(state, R, mn_idxs, oscillation_threshold, clip_start=120):
-    """Update state for a single simulation - vmap-friendly version with permanent silent neuron removal"""
+    """Update state for a single simulation - fixed version with proper restoration logic"""
     
-    # Unpack state first to check min_circuit condition
+    # Unpack state
     (W_mask, interneuron_mask, level, total_removed_neurons, removed_stim_neurons,
         neurons_put_back, last_removed, remove_p, min_circuit, key) = state
 
@@ -60,145 +59,163 @@ def update_single_sim_state(state, R, mn_idxs, oscillation_threshold, clip_start
     # Compute oscillation score
     oscillation_score, _ = compute_oscillation_score(R[..., clip_start:], active_mask, prominence=0.05)
 
-    # Initialize removed_stim_neurons
-    removed_stim_continue, removed_stim_reset = removed_stim_neurons.copy(), removed_stim_neurons.copy()
-
-    # Check if oscillation is below threshold
+    # Check if oscillation is below threshold or NaN
     reset_condition = (oscillation_score < oscillation_threshold) | jnp.isnan(oscillation_score)
 
-    # === PERMANENTLY REMOVE SILENT INTERNEURONS ===
-    # Identify currently silent interneurons - these get permanently added to total_removed_neurons
+    # Identify currently silent interneurons (these will be permanently removed)
     silent_interneurons = interneuron_mask & (max_frs <= 0)
-    # Add silent interneurons to the permanent removal list
-    permanently_removed_base = total_removed_neurons | silent_interneurons
-
+    
     key_next, subkey_continue, subkey_reset = random.split(key, 3)
 
-    # === CONTINUE BRANCH LOGIC ===
-    # Update probabilities based on firing rates - exclude non-interneurons and permanently removed
-    exclude_mask_continue = (~interneuron_mask) | permanently_removed_base
+    # === CONTINUE BRANCH: Normal pruning (oscillation is good) ===
+    # Permanently remove silent interneurons
+    total_removed_continue = total_removed_neurons | silent_interneurons
+    
+    # Update probabilities - exclude non-interneurons and removed neurons
+    exclude_mask_continue = (~interneuron_mask) | total_removed_continue
     p_continue = removal_probability(max_frs, exclude_mask_continue)
-
+    
     # Sample new neuron to remove (only from available interneurons)
     neuron_idx_continue = jax_choice(subkey_continue, jnp.arange(len(max_frs)), p_continue)
-    # Update removed_stim_neurons to include the newly selected neuron
-    last_removed_continue = jnp.full(removed_stim_neurons.shape, False, dtype=jnp.bool_)
-    last_removed_continue = last_removed_continue.at[neuron_idx_continue].set(True)
-
-    # Only include newly silenced interneurons (not already permanently removed)
-    new_silent_interneurons = silent_interneurons & (~total_removed_neurons)
-    last_removed_continue = last_removed_continue | new_silent_interneurons
-
-    removed_stim_continue = removed_stim_continue.at[neuron_idx_continue].set(True)
-
-    # Update total removed neurons: permanently removed + new stimulated neuron
-    total_removed_continue = permanently_removed_base | removed_stim_continue
-
-    # neurons_put_back remains unchanged in continue branch
-    neurons_put_back_continue = neurons_put_back
-
-    # Check convergence for continue branch - no new neurons put back
-    converged_continue = False
     
-    # Increment level if a new neuron was removed
+    # Update removed neurons
+    removed_stim_continue = removed_stim_neurons.at[neuron_idx_continue].set(True)
+    total_removed_continue = total_removed_continue.at[neuron_idx_continue].set(True)
+    
+    # Track what was removed this iteration (both silent and stimulated)
+    newly_silent_continue = silent_interneurons & (~total_removed_neurons)  # Only newly silent
+    last_removed_continue = jnp.full(last_removed.shape, False, dtype=jnp.bool_)
+    last_removed_continue = last_removed_continue.at[neuron_idx_continue].set(True)  # Stimulated removal
+    last_removed_continue = last_removed_continue | newly_silent_continue  # Add newly silent
+    
+    # Update other state
     level_continue = level + 1
+    neurons_put_back_continue = neurons_put_back  # Unchanged
+    min_circuit_continue = False  # Not converged yet
 
-    # === RESET BRANCH LOGIC ===
-    # In reset: restore the last_removed neurons (both stimulated and newly silent)
-    # but keep the permanently silent neurons from previous iterations
-
-    # Separate the components of last_removed
-    last_removed_stim = last_removed & removed_stim_neurons  # stimulated neurons from last_removed
-    last_removed_silent = last_removed & (~removed_stim_neurons)  # silent neurons from last_removed
-
-    # Restore stimulated neurons from last_removed
-    removed_stim_reset = removed_stim_neurons & (~last_removed_stim)
-
-    # For total_removed_neurons: keep permanently silent, but restore the newly silent from last iteration
-    # Keep neurons that were permanently removed before this iteration
-    previously_permanent = total_removed_neurons & (~last_removed)
-    # Keep newly silent neurons that are NOT in last_removed (i.e., current newly silent)
-    current_new_silent = silent_interneurons & (~last_removed)
-
-    total_removed_reset = previously_permanent | current_new_silent
-
-    # Track which neurons are being put back (both stimulated and newly silent from last iteration)
-    neurons_put_back_reset = neurons_put_back | last_removed
-
-    # Update probabilities - exclude non-interneurons and currently removed
-    exclude_mask_reset = (~interneuron_mask) | total_removed_reset
-    p_reset = removal_probability(jnp.ones(len(total_removed_neurons)), exclude_mask_reset)
-
-    # Select a new neuron to remove (from remaining active interneurons only)
-    neuron_idx_reset = jax_choice(subkey_reset, jnp.arange(len(total_removed_neurons)), p_reset)
-    last_removed_reset = jnp.full(removed_stim_neurons.shape, False, dtype=jnp.bool_)
-    last_removed_reset = last_removed_reset.at[neuron_idx_reset].set(True)
-
-    # Add newly selected neuron to stimulated removals
-    removed_stim_reset = removed_stim_reset.at[neuron_idx_reset].set(True)
-
-    # Update total removed neurons: include the newly selected neuron
-    total_removed_reset = total_removed_reset | removed_stim_reset
-
-    # Check convergence for reset branch
-    converged_reset = (total_removed_reset == total_removed_neurons).all() & (neurons_put_back_reset == neurons_put_back).all()
-
-    # Keep level the same in reset branch
+    # === RESET BRANCH: Restore last removed and try again ===
+    # Restore ALL neurons from last_removed (both stimulated and those that went silent)
+    # This includes neurons that went silent due to the last stimulated removal
+    
+    # Restore stimulated neurons from last removal
+    removed_stim_reset = removed_stim_neurons & (~last_removed)
+    
+    # For total_removed: keep permanent removals from before last iteration, 
+    # add current silent neurons, but restore all last_removed neurons
+    permanent_before_last = total_removed_neurons & (~last_removed)
+    # Current silent neurons are those silent now (may include some that weren't silent before)
+    # But we need to be careful not to restore neurons that are currently silent due to OTHER reasons
+    # Only add neurons to total_removed if they are silent AND were not in last_removed
+    currently_silent_not_restored = silent_interneurons & (~last_removed)
+    total_removed_reset = permanent_before_last | currently_silent_not_restored
+    
+    # Track neurons being put back - ALL neurons from last_removed
+    # This includes both the stimulated neuron and any neurons that went silent due to that removal
+    restored_neurons = last_removed  # All neurons from last_removed are being restored
+    neurons_put_back_reset = neurons_put_back | restored_neurons
+    
+    # Now select a different neuron to remove (avoid the restored ones)
+    exclude_mask_reset = (~interneuron_mask) | total_removed_reset | restored_neurons
+    p_reset = removal_probability(max_frs, exclude_mask_reset)
+    
+    # Check how many neurons are available
+    available_neurons_reset = jnp.sum(interneuron_mask & (~exclude_mask_reset))
+    
+    # Select neuron to remove
+    neuron_idx_reset = jax_choice(subkey_reset, jnp.arange(len(max_frs)), p_reset)
+    
+    # Only update if we have available neurons (otherwise keep current state)
+    should_remove_new = available_neurons_reset > 0
+    removed_stim_reset = jax.lax.select(
+        should_remove_new,
+        removed_stim_reset.at[neuron_idx_reset].set(True),
+        removed_stim_reset
+    )
+    total_removed_reset = jax.lax.select(
+        should_remove_new,
+        total_removed_reset.at[neuron_idx_reset].set(True),
+        total_removed_reset
+    )
+    
+    # Track what was newly removed this iteration
+    last_removed_reset = jnp.full(last_removed.shape, False, dtype=jnp.bool_)
+    last_removed_reset = jax.lax.select(
+        should_remove_new,
+        last_removed_reset.at[neuron_idx_reset].set(True),
+        last_removed_reset
+    )
+    
+    # Add any newly silent neurons (those that are silent now but weren't in total_removed_neurons before)
+    # These are neurons that became silent due to current network state, not due to last removal
+    newly_silent_reset = silent_interneurons & (~total_removed_neurons) & (~last_removed)
+    last_removed_reset = last_removed_reset | newly_silent_reset
+    
+    # Keep level the same (we're trying again, not progressing)
     level_reset = level
+    
+    # Check if we've converged - either no more neurons to remove OR we're oscillating
+    # Oscillation detection: if we're restoring neurons we've put back before, we're in a loop
+    oscillation_detected = jnp.any(restored_neurons & neurons_put_back)
+    min_circuit_reset = (available_neurons_reset <= 2) | oscillation_detected
 
     # === SELECT BETWEEN BRANCHES ===
     # Use jax.lax.select to choose between continue and reset results
     final_total_removed = jax.lax.select(reset_condition, total_removed_reset, total_removed_continue)
     final_removed_stim = jax.lax.select(reset_condition, removed_stim_reset, removed_stim_continue)
     final_last_removed = jax.lax.select(reset_condition, last_removed_reset, last_removed_continue)
-    final_p = jax.lax.select(reset_condition, p_reset, p_continue)
-    final_min_circuit = jax.lax.select(reset_condition, converged_reset, converged_continue)
     final_neurons_put_back = jax.lax.select(reset_condition, neurons_put_back_reset, neurons_put_back_continue)
     final_level = jax.lax.select(reset_condition, level_reset, level_continue)
+    final_p = jax.lax.select(reset_condition, p_reset, p_continue)
+    final_min_circuit = jax.lax.select(reset_condition, min_circuit_reset, min_circuit_continue)
 
-    available_neurons = jnp.sum(interneuron_mask & (~final_total_removed) & (~neurons_put_back))
-    # final_final_mini_circuit = final_min_circuit & (available_neurons <= 0)
-    final_final_mini_circuit = (available_neurons <= 0)
+    # Calculate available neurons and check for convergence
+    available_neurons = jnp.sum(interneuron_mask & (~final_total_removed))
+    
+    # Check for oscillation: if we're in reset mode and detected oscillation, we've converged
+    oscillation_converged = reset_condition & final_min_circuit
+    size_converged = available_neurons <= 2
+    final_converged = oscillation_converged | size_converged
 
-    # Update W_mask to reflect all permanently removed neurons
+    # Update W_mask to reflect removed neurons
     W_mask_init = jnp.ones_like(W_mask, dtype=jnp.float32)
     removed_float = final_total_removed.astype(jnp.float32)
     kept_mask = 1.0 - removed_float
     W_mask_new = W_mask_init * kept_mask[:, None] * kept_mask[None, :]
-    
-    # Debug prints to track silent neuron removal
-    jax.debug.print("Silent interneurons found: {count}", count=jnp.sum(current_new_silent))
-    jax.debug.print("Total permanently removed: {count}", count=jnp.sum(final_total_removed))
-    jax.debug.print("Available for testing: {count}", count=available_neurons)
+
+    # Convert to scalar for jax.lax.select
+    final_converged_scalar = jnp.squeeze(final_converged)
+
+    # Debug information
     jax.debug.print("Oscillation score: {score}", score=oscillation_score)
-    jax.debug.print("Reset condition: {condition}", condition=reset_condition)
-    jax.debug.print("Converged mini_circuit: {converged}", converged=final_min_circuit)
-    jax.debug.print("Neurons put back: {count}", count=jnp.sum(final_neurons_put_back))
-
-    # Ensure min_circuit is a scalar for jax.lax.select
-    min_circuit_scalar = jnp.squeeze(final_final_mini_circuit)
-
-    # Select each field individually based on min_circuit condition
-    # If min_circuit is True, keep original values; otherwise use updated values
+    jax.debug.print("Reset condition (below threshold): {condition}", condition=reset_condition)
+    jax.debug.print("Available neurons: {count}", count=available_neurons)
+    jax.debug.print("Level: {level}", level=final_level)
+    jax.debug.print("Oscillation detected: {detected}", detected=reset_condition & (final_min_circuit & ~size_converged))
+    jax.debug.print("Final converged: {converged}", converged=final_converged)
+    jax.debug.print("Silent neurons removed: {count}", count=jnp.sum(silent_interneurons))
+    print('\n')
+    
+    # When converged, preserve current state (don't make further changes)
     return Pruning_state(
-        W_mask=jax.lax.select(min_circuit_scalar, W_mask, W_mask_new),
-        interneuron_mask=interneuron_mask,  # This never changes
-        level=final_level,
-        total_removed_neurons=jax.lax.select(min_circuit_scalar, total_removed_neurons, final_total_removed),
-        neurons_put_back=jax.lax.select(min_circuit_scalar, neurons_put_back, final_neurons_put_back),
-        removed_stim_neurons=jax.lax.select(min_circuit_scalar, removed_stim_neurons, final_removed_stim),
-        last_removed=jax.lax.select(min_circuit_scalar, last_removed, final_last_removed),
-        remove_p=jax.lax.select(min_circuit_scalar, remove_p, final_p),
-        min_circuit=jax.lax.select(min_circuit_scalar, min_circuit_scalar, final_min_circuit),
+        W_mask=jax.lax.select(final_converged_scalar, W_mask, W_mask_new),
+        interneuron_mask=interneuron_mask,
+        level=jax.lax.select(final_converged_scalar, level, final_level),
+        total_removed_neurons=jax.lax.select(final_converged_scalar, total_removed_neurons, final_total_removed),
+        neurons_put_back=jax.lax.select(final_converged_scalar, neurons_put_back, final_neurons_put_back),
+        removed_stim_neurons=jax.lax.select(final_converged_scalar, removed_stim_neurons, final_removed_stim),
+        last_removed=jax.lax.select(final_converged_scalar, last_removed, final_last_removed),
+        remove_p=jax.lax.select(final_converged_scalar, remove_p, final_p),
+        min_circuit=final_converged_scalar,
         keys=key_next,
-        )
+    )
+    
 # Main simulation orchestration functions
 def run_prune_batched(
     neuron_params: NeuronParams,
     sim_params: SimParams,
     simulation_type: str = "baseline",
     batch_size: Optional[int] = None,
-    oscillation_threshold: float = 0.2,
+    oscillation_threshold: float = 0.5,
     ) -> jnp.ndarray:
     """
     Run complete simulation with efficient batching.

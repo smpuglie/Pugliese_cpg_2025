@@ -10,7 +10,7 @@ from omegaconf import DictConfig, OmegaConf
 from pathlib import Path
 # from src.vnc import run_vnc_simulation
 from src.optimized_vnc import run_vnc_simulation_optimized
-from src.prune_net import run_vnc_prune_optimized
+from src.prune_net import run_vnc_prune_optimized, save_state
 
 @hydra.main(version_base=None, config_path="../configs", config_name="config")
 def main(cfg: DictConfig):
@@ -33,13 +33,14 @@ def main(cfg: DictConfig):
     if cfg.experiment.name == 'BND2_Stim_Test':
         results = run_vnc_simulation_optimized(cfg)
     elif cfg.experiment.name == 'Prune_Test':
-        results, W_mask, total_removed = run_vnc_prune_optimized(cfg)
+        results, state = run_vnc_prune_optimized(cfg)
 
     ##### Save results #####
     print('Saving results to:', cfg.paths.ckpt_dir)
     sparse.save_npz(cfg.paths.ckpt_dir / f"{cfg.experiment.name}_Rs.npz", sparse.COO.from_numpy(results))
-    sparse.save_npz(cfg.paths.ckpt_dir / f"{cfg.experiment.name}_W_mask.npz", sparse.COO.from_numpy(W_mask))
-    sparse.save_npz(cfg.paths.ckpt_dir / f"{cfg.experiment.name}_total_removed.npz", sparse.COO.from_numpy(total_removed))
+    # sparse.save_npz(cfg.paths.ckpt_dir / f"{cfg.experiment.name}_W_mask.npz", sparse.COO.from_numpy(W_mask))
+    # sparse.save_npz(cfg.paths.ckpt_dir / f"{cfg.experiment.name}_total_removed.npz", sparse.COO.from_numpy(total_removed))
+    save_state(state, cfg.paths.ckpt_dir / f"{cfg.experiment.name}_state.pkl")
 
 if __name__ == "__main__":
     main()
