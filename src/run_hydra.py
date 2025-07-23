@@ -38,9 +38,7 @@ def main(cfg: DictConfig):
     ##### Save results #####
     print('Saving results to:', cfg.paths.ckpt_dir)
     sparse.save_npz(cfg.paths.ckpt_dir / f"{cfg.experiment.name}_Rs.npz", sparse.COO.from_numpy(results))
-    # sparse.save_npz(cfg.paths.ckpt_dir / f"{cfg.experiment.name}_W_mask.npz", sparse.COO.from_numpy(W_mask))
-    # sparse.save_npz(cfg.paths.ckpt_dir / f"{cfg.experiment.name}_total_removed.npz", sparse.COO.from_numpy(total_removed))
-    save_state(state, cfg.paths.ckpt_dir / f"{cfg.experiment.name}_state.pkl")
+    # save_state(state, cfg.paths.ckpt_dir / f"{cfg.experiment.name}_state.pkl")
 
 if __name__ == "__main__":
     main()

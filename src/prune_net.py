@@ -44,7 +44,7 @@ def jax_choice(key, a, p):
     return random.categorical(key, jnp.log(p_normalized + 1e-10))
 
 @partial(jax.jit, static_argnames=('oscillation_threshold', 'clip_start'))
-def update_single_sim_state(state, R, mn_idxs, oscillation_threshold, clip_start=120):
+def update_single_sim_state(state, R, mn_idxs, oscillation_threshold, clip_start=250):
     """Update state for a single simulation - fixed version with proper restoration logic"""
     
     # Unpack state
@@ -317,7 +317,7 @@ def run_prune_batched(
             start_time = time.time()
             print(f"Iteration {iteration}")
             # Update neuron parameters W_mask based on the current state
-            neuron_params = update_neuron_params(neuron_params, W_mask=state.W_mask)
+            neuron_params = update_params(neuron_params, W_mask=state.W_mask)
             # Run simulation (this would call your simulation function)
             # Reshape for devices if using pmap
             if jax.device_count() > 1:

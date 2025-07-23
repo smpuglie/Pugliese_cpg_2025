@@ -50,7 +50,7 @@ class SimParams(NamedTuple):
     r_tol: float
     a_tol: float
 
-def update_neuron_params(params: NeuronParams, **kwargs) -> NeuronParams:
+def update_params(params, **kwargs):
     """
     Update specific parameters of a NeuronParams instance.
     
