@@ -12,7 +12,7 @@ ckpt_list: []
 defaults:
   - _self_
   - neuron_params: default
-  - paths: glados
+  - paths: walle-smpuglie
   - sim: default
   - experiment: default
 

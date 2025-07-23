@@ -170,7 +170,7 @@ def compute_oscillation_score(activity, active_mask, prominence=0.05):
     score_values, frequencies = scores
     # Compute mean of valid scores
     oscillation_score = jnp.nanmean(score_values)
-    frequencies = jnp.nanmean(frequencies)
+    frequencies = jnp.nanmean(jnp.where(jnp.isinf(frequencies),jnp.nan,frequencies))
     return oscillation_score, frequencies
 
 def extract_nth_filtered_pytree(pytree, n, path_filter, key_list=['tau', 'threshold', 'a', 'fr_cap', 'W_mask']):
