@@ -148,7 +148,7 @@ def plot_R_traces_stacked_by_module(R,neuronData,colorMapper=None,figsize=(6,4),
     plt.yticks([0,space])
     plt.xlim(xlimits)
     ax.spines[["left","top","right"]].set_visible(False)
-    ax.grid(axis="x",color="lightgrey",linestyle="--")
+    # ax.grid(axis="x",color="lightgrey",linestyle="--")
     fig = plt.gcf()
     fig.set_figheight(0.5*nTraces)
 

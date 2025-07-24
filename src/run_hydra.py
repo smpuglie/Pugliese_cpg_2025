@@ -11,6 +11,7 @@ from pathlib import Path
 # from src.vnc import run_vnc_simulation
 from src.optimized_vnc import run_vnc_simulation_optimized
 from src.prune_net import run_vnc_prune_optimized, save_state
+import gc
 
 @hydra.main(version_base=None, config_path="../configs", config_name="config")
 def main(cfg: DictConfig):
@@ -35,6 +36,7 @@ def main(cfg: DictConfig):
     else:
         results = run_vnc_simulation_optimized(cfg)
 
+    gc.collect()
     ##### Save results #####
     print('Saving results to:', cfg.paths.ckpt_dir)
     sparse.save_npz(cfg.paths.ckpt_dir / f"{cfg.experiment.name}_Rs.npz", sparse.COO.from_numpy(results))
