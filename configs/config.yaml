@@ -13,7 +13,7 @@ defaults:
   - _self_
   - neuron_params: default
   - paths: glados
-  - sim: NoisyInput
+  - sim: default
   - experiment: Stim_Neurons
 
 

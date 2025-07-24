@@ -20,7 +20,6 @@ from src.sim_utils import (
 class NeuronParams(NamedTuple):
     """Immutable neuron parameters for JIT compilation."""
     W: jnp.ndarray
-    W_mask: jnp.ndarray # Mask for connectivity
     tau: jnp.ndarray # Time constants for neurons
     a: jnp.ndarray # Activation parameters
     threshold: jnp.ndarray # Thresholds for activation
@@ -32,6 +31,7 @@ class NeuronParams(NamedTuple):
     exc_in_idxs: jnp.ndarray # Indices of excitatory interneurons
     inh_in_idxs: jnp.ndarray # Indices of inhibitory interneurons
     mn_idxs: jnp.ndarray # Indices of motor neurons
+    W_mask: Optional[jnp.ndarray]=None # Mask for connectivity
 
 
 class SimParams(NamedTuple):
@@ -510,7 +510,9 @@ def prepare_neuron_params(cfg: DictConfig, W_table: Any) -> NeuronParams:
     
     # Extract shuffle indices
     exc_dn_idxs, inh_dn_idxs, exc_in_idxs, inh_in_idxs, mn_idxs = extract_shuffle_indices(W_table)
-    W_mask = jnp.ones((num_sims, W.shape[0], W.shape[1]), dtype=jnp.float32)
+    if cfg.sim.prune_network:
+        W_mask = jnp.ones((num_sims, W.shape[0], W.shape[1]), dtype=jnp.float32)
+    else: W_mask = None
     return NeuronParams(
         W=W, W_mask=W_mask, tau=tau, a=a, threshold=threshold, fr_cap=fr_cap,
         input_currents=input_currents, seeds=seeds,
