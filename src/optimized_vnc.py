@@ -3,6 +3,7 @@ import time
 from typing import NamedTuple, Dict, Any, Optional, Tuple, List
 import jax
 import jax.numpy as jnp
+import numpy as np
 from diffrax import Dopri5, ODETerm, PIDController, SaveAt, diffeqsolve
 from jax import vmap, jit, random, pmap, lax
 from omegaconf import DictConfig
@@ -447,13 +448,15 @@ def run_simulation_batched(
             batch_results = batch_func(neuron_params, sim_params, batch_indices)
         
         batch_results = jax.device_put(batch_results, jax.devices("cpu")[0])
-        all_results.append(batch_results)
+        all_results.append(np.asarray(batch_results))
         print(f"Batch {i + 1}/{n_batches} completed")
         del batch_results  # Free memory
         gc.collect()  # Force garbage collection
     
     # Combine results
-    results = jnp.concatenate(all_results, axis=0)
+    del neuron_params
+    gc.collect()  # Free memory
+    results = np.concatenate(all_results, axis=0)
     
     # Reshape to (n_stim_configs, n_param_sets, n_neurons, n_timepoints)
     return results.reshape(
