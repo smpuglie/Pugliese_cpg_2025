@@ -31,5 +31,5 @@ hydra:
     # dir: ${paths.base_dir}/${hydra:job.override_dirname}
     dir: ${paths.base_dir}/run_id=${run_id}
   sweep:
-    dir: ${paths.base_dir}
+    dir: ${paths.base_dir}/run_id=${run_id}
     subdir: ${hydra.job.override_dirname}
