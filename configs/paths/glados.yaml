@@ -3,7 +3,7 @@ user: eabe
 # set the directory where the output files get saved
 cwd_dir:  /home/${paths.user}/Research/Github/Pugliese_2025/
 base_dir: /data/users/${paths.user}/Pugliese_2025/${experiment.name}/${version}
-save_dir: ${paths.base_dir}/run_id=${run_id}/${hydra:job.num}
+save_dir: ${paths.base_dir}/run_id=${run_id}/${hydra:job.override_dirname}
 log_dir:  ${paths.save_dir}/logs/
 ckpt_dir: ${paths.save_dir}/ckpt/
 fig_dir:  ${paths.save_dir}/figures/
