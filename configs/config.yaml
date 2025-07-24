@@ -1,9 +1,9 @@
 ##### Easy Access Variables #####
 # if set to positive integer, overrides the default
-version: 'debug'
-seed: 42
+version: 'debug' # stim-replicates
+seed: None
 num_gpus: ''
-run_id: 'Testing'
+run_id: 'walle'
 load_jobid: ''
 note: ''
 ckpt_list: []
