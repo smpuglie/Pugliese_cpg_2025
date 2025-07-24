@@ -22,7 +22,7 @@ def main(cfg: DictConfig):
             cfg.paths[k].mkdir(parents=True, exist_ok=True)
 
     ##### Save config file to the log directory #####
-    config_path = cfg.paths.log_dir / "config.yaml"
+    config_path = cfg.paths.log_dir / "run_config.yaml"
     if not config_path.exists():
         OmegaConf.save(cfg, config_path)
         print(f"Config saved to {config_path}")    

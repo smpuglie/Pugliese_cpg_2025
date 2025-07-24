@@ -8,11 +8,11 @@ batch_size:
 dn_screen: False
 stimNeurons: 
   - [31, 132]
-  - [1208]
+  # - [1208]
 removeNeurons: []
 stimI: 
   - [250]
-  - [65]
+  # - [65]
 seed: 1
 saveFigs: True
 useTsp: False

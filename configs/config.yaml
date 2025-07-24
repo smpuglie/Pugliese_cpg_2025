@@ -14,7 +14,7 @@ defaults:
   - neuron_params: default
   - paths: walle-smpuglie
   - sim: default
-  - experiment: default
+  - experiment: Stim_Neurons
 
 
 # set the directory where the output files get saved
@@ -26,10 +26,11 @@ hydra:
             - paths
             - version
             - dataset
+            - run_id
 
   run:
     # dir: ${paths.base_dir}/${hydra:job.override_dirname}
     dir: ${paths.base_dir}/run_id=${run_id}
   sweep:
-    dir: ${paths.base_dir}
+    dir: ${paths.base_dir}/run_id=${run_id}
     subdir: ${hydra.job.override_dirname}

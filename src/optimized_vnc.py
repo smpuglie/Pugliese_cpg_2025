@@ -20,7 +20,6 @@ from src.sim_utils import (
 class NeuronParams(NamedTuple):
     """Immutable neuron parameters for JIT compilation."""
     W: jnp.ndarray
-    W_mask: jnp.ndarray # Mask for connectivity
     tau: jnp.ndarray # Time constants for neurons
     a: jnp.ndarray # Activation parameters
     threshold: jnp.ndarray # Thresholds for activation
@@ -32,6 +31,7 @@ class NeuronParams(NamedTuple):
     exc_in_idxs: jnp.ndarray # Indices of excitatory interneurons
     inh_in_idxs: jnp.ndarray # Indices of inhibitory interneurons
     mn_idxs: jnp.ndarray # Indices of motor neurons
+    W_mask: Optional[jnp.ndarray]=None # Mask for connectivity
 
 
 class SimParams(NamedTuple):
@@ -49,6 +49,7 @@ class SimParams(NamedTuple):
     noise_stdv_prop: float
     r_tol: float
     a_tol: float
+    noise_stdv: jnp.ndarray  # Standard deviation for noise, if applicable
 
 def update_params(params, **kwargs):
     """
@@ -83,9 +84,9 @@ def update_params(params, **kwargs):
 @jit
 def rate_equation_half_tanh(t, R, args):
     """ODE rate equation with half-tanh activation."""
-    inputs, pulse_start, pulse_end, tau, weighted_W, threshold, a, fr_cap = args
+    inputs, pulse_start, pulse_end, tau, weighted_W, threshold, a, fr_cap, key, noise_stdv = args
     pulse_active = (t >= pulse_start) & (t <= pulse_end)
-    I = inputs * pulse_active
+    I = inputs * pulse_active + pulse_active*jax.random.normal(key, shape=inputs.shape) * noise_stdv  # Add noise to inputs
     total_input = I + jnp.dot(weighted_W, R)
     activation = jnp.maximum(
         fr_cap * jnp.tanh((a / fr_cap) * (total_input - threshold)), 0
@@ -121,13 +122,15 @@ def run_single_simulation(
     threshold: jnp.ndarray,
     fr_cap: jnp.ndarray,
     inputs: jnp.ndarray,
+    noise_stdv: jnp.ndarray,
     t_axis: jnp.ndarray,
     T: float,
     dt: float,
     pulse_start: float,
     pulse_end: float,
     r_tol: float,
-    a_tol: float
+    a_tol: float,
+    key: jnp.ndarray,
 ) -> jnp.ndarray:
     """Run a single simulation with given parameters."""
     R0 = jnp.zeros(W.shape[1])
@@ -139,7 +142,7 @@ def run_single_simulation(
     
     solution = diffeqsolve(
         term, solver, 0, T, dt, R0,
-        args=(inputs, pulse_start, pulse_end, tau, W, threshold, a, fr_cap),
+        args=(inputs, pulse_start, pulse_end, tau, W, threshold, a, fr_cap, key, noise_stdv),
         saveat=saveat, stepsize_controller=controller,
         max_steps=100000, throw=False
     )
@@ -154,7 +157,7 @@ def run_with_shuffle(
     threshold: jnp.ndarray,
     fr_cap: jnp.ndarray,
     inputs: jnp.ndarray,
-    seed: int,
+    seed: jnp.ndarray,
     shuffle_indices: Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray],
     sim_params: SimParams
 ) -> jnp.ndarray:
@@ -167,7 +170,7 @@ def run_with_shuffle(
         W_reweighted, tau, a, threshold, fr_cap, inputs,
         sim_params.t_axis, sim_params.T, sim_params.dt,
         sim_params.pulse_start, sim_params.pulse_end,
-        sim_params.r_tol, sim_params.a_tol
+        sim_params.r_tol, sim_params.a_tol, seed,
     )
 
 
@@ -179,7 +182,7 @@ def run_with_noise(
     threshold: jnp.ndarray,
     fr_cap: jnp.ndarray,
     inputs: jnp.ndarray,
-    seed: int,
+    seed: jnp.ndarray,
     noise_stdv_prop: float,
     sim_params: SimParams
 ) -> jnp.ndarray:
@@ -191,7 +194,7 @@ def run_with_noise(
         W_reweighted, tau, a, threshold, fr_cap, inputs,
         sim_params.t_axis, sim_params.T, sim_params.dt,
         sim_params.pulse_start, sim_params.pulse_end,
-        sim_params.r_tol, sim_params.a_tol
+        sim_params.r_tol, sim_params.a_tol, seed
     )
 
 
@@ -203,16 +206,18 @@ def run_baseline(
     threshold: jnp.ndarray,
     fr_cap: jnp.ndarray,
     inputs: jnp.ndarray,
-    sim_params: SimParams
+    noise_stdv: jnp.ndarray,
+    sim_params: SimParams,
+    seed: jnp.ndarray
 ) -> jnp.ndarray:
     """Run baseline simulation without shuffle or noise."""
     W_reweighted = reweight_connectivity(W, sim_params.exc_multiplier, sim_params.inh_multiplier)
     
     return run_single_simulation(
-        W_reweighted, tau, a, threshold, fr_cap, inputs,
+        W_reweighted, tau, a, threshold, fr_cap, inputs, noise_stdv, 
         sim_params.t_axis, sim_params.T, sim_params.dt,
         sim_params.pulse_start, sim_params.pulse_end,
-        sim_params.r_tol, sim_params.a_tol
+        sim_params.r_tol, sim_params.a_tol, seed, 
     )
 
 
@@ -344,7 +349,9 @@ def process_batch_baseline(
             neuron_params.threshold[param_idx],
             neuron_params.fr_cap[param_idx],
             neuron_params.input_currents[stim_idx],
-            sim_params
+            sim_params.noise_stdv,
+            sim_params,
+            neuron_params.seeds[param_idx]
         )
     
     return vmap(single_sim)(batch_indices)
@@ -484,8 +491,9 @@ def prepare_neuron_params(cfg: DictConfig, W_table: Any) -> NeuronParams:
         keys[3], cfg.neuron_params.frcapMean, cfg.neuron_params.frcapStdv,
         (num_sims, n_neurons)
     )
+
     seeds = jax.random.split(keys[4], num_sims)
-    
+
     # Apply size scaling
     if "size" in W_table:
         a, threshold = set_sizes(W_table["size"].values, a, threshold)
@@ -502,12 +510,14 @@ def prepare_neuron_params(cfg: DictConfig, W_table: Any) -> NeuronParams:
     
     # Extract shuffle indices
     exc_dn_idxs, inh_dn_idxs, exc_in_idxs, inh_in_idxs, mn_idxs = extract_shuffle_indices(W_table)
-    W_mask = jnp.ones((num_sims, W.shape[0], W.shape[1]), dtype=jnp.float32)
+    if cfg.sim.prune_network:
+        W_mask = jnp.ones((num_sims, W.shape[0], W.shape[1]), dtype=jnp.float32)
+    else: W_mask = None
     return NeuronParams(
         W=W, W_mask=W_mask, tau=tau, a=a, threshold=threshold, fr_cap=fr_cap,
         input_currents=input_currents, seeds=seeds,
         exc_dn_idxs=exc_dn_idxs, inh_dn_idxs=inh_dn_idxs,
-        exc_in_idxs=exc_in_idxs, inh_in_idxs=inh_in_idxs, mn_idxs=mn_idxs
+        exc_in_idxs=exc_in_idxs, inh_in_idxs=inh_in_idxs, mn_idxs=mn_idxs,
     )
 
 
@@ -530,7 +540,8 @@ def prepare_sim_params(cfg: DictConfig, n_stim_configs: int, n_neurons: int) -> 
         inh_multiplier=float(cfg.neuron_params.inhibitoryMultiplier),
         noise_stdv_prop=getattr(cfg.sim, "noiseStdvProp", 0.1),
         r_tol=getattr(cfg.sim, "rtol", 1e-7),
-        a_tol=getattr(cfg.sim, "atol", 1e-9)
+        a_tol=getattr(cfg.sim, "atol", 1e-9),        
+        noise_stdv=cfg.sim.noiseStdv
     )
 
 
