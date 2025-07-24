@@ -14,4 +14,4 @@ shuffle: False
 noise: False
 noiseStdvProp: 0.1
 noiseMean: 0.0
-noiseStdv: 0.0
+noiseStdv: 0.1

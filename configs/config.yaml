@@ -13,8 +13,8 @@ defaults:
   - _self_
   - neuron_params: default
   - paths: glados
-  - sim: default
-  - experiment: default
+  - sim: NoisyInput
+  - experiment: Stim_Neurons
 
 
 # set the directory where the output files get saved
