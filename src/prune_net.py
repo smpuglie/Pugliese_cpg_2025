@@ -62,12 +62,12 @@ def update_single_sim_state(state, R, mn_idxs, oscillation_threshold, clip_start
     # Check if oscillation is below threshold or NaN
     reset_condition = (oscillation_score < oscillation_threshold) | jnp.isnan(oscillation_score)
 
-    # Identify currently silent interneurons (these will be permanently removed)
-    silent_interneurons = interneuron_mask & (max_frs <= 0)
-    
     key_next, subkey_continue, subkey_reset = random.split(key, 3)
 
     # === CONTINUE BRANCH: Normal pruning (oscillation is good) ===
+    # Identify currently silent interneurons (these will be permanently removed)
+    silent_interneurons = interneuron_mask & (max_frs <= 0)
+    
     # Permanently remove silent interneurons
     total_removed_continue = total_removed_neurons | silent_interneurons
     
@@ -106,7 +106,7 @@ def update_single_sim_state(state, R, mn_idxs, oscillation_threshold, clip_start
     # Current silent neurons are those silent now (may include some that weren't silent before)
     # But we need to be careful not to restore neurons that are currently silent due to OTHER reasons
     # Only add neurons to total_removed if they are silent AND were not in last_removed
-    currently_silent_not_restored = silent_interneurons & (~last_removed)
+    currently_silent_not_restored = (~last_removed)
     total_removed_reset = permanent_before_last | currently_silent_not_restored
     
     # Track neurons being put back - ALL neurons from last_removed
@@ -434,3 +434,21 @@ def load_state(path: str) -> Pruning_state:
     import pickle
     with open(path, "rb") as f:
         return pickle.load(f)
+    
+    
+    
+    
+    
+'''
+the removal of silent interneurons is permanent. The silent neurons are only ever taken out on sims that passed the oscillation score threshold so there shouldn’t be a case where you took a neuron out that caused score < threshold and have silent neurons to put back alongside it.
+yes I exclude neurons that were already put back this “round” when sampling ones to removed - this is the neuronsPutBack list
+the convergence works like this:
+start with the full network, remove neurons and have the ones you had to put back in a list (neuronsPutBack). Once you have no interneurons left in the circuit that aren’t already on this list this “round” is done.
+start another “round” with the network that you’re left with: do the same procedure again on this smaller set of interneurons. Then compare the new list of neuronsPutBack with the previous list (prevNeuronsPutBack). If these two lists are not the same, repeat. If they are the same, that means you tried to remove all the neurons you started with and you couldn’t remove any of them. That’s when you converge.
+if ~np.isfinite(np.sum(p)):
+    # NO NEURONS LEFT TO REMOVE
+    if set(neuronsPutBack) == set(prevNeuronsPutBack):
+        print("converged to minimal circuit")
+        return params
+        
+'''
