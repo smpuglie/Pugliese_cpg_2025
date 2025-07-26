@@ -105,13 +105,11 @@ def reweight_connectivity(W: jnp.ndarray, exc_mult: float, inh_mult: float) -> j
 
 
 @jit
-def add_noise_to_weights(W: jnp.ndarray, seed: int, stdv_prop: float) -> jnp.ndarray:
+def add_noise_to_weights(W: jnp.ndarray, key: jnp.ndarray, stdv_prop: float) -> jnp.ndarray:
     """Add truncated normal noise to weight matrix."""
     stdvs = W * stdv_prop
-    key = random.key(seed)
-    noise = random.truncated_normal(
-        key, lower=-1.0 / stdv_prop, upper=jnp.inf, shape=W.shape
-    )
+    noise = sample_trunc_normal(key, mean=0.0, stdev=stdv_prop, shape=W.shape)
+
     return W + stdvs * noise
 
 
@@ -168,7 +166,7 @@ def run_with_shuffle(
     W_reweighted = reweight_connectivity(W_shuffled, sim_params.exc_multiplier, sim_params.inh_multiplier)
     
     return run_single_simulation(
-        W_reweighted, tau, a, threshold, fr_cap, inputs,
+        W_reweighted, tau, a, threshold, fr_cap, inputs, sim_params.noise_stdv,
         sim_params.t_axis, sim_params.T, sim_params.dt,
         sim_params.pulse_start, sim_params.pulse_end,
         sim_params.r_tol, sim_params.a_tol, seed,
@@ -192,7 +190,7 @@ def run_with_noise(
     W_reweighted = reweight_connectivity(W_noisy, sim_params.exc_multiplier, sim_params.inh_multiplier)
     
     return run_single_simulation(
-        W_reweighted, tau, a, threshold, fr_cap, inputs,
+        W_reweighted, tau, a, threshold, fr_cap, inputs, sim_params.noise_stdv,
         sim_params.t_axis, sim_params.T, sim_params.dt,
         sim_params.pulse_start, sim_params.pulse_end,
         sim_params.r_tol, sim_params.a_tol, seed
@@ -207,7 +205,6 @@ def run_baseline(
     threshold: jnp.ndarray,
     fr_cap: jnp.ndarray,
     inputs: jnp.ndarray,
-    noise_stdv: jnp.ndarray,
     sim_params: SimParams,
     seed: jnp.ndarray
 ) -> jnp.ndarray:
@@ -215,7 +212,7 @@ def run_baseline(
     W_reweighted = reweight_connectivity(W, sim_params.exc_multiplier, sim_params.inh_multiplier)
     
     return run_single_simulation(
-        W_reweighted, tau, a, threshold, fr_cap, inputs, noise_stdv, 
+        W_reweighted, tau, a, threshold, fr_cap, inputs, sim_params.noise_stdv, 
         sim_params.t_axis, sim_params.T, sim_params.dt,
         sim_params.pulse_start, sim_params.pulse_end,
         sim_params.r_tol, sim_params.a_tol, seed, 
@@ -350,7 +347,6 @@ def process_batch_baseline(
             neuron_params.threshold[param_idx],
             neuron_params.fr_cap[param_idx],
             neuron_params.input_currents[stim_idx],
-            sim_params.noise_stdv,
             sim_params,
             neuron_params.seeds[param_idx]
         )

@@ -27,6 +27,7 @@ hydra:
             - version
             - dataset
             - run_id
+            - experiment
 
   run:
     # dir: ${paths.base_dir}/${hydra:job.override_dirname}
