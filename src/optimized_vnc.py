@@ -448,7 +448,7 @@ def run_simulation_batched(
             batch_results = batch_func(neuron_params, sim_params, batch_indices)
         
         batch_results = jax.device_put(batch_results, jax.devices("cpu")[0])
-        all_results.append(np.asarray(batch_results))
+        all_results.append(np.asarray(batch_results, dtype=np.float32))
         print(f"Batch {i + 1}/{n_batches} completed")
         del batch_results  # Free memory
         gc.collect()  # Force garbage collection
