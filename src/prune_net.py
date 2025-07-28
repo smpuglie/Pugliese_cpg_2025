@@ -220,14 +220,14 @@ def update_single_sim_state(state, R, mn_idxs, oscillation_threshold, clip_start
     final_converged_scalar = jnp.squeeze(final_min_circuit)
 
     # Debug information
-    jax.debug.print("Oscillation score: {score}", score=oscillation_score)
-    jax.debug.print("Reset condition (below threshold): {condition}", condition=reset_condition)
-    jax.debug.print("Available neurons: {count}", count=available_neurons)
-    jax.debug.print("Level: {level}", level=final_level)
-    jax.debug.print("Start new round: {new_round}", new_round=jax.lax.select(reset_condition, start_new_round_reset, start_new_round))
-    jax.debug.print("Final converged: {converged}", converged=final_converged_scalar)
-    jax.debug.print("Silent neurons removed: {count}", count=jnp.sum(silent_interneurons & (~total_removed_neurons)))
-    print('\n')
+    # jax.debug.print("Oscillation score: {score}", score=oscillation_score)
+    # jax.debug.print("Reset condition (below threshold): {condition}", condition=reset_condition)
+    # jax.debug.print("Available neurons: {count}", count=available_neurons)
+    # jax.debug.print("Level: {level}", level=final_level)
+    # jax.debug.print("Start new round: {new_round}", new_round=jax.lax.select(reset_condition, start_new_round_reset, start_new_round))
+    # jax.debug.print("Final converged: {converged}", converged=final_converged_scalar)
+    # jax.debug.print("Silent neurons removed: {count}", count=jnp.sum(silent_interneurons & (~total_removed_neurons)))
+    # print('\n')
     
     # When converged, preserve current state (don't make further changes)
     return Pruning_state(
@@ -250,7 +250,7 @@ def run_prune_batched(
     sim_params: SimParams,
     simulation_type: str = "baseline",
     batch_size: Optional[int] = None,
-    oscillation_threshold: float = 0.5,
+    oscillation_threshold: float = 0.2,
     ) -> jnp.ndarray:
     """
     Run complete simulation with efficient batching.
@@ -409,7 +409,7 @@ def run_prune_batched(
             else:
                 neuron_params = update_params(neuron_params, W_mask=state.W_mask)
                 
-            # Run simulation (this would call your simulation function)
+            # Run simulation 
             # Reshape for devices if using pmap
             if jax.device_count() > 1:
                 batch_indices_reshaped = batch_indices.reshape(jax.device_count(), -1)
@@ -422,6 +422,8 @@ def run_prune_batched(
             state = batch_update(state, batch_results, mn_idxs, oscillation_threshold, clip_start)
             iteration += 1
             
+            available_neurons = jnp.sum(load_state.interneuron_mask & (~load_state.total_removed_neurons))
+            print(f"  Available neurons: {available_neurons}")
             elapsed = time.time() - start_time
             print(f"  Sim time: {elapsed:.2f} seconds")
         
@@ -531,7 +533,7 @@ def save_state(state: Pruning_state, path: str):
     with open(path, "wb") as f:
         pickle.dump(state, f)
 
-def load_state(path: str) -> Pruning_state:
+def load_state(path: str):
     """
     Load the pruning state from a file.
 
@@ -546,20 +548,3 @@ def load_state(path: str) -> Pruning_state:
     with open(path, "rb") as f:
         return pickle.load(f)
     
-    
-    
-    
-    
-'''
-the removal of silent interneurons is permanent. The silent neurons are only ever taken out on sims that passed the oscillation score threshold so there shouldn’t be a case where you took a neuron out that caused score < threshold and have silent neurons to put back alongside it.
-yes I exclude neurons that were already put back this “round” when sampling ones to removed - this is the neuronsPutBack list
-the convergence works like this:
-start with the full network, remove neurons and have the ones you had to put back in a list (neuronsPutBack). Once you have no interneurons left in the circuit that aren’t already on this list this “round” is done.
-start another “round” with the network that you’re left with: do the same procedure again on this smaller set of interneurons. Then compare the new list of neuronsPutBack with the previous list (prevNeuronsPutBack). If these two lists are not the same, repeat. If they are the same, that means you tried to remove all the neurons you started with and you couldn’t remove any of them. That’s when you converge.
-if ~np.isfinite(np.sum(p)):
-    # NO NEURONS LEFT TO REMOVE
-    if set(neuronsPutBack) == set(prevNeuronsPutBack):
-        print("converged to minimal circuit")
-        return params
-        
-'''
