@@ -228,17 +228,18 @@ def run_with_prune(
     threshold: jnp.ndarray,
     fr_cap: jnp.ndarray,
     inputs: jnp.ndarray,
-    sim_params: SimParams
+    sim_params: SimParams,
+    seed: jnp.ndarray
 ) -> jnp.ndarray:
     """Run pruning simulation."""
     
     W_masked = W * W_mask
     W_reweighted = reweight_connectivity(W_masked, sim_params.exc_multiplier, sim_params.inh_multiplier)
     return run_single_simulation(
-        W_reweighted, tau, a, threshold, fr_cap, inputs,
+        W_reweighted, tau, a, threshold, fr_cap, inputs, sim_params.noise_stdv,
         sim_params.t_axis, sim_params.T, sim_params.dt,
         sim_params.pulse_start, sim_params.pulse_end,
-        sim_params.r_tol, sim_params.a_tol
+        sim_params.r_tol, sim_params.a_tol, seed
     )
 
 
@@ -263,7 +264,8 @@ def process_batch_prune(
             neuron_params.threshold[param_idx],
             neuron_params.fr_cap[param_idx],
             neuron_params.input_currents[stim_idx],
-            sim_params
+            sim_params,
+            neuron_params.seeds[param_idx]
         )
     
     return vmap(single_sim)(batch_indices)
@@ -510,7 +512,7 @@ def prepare_neuron_params(cfg: DictConfig, W_table: Any) -> NeuronParams:
     # Extract shuffle indices
     exc_dn_idxs, inh_dn_idxs, exc_in_idxs, inh_in_idxs, mn_idxs = extract_shuffle_indices(W_table)
     if cfg.sim.prune_network:
-        W_mask = jnp.ones((num_sims, W.shape[0], W.shape[1]), dtype=jnp.float32)
+        W_mask = jnp.ones((num_sims, W.shape[0], W.shape[1]), dtype=jnp.bool)
     else: W_mask = None
     return NeuronParams(
         W=W, W_mask=W_mask, tau=tau, a=a, threshold=threshold, fr_cap=fr_cap,

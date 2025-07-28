@@ -8,7 +8,7 @@ import jax
 
 import os
 import pandas as pd
-from jax.lax import cond
+from jax.scipy.signal import correlate
 
 def sample_trunc_normal(key, mean, stdev, shape):
     """Sample from truncated normal for a single simulation."""
@@ -109,32 +109,75 @@ def autocorrelation_1d(activity):
 
 @jit
 def neuron_oscillation_score_helper_jax(activity, prominence):
-    """JAX-compatible helper function for oscillation score calculation.
-        Assuming batch dimension is the first axis. """
-    activity = activity - jnp.min(activity, axis=-1, keepdims=True)
-    activity = 2 * activity / jnp.max(activity, axis=-1, keepdims=True) - 1
+    """JAX-compatible helper function for oscillation score calculation."""
+    # Normalize activity to [-1, 1] range
+    activity_min = jnp.min(activity)
+    activity_max = jnp.max(activity)
+    
+    # Avoid division by zero
+    activity_range = activity_max - activity_min
+    activity_normalized = jax.lax.cond(
+        activity_range > 1e-10,
+        lambda: 2 * (activity - activity_min) / activity_range - 1,
+        lambda: jnp.zeros_like(activity)
+    )
+    
+    # Compute autocorrelation
+    autocorr = correlate(activity_normalized, activity_normalized, mode='full', method='fft')
+    
+    # Normalize autocorrelation
+    autocorr_max = jnp.max(jnp.abs(autocorr))
+    autocorr = jax.lax.cond(
+        autocorr_max > 1e-10,
+        lambda: autocorr / autocorr_max,
+        lambda: autocorr
+    )
+    
+    # Take the positive lag half
+    mid_point = autocorr.shape[-1] // 2
+    autocorr = autocorr[mid_point:]
+    
+    # Find peaks
+    peak_indices, peak_heights, peak_prominences, peak_mask = find_peaks_1d(
+        autocorr, prominence_threshold=prominence
+    )
+    
+    # Only consider valid peaks (excluding the zero-lag peak at index 0)
+    valid_peak_mask = peak_mask & (peak_indices > 0)
+    
+    # If no valid peaks found, return 0
+    has_valid_peaks = jnp.any(valid_peak_mask)
+    
+    def compute_with_peaks():
+        valid_heights = jnp.where(valid_peak_mask, peak_heights, 0)
+        valid_prominences = jnp.where(valid_peak_mask, peak_prominences, 0)
+        valid_indices = jnp.where(valid_peak_mask, peak_indices, jnp.inf)
+        
+        max_height = jnp.max(valid_heights)
+        max_prominence = jnp.max(valid_prominences)
+        score = jnp.minimum(max_height, max_prominence)
+        
+        # Find the peak with maximum prominence for frequency calculation
+        best_peak_idx = jnp.argmax(jnp.where(valid_peak_mask, peak_prominences, -jnp.inf))
+        frequency = 1.0 / peak_indices[best_peak_idx]
+        
+        return score, frequency
+    
+    def no_peaks():
+        return 0.0, 0.0
+    
+    return jax.lax.cond(has_valid_peaks, compute_with_peaks, no_peaks)
 
-    autocorr = autocorrelation_1d(activity)
-    autocorr = autocorr[...,autocorr.shape[-1]//2:]
-    # Apply find_peaks_1d to each row using vmap
-    peak_indices, peak_heights, peak_prominences, peak_mask = find_peaks_1d(autocorr, prominence_threshold=prominence)
-    peak_indices = jnp.where(peak_mask, peak_indices, 0)
-    peak_heights = jnp.where(peak_mask, peak_heights, 0)
-    peak_prominences = jnp.where(peak_mask, peak_prominences, 0)
-    score = jnp.min(jnp.array([jnp.max(peak_heights,axis=-1), jnp.max(peak_prominences,axis=-1)]), axis=-1)
-    frequency = 1 / peak_indices[peak_prominences.argmax(axis=-1)]
-    return score, frequency
-
-@jit
+@jit  
 def neuron_oscillation_score(activity, prominence=0.05):
     """JAX-compatible neuron oscillation score calculation."""
     
     raw_score, frequency = neuron_oscillation_score_helper_jax(activity, prominence)
     
-    # Normalize to sine wave of the same frequency and duration
+    # If no oscillation detected, return 0
     def compute_normalized_score():
         n = len(activity)
-        t = jnp.arange(n)
+        t = jnp.arange(n, dtype=jnp.float32)
         
         # Reference sine and cosine waves
         ref_sin = jnp.sin(2 * jnp.pi * frequency * t)
@@ -143,35 +186,58 @@ def neuron_oscillation_score(activity, prominence=0.05):
         ref_sin_score, _ = neuron_oscillation_score_helper_jax(ref_sin, prominence)
         ref_cos_score, _ = neuron_oscillation_score_helper_jax(ref_cos, prominence)
         
-        ref_score = jnp.max(jnp.array([ref_sin_score, ref_cos_score]))
+        ref_score = jnp.maximum(ref_sin_score, ref_cos_score)
         
-        return raw_score / ref_score
+        # Avoid division by zero
+        return jnp.where(
+            ref_score > 1e-10,
+            raw_score / ref_score,
+            0.0
+        )
     
-    score = jnp.where(
-        raw_score == 0,
-        0.0,
-        compute_normalized_score()
+    # Only normalize if we have a valid raw score and frequency
+    score = jax.lax.cond(
+        (raw_score > 1e-10) & jnp.isfinite(frequency),
+        compute_normalized_score,
+        lambda: 0.0
     )
     
     return score, frequency
 
 @jax.jit
 def compute_oscillation_score(activity, active_mask, prominence=0.05):
-    # Compute scores for all neurons (will be NaN for inactive ones)
-    scores = jax.vmap(
-        lambda activity_row, mask: jax.lax.cond(
-            mask,
-            lambda x: neuron_oscillation_score(x, prominence=prominence),
-            lambda x: (jnp.nan, jnp.nan),
-            activity_row
-        ),
-        in_axes=(0, 0)
-    )(activity, active_mask)
-    score_values, frequencies = scores
-    # Compute mean of valid scores
-    oscillation_score = jnp.nanmean(score_values)
-    frequencies = jnp.nanmean(frequencies)
-    return oscillation_score, frequencies
+    """Compute oscillation scores for all neurons."""
+    
+    # Compute scores for all neurons at once using vmap
+    all_scores, all_frequencies = jax.vmap(
+        neuron_oscillation_score, 
+        in_axes=(0, None)
+    )(activity, prominence)
+    
+    # Apply mask: set inactive neurons to 0.0
+    score_values = jnp.where(active_mask, all_scores, 0.0)
+    frequencies = jnp.where(active_mask, all_frequencies, 0.0)
+    
+    # Calculate mean over active neurons only
+    num_active = jnp.sum(active_mask)
+    
+    # Sum scores for active neurons
+    active_score_sum = jnp.sum(score_values * active_mask)
+    active_freq_sum = jnp.sum(frequencies * active_mask)
+    
+    # Calculate means, avoiding division by zero
+    oscillation_score = jnp.where(
+        num_active > 0,
+        active_score_sum / num_active,
+        0.0
+    )
+    mean_frequency = jnp.where(
+        num_active > 0,
+        active_freq_sum / num_active,
+        0.0
+    )
+    
+    return oscillation_score, mean_frequency
 
 def extract_nth_filtered_pytree(pytree, n, path_filter, key_list=['tau', 'threshold', 'a', 'fr_cap', 'W_mask']):
     """
