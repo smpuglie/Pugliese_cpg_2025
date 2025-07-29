@@ -855,7 +855,7 @@ def _run_without_pruning(
     return results.reshape(
         sim_params.n_stim_configs, sim_params.n_param_sets,
         sim_params.n_neurons, len(sim_params.t_axis)
-    )
+    ), None
 
 def _run_with_pruning(
     neuron_params: NeuronParams,
@@ -950,15 +950,7 @@ def _run_with_pruning(
             
             # Create mn_mask and broadcast to batch dimensions
             mn_mask = jnp.isin(jnp.arange(sim_params.n_neurons), mn_idxs)
-            
-            # if n_devices > 1:
-            #     # For pmap, broadcast to (n_devices, batch_per_device, n_neurons)
-            #     batch_per_device = batch_indices.shape[1]
-            #     mn_mask_batch = jnp.broadcast_to(mn_mask, (n_devices, batch_per_device, len(mn_mask)))
-            # else:
-            #     # For single device, broadcast to (batch_size, n_neurons)
-            #     mn_mask_batch = jnp.broadcast_to(mn_mask, (batch_results.shape[0], len(mn_mask)))
-                
+
             # Update state - now only passing traced arguments
             state = batch_update(state, batch_results, mn_mask)
             iteration += 1
@@ -1192,10 +1184,10 @@ def run_vnc_simulation(cfg: DictConfig) -> Union[jnp.ndarray, Tuple[jnp.ndarray,
         print(f"  Results shape: {results.shape}")
         print(f"  Final pruning state returned")
     else:
-        results = result, None
+        results, final_state = result
         print(f"  Results shape: {results.shape}")
 
-    return result
+    return results, final_state
 
 
 # ============================================================================
