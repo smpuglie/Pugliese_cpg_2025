@@ -882,14 +882,13 @@ def _run_with_pruning(
     # Now vmap this wrapper with only the traced arguments
     batch_update = jax.vmap(
         jitted_update, 
-        in_axes=(0, 0, 0)  # state, R, mn_mask - all batched
+        in_axes=(0, 0, None)  # state, R, mn_mask - all batched
     )
     
     # Create parallel versions for multiple devices
     if n_devices > 1:
-        batch_update = pmap(batch_update, axis_name="device", in_axes=(0, 0, 0))
+        batch_update = pmap(batch_update, axis_name="device", in_axes=(0, 0, None))
 
-    # Rest of the function...
     all_results = []
     n_batches = (total_sims + batch_size - 1) // batch_size
     
@@ -935,6 +934,10 @@ def _run_with_pruning(
             start_time = time.time()
             print(f"Iteration {iteration}")
             
+            # Clear caches periodically to prevent memory buildup
+            if iteration % 10 == 0:
+                jax.clear_caches()
+                
             # Update neuron parameters W_mask based on the current state
             if n_devices > 1:
                 flat_W_mask = reshape_state_from_pmap(state).W_mask
@@ -948,16 +951,16 @@ def _run_with_pruning(
             # Create mn_mask and broadcast to batch dimensions
             mn_mask = jnp.isin(jnp.arange(sim_params.n_neurons), mn_idxs)
             
-            if n_devices > 1:
-                # For pmap, broadcast to (n_devices, batch_per_device, n_neurons)
-                batch_per_device = batch_indices.shape[1]
-                mn_mask_batch = jnp.broadcast_to(mn_mask, (n_devices, batch_per_device, len(mn_mask)))
-            else:
-                # For single device, broadcast to (batch_size, n_neurons)
-                mn_mask_batch = jnp.broadcast_to(mn_mask, (batch_results.shape[0], len(mn_mask)))
+            # if n_devices > 1:
+            #     # For pmap, broadcast to (n_devices, batch_per_device, n_neurons)
+            #     batch_per_device = batch_indices.shape[1]
+            #     mn_mask_batch = jnp.broadcast_to(mn_mask, (n_devices, batch_per_device, len(mn_mask)))
+            # else:
+            #     # For single device, broadcast to (batch_size, n_neurons)
+            #     mn_mask_batch = jnp.broadcast_to(mn_mask, (batch_results.shape[0], len(mn_mask)))
                 
             # Update state - now only passing traced arguments
-            state = batch_update(state, batch_results, mn_mask_batch)
+            state = batch_update(state, batch_results, mn_mask)
             iteration += 1
             
             # Calculate available neurons for reporting
@@ -987,8 +990,9 @@ def _run_with_pruning(
         print(f"Batch {i + 1}/{n_batches} completed")
         
         del batch_results
+        jax.clear_caches()
         gc.collect()
-    
+
     # Combine results
     results = jnp.concatenate(all_results, axis=0)
     

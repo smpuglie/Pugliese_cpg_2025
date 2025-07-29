@@ -476,9 +476,11 @@ def run_prune_batched(
             if n_devices > 1:
                 # Flatten W_mask for update_params
                 flat_W_mask = reshape_state_from_pmap(state).W_mask
-                neuron_params = update_params(neuron_params, W_mask=flat_W_mask)
+                neuron_params = neuron_params._repalce(W_mask=flat_W_mask)
+                # neuron_params = update_params(neuron_params, W_mask=flat_W_mask)
             else:
-                neuron_params = update_params(neuron_params, W_mask=state.W_mask)
+                neuron_params = neuron_params._repalce(W_mask=state.W_mask)
+                # neuron_params = update_params(neuron_params, W_mask=state.W_mask)
                 
             # Run simulation 
             batch_results = batch_func(neuron_params, sim_params, batch_indices)
