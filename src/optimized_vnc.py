@@ -52,34 +52,34 @@ class SimParams(NamedTuple):
     a_tol: float
     noise_stdv: jnp.ndarray  # Standard deviation for noise, if applicable
 
-def update_params(params, **kwargs):
-    """
-    Update specific parameters of a NeuronParams instance.
+# def update_params(params, **kwargs):
+#     """
+#     Update specific parameters of a NeuronParams instance.
     
-    Args:
-        params: The original NeuronParams instance
-        **kwargs: Keyword arguments specifying which parameters to update
-                 (parameter_name=new_value)
+#     Args:
+#         params: The original NeuronParams instance
+#         **kwargs: Keyword arguments specifying which parameters to update
+#                  (parameter_name=new_value)
     
-    Returns:
-        New NeuronParams instance with updated parameters
+#     Returns:
+#         New NeuronParams instance with updated parameters
         
-    Example:
-        # Update tau and threshold parameters
-        new_params = update_neuron_params(
-            old_params, 
-            tau=new_tau_array,
-            threshold=new_threshold_array
-        )
-    """
-    # Get current values as a dict
-    current_dict = params._asdict()
+#     Example:
+#         # Update tau and threshold parameters
+#         new_params = update_neuron_params(
+#             old_params, 
+#             tau=new_tau_array,
+#             threshold=new_threshold_array
+#         )
+#     """
+#     # Get current values as a dict
+#     current_dict = params._asdict()
     
-    # Update with new values
-    current_dict.update(kwargs)
+#     # Update with new values
+#     current_dict.update(kwargs)
     
-    # Create new instance
-    return NeuronParams(**current_dict)
+#     # Create new instance
+#     return NeuronParams(**current_dict)
 
 # Core simulation functions - all JIT compiled
 @jit
@@ -527,7 +527,7 @@ def prepare_sim_params(cfg: DictConfig, n_stim_configs: int, n_neurons: int) -> 
     
     T = float(cfg.sim.T)
     dt = float(cfg.sim.dt)
-    t_axis = jnp.arange(0, T, dt)
+    t_axis = jnp.arange(0, T, dt, dtype=jnp.float32)
     
     return SimParams(
         n_neurons=n_neurons,
