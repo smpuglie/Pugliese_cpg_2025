@@ -1308,6 +1308,10 @@ CORE SIMULATION FUNCTIONS:
 - run_with_shuffle(): Simulation with shuffled connectivity
 - run_with_noise(): Simulation with noisy connectivity
 - run_with_Wmask(): Simulation with pruned connectivity
+- run_single_simulation(): Core ODE solver for individual simulation runs
+- rate_equation_half_tanh(): ODE rate equation with half-tanh activation
+- reweight_connectivity(): Apply excitatory/inhibitory multipliers to weights
+- add_noise_to_weights(): Add truncated normal noise to weight matrix
 
 SIMULATION ENGINE:
 - run_simulation_engine(): Unified engine that handles all simulation types
@@ -1324,11 +1328,13 @@ BATCH PROCESSING FUNCTIONS:
 PRUNING-SPECIFIC FUNCTIONS:
 - update_single_sim_state(): Update pruning state for single simulation
 - removal_probability(): Calculate neuron removal probabilities
+- jax_choice(): JAX-compatible random choice function
 - initialize_pruning_state(): Setup initial pruning state
 - reshape_state_for_pmap(): Reshape state for multi-device processing
 - reshape_state_from_pmap(): Reshape state back from multi-device format
 - pad_state_for_devices(): Pad state for device alignment
 - trim_state_padding(): Remove padding from state
+- stack_pruning_states(): Stack multiple pruning states into single state
 - save_state()/load_state(): Persist pruning state to/from disk
 
 CONFIGURATION AND SETUP:
@@ -1336,7 +1342,6 @@ CONFIGURATION AND SETUP:
 - prepare_sim_params(): Setup simulation parameters from config
 - parse_simulation_config(): Parse simulation configuration from config
 - calculate_optimal_batch_size(): Determine optimal batch size
-- update_params(): Update neuron parameters immutably
 
 CONFIGURATION STRUCTURES:
 - NeuronParams: Immutable neuron parameter container
@@ -1344,31 +1349,4 @@ CONFIGURATION STRUCTURES:
 - Pruning_state: Pruning algorithm state container
 - SimulationConfig: Simulation execution configuration
 
-KEY IMPROVEMENTS IN UNIFIED VERSION:
-1. Single entry point (run_vnc_simulation) handles all simulation types
-2. Automatic detection of simulation type from configuration
-3. Unified batch processing engine with consistent memory management
-4. Better separation of concerns with SimulationConfig
-5. Backward compatibility maintained for existing code
-6. Cleaner error handling and validation
-7. More consistent device management across simulation types
-8. Improved documentation and code organization
-
-USAGE EXAMPLES:
-```python
-# Standard simulation
-results = run_vnc_simulation(cfg)
-
-# Pruning simulation (automatically detected from cfg.sim.prune_network)
-results, final_state = run_vnc_simulation(cfg)
-
-# Explicit configuration
-sim_config = SimulationConfig(
-    sim_type="shuffle",
-    enable_pruning=True,
-    oscillation_threshold=0.3,
-    batch_size=64
-)
-# Then modify cfg accordingly and call run_vnc_simulation(cfg)
-```
 """
