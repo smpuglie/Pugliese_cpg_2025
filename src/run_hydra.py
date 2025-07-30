@@ -26,8 +26,9 @@ def main(cfg: DictConfig):
     config_path = cfg.paths.log_dir / "run_config.yaml"
     if not config_path.exists():
         save_config(cfg, config_path)
-        print(f"Config saved to {config_path}")    
-    
+        print(f"Config saved to {config_path}")
+    cfg.paths = convert_dict_to_path(cfg.paths)
+
     ##### Run the simulation #####
     print("Running VNC simulation with the following configuration:")
     results, final_mini_circuits = run_vnc_simulation(cfg)
