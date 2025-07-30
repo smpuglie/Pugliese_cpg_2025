@@ -1071,7 +1071,7 @@ def stack_pruning_states(states_list: List[Pruning_state]) -> Pruning_state:
     
     # Convert list of states to a pytree structure that JAX can handle
     # This creates arrays where the first axis indexes the batch
-    states_array = jax.tree_map(lambda *args: jnp.stack(args, axis=0), *states_list)
+    states_array = jax.tree.map(lambda *args: jnp.stack(args, axis=0), *states_list)
     
     # Now flatten back to single state by concatenating along batch dimension
     # Use lax.map to apply concatenation across all fields simultaneously
