@@ -15,7 +15,7 @@ def slurm_submit(script):
         print(f"Error submitting job: {e.output}", file=sys.stderr)
         sys.exit(1)
 
-def submit(num_gpus, partition, job_name, mem, cpus, time, note, experiment, sim, load_jobid, gpu_type, override):
+def submit(gpus, partition, job_name, mem, cpus, time, note, experiment, sim, load_jobid, gpu_type, override):
     """
     Construct and submit the SLURM script with the specified parameters.
     """
@@ -29,7 +29,7 @@ def submit(num_gpus, partition, job_name, mem, cpus, time, note, experiment, sim
         # Add more GPU types here if needed
     }
 
-    gpu_resource = f"gpu:{gpu_configs[gpu_type]}:{num_gpus}"
+    gpu_resource = f"gpu:{gpu_configs[gpu_type]}:{gpus}"
 
     """Submit job to cluster."""
     script = f"""#!/bin/bash
@@ -40,7 +40,7 @@ def submit(num_gpus, partition, job_name, mem, cpus, time, note, experiment, sim
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task={cpus}
-#SBATCH --gpus={num_gpus}
+#SBATCH --gpus={gpus}
 #SBATCH --mem={mem}G
 #SBATCH --verbose  
 #SBATCH --open-mode=append
@@ -65,7 +65,7 @@ python -u ./src/run_hydra.py paths=hyak note={note} version=hyak experiment={exp
 def main():
     # Set up argument parsing
     parser = argparse.ArgumentParser(description='Submit a SLURM job with specified GPU type.')
-    parser.add_argument('--num_gpus', type=int, default=8,
+    parser.add_argument('--gpus', type=int, default=8,
                         help='Number of GPUs to request (default: 8)')
     parser.add_argument('--gpu_type', type=str, default='l40s',
                         help='Number of GPUs to request (default: 8)')
@@ -93,7 +93,7 @@ def main():
     args = parser.parse_args()
 
     submit(
-        num_gpus=args.num_gpus,
+        gpus=args.gpus,
         job_name=args.job_name,
         mem=args.mem,
         cpus=args.cpus,
