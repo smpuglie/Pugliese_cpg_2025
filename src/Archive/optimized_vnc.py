@@ -52,34 +52,34 @@ class SimParams(NamedTuple):
     a_tol: float
     noise_stdv: jnp.ndarray  # Standard deviation for noise, if applicable
 
-def update_params(params, **kwargs):
-    """
-    Update specific parameters of a NeuronParams instance.
+# def update_params(params, **kwargs):
+#     """
+#     Update specific parameters of a NeuronParams instance.
     
-    Args:
-        params: The original NeuronParams instance
-        **kwargs: Keyword arguments specifying which parameters to update
-                 (parameter_name=new_value)
+#     Args:
+#         params: The original NeuronParams instance
+#         **kwargs: Keyword arguments specifying which parameters to update
+#                  (parameter_name=new_value)
     
-    Returns:
-        New NeuronParams instance with updated parameters
+#     Returns:
+#         New NeuronParams instance with updated parameters
         
-    Example:
-        # Update tau and threshold parameters
-        new_params = update_neuron_params(
-            old_params, 
-            tau=new_tau_array,
-            threshold=new_threshold_array
-        )
-    """
-    # Get current values as a dict
-    current_dict = params._asdict()
+#     Example:
+#         # Update tau and threshold parameters
+#         new_params = update_neuron_params(
+#             old_params, 
+#             tau=new_tau_array,
+#             threshold=new_threshold_array
+#         )
+#     """
+#     # Get current values as a dict
+#     current_dict = params._asdict()
     
-    # Update with new values
-    current_dict.update(kwargs)
+#     # Update with new values
+#     current_dict.update(kwargs)
     
-    # Create new instance
-    return NeuronParams(**current_dict)
+#     # Create new instance
+#     return NeuronParams(**current_dict)
 
 # Core simulation functions - all JIT compiled
 @jit
@@ -105,13 +105,11 @@ def reweight_connectivity(W: jnp.ndarray, exc_mult: float, inh_mult: float) -> j
 
 
 @jit
-def add_noise_to_weights(W: jnp.ndarray, seed: int, stdv_prop: float) -> jnp.ndarray:
+def add_noise_to_weights(W: jnp.ndarray, key: jnp.ndarray, stdv_prop: float) -> jnp.ndarray:
     """Add truncated normal noise to weight matrix."""
     stdvs = W * stdv_prop
-    key = random.key(seed)
-    noise = random.truncated_normal(
-        key, lower=-1.0 / stdv_prop, upper=jnp.inf, shape=W.shape
-    )
+    noise = sample_trunc_normal(key, mean=0.0, stdev=stdv_prop, shape=W.shape)
+
     return W + stdvs * noise
 
 
@@ -168,7 +166,7 @@ def run_with_shuffle(
     W_reweighted = reweight_connectivity(W_shuffled, sim_params.exc_multiplier, sim_params.inh_multiplier)
     
     return run_single_simulation(
-        W_reweighted, tau, a, threshold, fr_cap, inputs,
+        W_reweighted, tau, a, threshold, fr_cap, inputs, sim_params.noise_stdv,
         sim_params.t_axis, sim_params.T, sim_params.dt,
         sim_params.pulse_start, sim_params.pulse_end,
         sim_params.r_tol, sim_params.a_tol, seed,
@@ -192,7 +190,7 @@ def run_with_noise(
     W_reweighted = reweight_connectivity(W_noisy, sim_params.exc_multiplier, sim_params.inh_multiplier)
     
     return run_single_simulation(
-        W_reweighted, tau, a, threshold, fr_cap, inputs,
+        W_reweighted, tau, a, threshold, fr_cap, inputs, sim_params.noise_stdv,
         sim_params.t_axis, sim_params.T, sim_params.dt,
         sim_params.pulse_start, sim_params.pulse_end,
         sim_params.r_tol, sim_params.a_tol, seed
@@ -207,7 +205,6 @@ def run_baseline(
     threshold: jnp.ndarray,
     fr_cap: jnp.ndarray,
     inputs: jnp.ndarray,
-    noise_stdv: jnp.ndarray,
     sim_params: SimParams,
     seed: jnp.ndarray
 ) -> jnp.ndarray:
@@ -215,7 +212,7 @@ def run_baseline(
     W_reweighted = reweight_connectivity(W, sim_params.exc_multiplier, sim_params.inh_multiplier)
     
     return run_single_simulation(
-        W_reweighted, tau, a, threshold, fr_cap, inputs, noise_stdv, 
+        W_reweighted, tau, a, threshold, fr_cap, inputs, sim_params.noise_stdv, 
         sim_params.t_axis, sim_params.T, sim_params.dt,
         sim_params.pulse_start, sim_params.pulse_end,
         sim_params.r_tol, sim_params.a_tol, seed, 
@@ -231,17 +228,18 @@ def run_with_prune(
     threshold: jnp.ndarray,
     fr_cap: jnp.ndarray,
     inputs: jnp.ndarray,
-    sim_params: SimParams
+    sim_params: SimParams,
+    seed: jnp.ndarray
 ) -> jnp.ndarray:
     """Run pruning simulation."""
     
     W_masked = W * W_mask
     W_reweighted = reweight_connectivity(W_masked, sim_params.exc_multiplier, sim_params.inh_multiplier)
     return run_single_simulation(
-        W_reweighted, tau, a, threshold, fr_cap, inputs,
+        W_reweighted, tau, a, threshold, fr_cap, inputs, sim_params.noise_stdv,
         sim_params.t_axis, sim_params.T, sim_params.dt,
         sim_params.pulse_start, sim_params.pulse_end,
-        sim_params.r_tol, sim_params.a_tol
+        sim_params.r_tol, sim_params.a_tol, seed
     )
 
 
@@ -266,7 +264,8 @@ def process_batch_prune(
             neuron_params.threshold[param_idx],
             neuron_params.fr_cap[param_idx],
             neuron_params.input_currents[stim_idx],
-            sim_params
+            sim_params,
+            neuron_params.seeds[param_idx]
         )
     
     return vmap(single_sim)(batch_indices)
@@ -350,7 +349,6 @@ def process_batch_baseline(
             neuron_params.threshold[param_idx],
             neuron_params.fr_cap[param_idx],
             neuron_params.input_currents[stim_idx],
-            sim_params.noise_stdv,
             sim_params,
             neuron_params.seeds[param_idx]
         )
@@ -448,7 +446,7 @@ def run_simulation_batched(
             batch_results = batch_func(neuron_params, sim_params, batch_indices)
         
         batch_results = jax.device_put(batch_results, jax.devices("cpu")[0])
-        all_results.append(np.asarray(batch_results))
+        all_results.append(np.asarray(batch_results, dtype=np.float32))
         print(f"Batch {i + 1}/{n_batches} completed")
         del batch_results  # Free memory
         gc.collect()  # Force garbage collection
@@ -514,7 +512,7 @@ def prepare_neuron_params(cfg: DictConfig, W_table: Any) -> NeuronParams:
     # Extract shuffle indices
     exc_dn_idxs, inh_dn_idxs, exc_in_idxs, inh_in_idxs, mn_idxs = extract_shuffle_indices(W_table)
     if cfg.sim.prune_network:
-        W_mask = jnp.ones((num_sims, W.shape[0], W.shape[1]), dtype=jnp.float32)
+        W_mask = jnp.ones((num_sims, W.shape[0], W.shape[1]), dtype=jnp.bool)
     else: W_mask = None
     return NeuronParams(
         W=W, W_mask=W_mask, tau=tau, a=a, threshold=threshold, fr_cap=fr_cap,
@@ -529,7 +527,7 @@ def prepare_sim_params(cfg: DictConfig, n_stim_configs: int, n_neurons: int) -> 
     
     T = float(cfg.sim.T)
     dt = float(cfg.sim.dt)
-    t_axis = jnp.arange(0, T, dt)
+    t_axis = jnp.arange(0, T, dt, dtype=jnp.float32)
     
     return SimParams(
         n_neurons=n_neurons,
