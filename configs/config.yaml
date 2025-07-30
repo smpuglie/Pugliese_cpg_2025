@@ -11,10 +11,10 @@ ckpt_list: []
 # set default task and default training config based on dataset
 defaults:
   - _self_
+  - experiment: stim_neurons
   - neuron_params: default
   - paths: glados
   - sim: default
-  - experiment: stim_neurons
 
 
 # set the directory where the output files get saved
@@ -32,7 +32,6 @@ hydra:
             - neuron_params
 
   run:
-    # dir: ${paths.base_dir}/${hydra:job.override_dirname}
     dir: ${paths.base_dir}/run_id=${run_id}
   sweep:
     dir: ${paths.base_dir}/run_id=${run_id}

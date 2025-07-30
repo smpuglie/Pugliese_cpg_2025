@@ -225,7 +225,7 @@ def run_baseline(
 
 
 @jit
-def run_with_prune(
+def run_with_Wmask(
     W: jnp.ndarray,
     W_mask: jnp.ndarray,
     tau: jnp.ndarray,
@@ -573,7 +573,7 @@ def trim_state_padding(state: Pruning_state, actual_batch_size: int) -> Pruning_
 # #############################################################################################################################=
 
 @jit
-def process_batch_prune(
+def process_batch_Wmask(
     neuron_params: NeuronParams,
     sim_params: SimParams,
     batch_indices: jnp.ndarray
@@ -582,7 +582,7 @@ def process_batch_prune(
     def single_sim(idx):
         param_idx = idx % sim_params.n_param_sets
         stim_idx = idx // sim_params.n_param_sets
-        return run_with_prune(
+        return run_with_Wmask(
             neuron_params.W,
             neuron_params.W_mask[param_idx],
             neuron_params.tau[param_idx],
@@ -682,7 +682,7 @@ def get_batch_function(sim_config: SimulationConfig):
         "baseline": process_batch_baseline,
         "shuffle": process_batch_shuffle, 
         "noise": process_batch_noise,
-        "prune": process_batch_prune
+        "prune": process_batch_Wmask
     }
     
     if sim_config.sim_type not in batch_functions:
@@ -834,13 +834,13 @@ def run_simulation_engine(
             total_sims, batch_size, n_devices
         )
     else:
-        return _run_without_pruning(
+        return _run_stim_neurons(
             neuron_params, sim_params, batch_func,
             total_sims, batch_size, n_devices
         )
 
 
-def _run_without_pruning(
+def _run_stim_neurons(
     neuron_params: NeuronParams,
     sim_params: SimParams, 
     batch_func,
@@ -927,7 +927,7 @@ def _run_with_pruning(
         batch_update = pmap(batch_update, axis_name="device", in_axes=(0, 0, None))
 
     all_results = []
-    all_states = []  # New: accumulate states from all batches
+    all_mini_circuits = []  # New: accumulate states from all batches
     n_batches = (total_sims + batch_size - 1) // batch_size
     
     for i in range(n_batches):
@@ -1037,31 +1037,28 @@ def _run_with_pruning(
         
         # Move results to CPU to save GPU memory
         batch_results = jax.device_put(batch_results, jax.devices("cpu")[0])
-        final_state_cpu = jax.device_put(final_state, jax.devices("cpu")[0])
+        mini_circuit = jax.device_put(mini_circuit, jax.devices("cpu")[0])
         
         all_results.append(batch_results)
-        all_states.append(final_state_cpu)  # Save state for this batch
-        
+        all_mini_circuits.append(mini_circuit)  # Save state for this batch
+
         print(f"Batch {i + 1}/{n_batches} completed")
         
-        del batch_results, final_state_cpu
+        del batch_results, final_state
         jax.clear_caches()
         gc.collect()
 
     # Combine results
     results = jnp.concatenate(all_results, axis=0)
-    
-    # Stack states from all batches
-    # Note: This assumes all states have the same structure
-    stacked_states = stack_pruning_states(all_states)
+    all_mini_circuits = jnp.concatenate(all_mini_circuits, axis=0)
     
     # Reshape results to (n_stim_configs, n_param_sets, n_neurons, n_timepoints)
     reshaped_results = results.reshape(
         sim_params.n_stim_configs, sim_params.n_param_sets,
         sim_params.n_neurons, len(sim_params.t_axis)
     )
-    
-    return reshaped_results, stacked_states
+
+    return reshaped_results, all_mini_circuits
 
 
 def stack_pruning_states(states_list: List[Pruning_state]) -> Pruning_state:
@@ -1286,14 +1283,14 @@ def run_vnc_simulation(cfg: DictConfig) -> Union[jnp.ndarray, Tuple[jnp.ndarray,
     print(f"  Throughput: {total_sims/elapsed:.2f} sims/second")
     
     if sim_config.enable_pruning:
-        results, final_state = result
+        results, final_mini_circuits = result
         print(f"  Results shape: {results.shape}")
         print(f"  Final pruning state returned")
     else:
-        results, final_state = result
+        results, final_mini_circuits = result
         print(f"  Results shape: {results.shape}")
 
-    return results, final_state
+    return results, final_mini_circuits
 
 
 # #############################################################################################################################=
@@ -1310,19 +1307,19 @@ CORE SIMULATION FUNCTIONS:
 - run_baseline(): Standard simulation without modifications  
 - run_with_shuffle(): Simulation with shuffled connectivity
 - run_with_noise(): Simulation with noisy connectivity
-- run_with_prune(): Simulation with pruned connectivity
+- run_with_Wmask(): Simulation with pruned connectivity
 
 SIMULATION ENGINE:
 - run_simulation_engine(): Unified engine that handles all simulation types
 - get_batch_function(): Get appropriate batch processing function
-- _run_without_pruning(): Execute simulation without pruning
+- _run_stim_neurons(): Execute simulation without pruning
 - _run_with_pruning(): Execute simulation with pruning
 
 BATCH PROCESSING FUNCTIONS:
 - process_batch_baseline(): Process batch of baseline simulations
 - process_batch_shuffle(): Process batch of shuffle simulations
 - process_batch_noise(): Process batch of noise simulations
-- process_batch_prune(): Process batch of pruning simulations
+- process_batch_Wmask(): Process batch of Wmask simulations
 
 PRUNING-SPECIFIC FUNCTIONS:
 - update_single_sim_state(): Update pruning state for single simulation

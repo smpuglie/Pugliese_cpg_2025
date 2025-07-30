@@ -1,6 +1,4 @@
-# Default configuration for the simulation
-name: TestingSimulationParams
-
+# Noisy input configuration for the simulation
 T: 2.0
 dt: 0.001
 pulseStart: 0.02
@@ -12,7 +10,7 @@ nActiveLower: 5
 nHighFrUpper: 100
 shuffle: False
 noise: False
-noiseStdvProp: 0.1
-noiseMean: 0.0
-noiseStdv: 0.1
+noiseStdvProp: 0.1 
+noiseMean: 0.0 # Mean of input noise
+noiseStdv: 0.1 # Standard deviation of input noise
 prune_network: False
