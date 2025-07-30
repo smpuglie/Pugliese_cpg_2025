@@ -28,6 +28,8 @@ hydra:
             - dataset
             - run_id
             - experiment
+            - sim
+            - neuron_params
 
   run:
     # dir: ${paths.base_dir}/${hydra:job.override_dirname}

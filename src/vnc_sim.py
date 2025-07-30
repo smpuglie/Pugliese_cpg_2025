@@ -726,15 +726,15 @@ def calculate_optimal_batch_size(n_neurons: int, n_timepoints: int, n_replicates
     # Choose optimal batch size considering memory constraints
     memory_limited_batch = min(max_memory_samples, 256)  # Cap at 256 for efficiency
     optimal_batch = max(baseline_batch, memory_limited_batch)
-    print(f"Memory-limited batch size: {memory_limited_batch}, Baseline batch size: {baseline_batch}, Optimal batch size: {optimal_batch}")
+    # print(f"Memory-limited batch size: {memory_limited_batch}, Baseline batch size: {baseline_batch}, Optimal batch size: {optimal_batch}")
     # Ensure batch size doesn't exceed available replicates
     optimal_batch = min(optimal_batch, n_replicates)
-    print(f"Adjusted optimal batch size: {optimal_batch} (limited by replicates)")
+    # print(f"Adjusted optimal batch size: {optimal_batch} (limited by replicates)")
     # Make batch size divisible by device count for even distribution
     # But only if we have enough replicates to justify it
     if optimal_batch >= n_devices:
         optimal_batch = (optimal_batch // n_devices) * n_devices
-    print('Final optimal batch size:', optimal_batch)
+    print('Final optimal batch size:', max(1, optimal_batch))
     # Final safety check - ensure we return at least 1
     return max(1, optimal_batch)
 
