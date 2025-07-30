@@ -15,7 +15,7 @@ def slurm_submit(script):
         print(f"Error submitting job: {e.output}", file=sys.stderr)
         sys.exit(1)
 
-def submit(num_gpus, partition, job_name, mem, cpus, time, note, dataset, num_envs, load_jobid, gpu_type,override):
+def submit(num_gpus, partition, job_name, mem, cpus, time, note, experiment, sim, load_jobid, gpu_type, override):
     """
     Construct and submit the SLURM script with the specified parameters.
     """
@@ -53,8 +53,9 @@ set -x
 source ~/.bashrc
 nvidia-smi
 conda activate bdn2cpg
+unset LD_LIBRARY_PATH
 echo $SLURMD_NODENAME
-python -u main_requeue.py paths=hyak note={note} version=ckpt dataset={dataset} num_gpus={num_gpus} load_jobid={load_jobid} run_id=$SLURM_JOB_ID {override}
+python -u ./src/run_hydra.py paths=hyak note={note} version=hyak experiment={experiment} sim={sim} load_jobid={load_jobid} run_id=$SLURM_JOB_ID {override}
             """
     print(f"Submitting job")
     print(script)
@@ -68,7 +69,7 @@ def main():
                         help='Number of GPUs to request (default: 8)')
     parser.add_argument('--gpu_type', type=str, default='l40s',
                         help='Number of GPUs to request (default: 8)')
-    parser.add_argument('--job_name', type=str, default='Fruitfly',
+    parser.add_argument('--job_name', type=str, default='bdn2cpg',
                         help='Name of the SLURM job (default: rodent)')
     parser.add_argument('--mem', type=int, default=512,
                         help='Memory in GB (default: 512)')
@@ -76,14 +77,14 @@ def main():
                         help='Number of CPU cores (default: 64)')
     parser.add_argument('--time', type=str, default='2-00:00:00',
                         help='Time limit for the job day-hr-min-sec (default: 2-00:00:00)')
-    parser.add_argument('--partition', type=str, default='ckpt-all',
-                        help='Partition to run job (default: ckpt-all)')
+    parser.add_argument('--partition', type=str, default='gpu-l40s',
+                        help='Partition to run job (default: gpu-l40s)')
     parser.add_argument('--note', type=str, default='hyak_ckpt',
                         help='Note for job (default: hyak_ckpt)')
-    parser.add_argument('--dataset', type=str, default='fly_multiclip',
-                        help='Name of dataset yaml  (default: fly_multiclip)')
-    parser.add_argument('--num_envs', type=int, default=2048,
-                        help='Number of environments to run (default: 2048)')
+    parser.add_argument('--experiment', type=str, default='stim_neurons',
+                        help='Name of experiment yaml  (default: stim_neurons)')
+    parser.add_argument('--sim', type=str, default='default',
+                        help='Name of simulation yaml  (default: default)')
     parser.add_argument('--load_jobid', type=str, default='',
                         help='JobID to resume training (default: '')')
     parser.add_argument('--override', type=str, default='',
@@ -99,8 +100,8 @@ def main():
         time=args.time,
         partition=args.partition,
         note=args.note,
-        dataset=args.dataset,
-        num_envs=args.num_envs,
+        experiment=args.experiment,
+        sim=args.sim,
         load_jobid=args.load_jobid,
         gpu_type=args.gpu_type,
         override=args.override,
@@ -111,10 +112,6 @@ if __name__ == "__main__":
     
 ##### Saving commands #####
 #### cancel all jobs: squeue -u $USER -h | awk '{print $1}' | xargs scancel
-# python scripts/slurm-run_ckpt_all.py --dataset=fly_multiclip --note='hyak_ckpt'
-# python scripts/slurm-run_ckpt_all.py --partition=gpu-l40s --dataset=fly_multiclip --num_gpus=8 --note='hyak_multiclip'
 
-# python scripts/slurm-run_ckpt_all.py --train=train_fly_run --dataset=fly_run --note='hyak_ckpt'
-# python scripts/slurm-run_ckpt_all.py --partition=gpu-l40s --dataset=fly_multiclip --note='hyak_ckpt' 
 
 ## exclude nodes g3090,g3107,g3097,g3109,g3113,g3091,g3096
