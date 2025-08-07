@@ -31,12 +31,10 @@ For performance benchmarks, see benchmark.py
 from .vnc_network import VNCRecurrentNetwork, create_random_network
 from .activation_functions import ActivationFunction
 from .input_functions import InputFunction
-from .noise_functions import NoiseFunction
 
 __all__ = [
     "VNCRecurrentNetwork",
     "ActivationFunction",
     "InputFunction",
-    "NoiseFunction",
     "create_random_network",
 ]
