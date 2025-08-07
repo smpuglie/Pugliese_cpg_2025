@@ -346,7 +346,6 @@ def create_random_network(
     neuron_size_scale: Union[list, Array] = [],
     relative_inputs_scale: float = 0.03,
     random_seed: Optional[int] = None,
-    numpy_random: Optional[bool] = False,
 ) -> VNCRecurrentNetwork:
     """
     Create a random VNC network with specified parameter statistics.
