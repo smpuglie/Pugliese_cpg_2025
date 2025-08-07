@@ -5,7 +5,8 @@ This module provides a collection of input functions for generating external sti
 to neurons. All functions support time-varying inputs and broadcasting to multiple neurons.
 """
 
-import numpy as np
+import jax.numpy as jnp
+from jax import Array
 from typing import Union, Any
 
 
@@ -68,7 +69,7 @@ class InputFunction:
         if store_full:
             self.convert_input_to_full_storage()
 
-    def _generate_input(self) -> np.ndarray:
+    def _generate_input(self) -> Array:
         """Generate the input pattern based on the specified type."""
         if self.input_type == "constant":
             return self._constant(**self.params)
@@ -79,7 +80,7 @@ class InputFunction:
         else:
             raise ValueError(f"Unknown input type: {self.input_type}")
 
-    def get(self, t: int) -> np.ndarray:
+    def get(self, t: int) -> Array:
         """
         Get input at timestep t.
 
@@ -132,7 +133,7 @@ class InputFunction:
                 elif self._input_data.shape == (self.num_timesteps, self.batch_size):
                     result = self._input_data[t]
                     # Broadcast across neurons: (batch_size,) -> (batch_size, num_neurons)
-                    result = np.tile(result[:, np.newaxis], (1, self.num_neurons))
+                    result = jnp.tile(result[:, jnp.newaxis], (1, self.num_neurons))
 
                 else:
                     # This should never happen with properly generated data
@@ -175,7 +176,7 @@ class InputFunction:
                 f"This may indicate a bug in input generation. Original error: {e}"
             )
 
-    def __call__(self, t: int) -> np.ndarray:
+    def __call__(self, t: int) -> Array:
         """
         Make the InputFunction object callable like a function.
 
@@ -195,7 +196,7 @@ class InputFunction:
         """
         return self.get(t)
 
-    def _constant(self, amplitude: Union[float, np.ndarray]) -> np.ndarray:
+    def _constant(self, amplitude: Union[float, Array]) -> Array:
         """
         Constant input across time.
 
@@ -205,24 +206,24 @@ class InputFunction:
         Returns:
             Input array, optimally shaped for memory efficiency, shape (), (N,), or (batch_size, N)
         """
-        amplitude = np.asarray(amplitude)
-        scalar_shape = amplitude.ndim == 0
-        neuron_shape = amplitude.shape == (self.num_neurons,)
-        batch_neuron_shape = amplitude.shape == (self.batch_size, self.num_neurons)
+        amplitude_arr = jnp.asarray(amplitude)
+        scalar_shape = amplitude_arr.ndim == 0
+        neuron_shape = amplitude_arr.shape == (self.num_neurons,)
+        batch_neuron_shape = amplitude_arr.shape == (self.batch_size, self.num_neurons)
 
         if scalar_shape or neuron_shape or batch_neuron_shape:
-            return np.asarray(amplitude)
+            return amplitude_arr
         else:
             raise ValueError(
-                f"Amplitude shape {amplitude.shape} incompatible with {self.batch_size}x{self.num_neurons} neurons"
+                f"Amplitude shape {amplitude_arr.shape} incompatible with {self.batch_size}x{self.num_neurons} neurons"
             )
 
     def _sinusoidal(
         self,
-        frequency: Union[float, np.ndarray],
-        amplitude: Union[float, np.ndarray],
-        phase: Union[float, np.ndarray] = 0.0,
-    ) -> np.ndarray:
+        frequency: Union[float, Array],
+        amplitude: Union[float, Array],
+        phase: Union[float, Array] = 0.0,
+    ) -> Array:
         """
         Sinusoidal input function with optimized broadcasting.
 
@@ -254,11 +255,11 @@ class InputFunction:
             - Output shape is automatically minimized based on parameter complexity
             - For large simulations, consider using scalar or (N,) parameters when possible
         """
-        if np.any(np.asarray(frequency) < 0):
+        if jnp.any(jnp.asarray(frequency) < 0):
             raise ValueError("Frequency must be non-negative")
 
         # Pre-compute time array with optimal shape for broadcasting
-        t = np.arange(self.num_timesteps).reshape(-1, 1, 1) * self.dt  # Shape: (T,1,1)
+        t = jnp.arange(self.num_timesteps).reshape(-1, 1, 1) * self.dt  # Shape: (T,1,1)
 
         # Broadcast all parameters with error checking
         try:
@@ -270,7 +271,7 @@ class InputFunction:
 
         # Compute sinusoidal input with optimized broadcasting
         # This single operation handles all shape combinations efficiently
-        input_signal = amp * np.sin(2 * np.pi * freq * t + ph)
+        input_signal = amp * jnp.sin(2 * jnp.pi * freq * t + ph)
 
         # Return with minimal necessary dimensions (squeeze removes size-1 dimensions)
         return input_signal.squeeze()
@@ -278,9 +279,9 @@ class InputFunction:
     def _step(
         self,
         step_time: float,
-        amplitude_before: Union[float, np.ndarray],
-        amplitude_after: Union[float, np.ndarray],
-    ) -> np.ndarray:
+        amplitude_before: Union[float, Array],
+        amplitude_after: Union[float, Array],
+    ) -> Array:
         """
         Step input function.
 
@@ -303,7 +304,7 @@ class InputFunction:
             raise ValueError(f"dt must be positive, got {self.dt}")
 
         # Pre-compute time array with optimal shape for broadcasting
-        t = np.arange(self.num_timesteps).reshape(-1, 1, 1) * self.dt  # Shape: (T,1,1)
+        t = jnp.arange(self.num_timesteps).reshape(-1, 1, 1) * self.dt  # Shape: (T,1,1)
 
         # Broadcast all parameters with error checking
         try:
@@ -319,14 +320,14 @@ class InputFunction:
         # Return with minimal necessary dimensions (squeeze removes size-1 dimensions)
         return input_signal.squeeze()
 
-    def _broadcast_param(self, param: Union[float, np.ndarray], param_name: str) -> np.ndarray:
+    def _broadcast_param(self, param: Union[float, Array], param_name: str) -> Array:
         """
         Helper function to broadcast parameters with comprehensive error checking.
 
         Returns parameters in shape (1, batch_size_or_1, num_neurons_or_1) format
         for efficient broadcasting with time array.
         """
-        param_array = np.atleast_1d(param)
+        param_array = jnp.atleast_1d(param)
 
         # Scalar case - most memory efficient
         if param_array.size == 1:
@@ -374,22 +375,22 @@ class InputFunction:
         elif self._input_data.ndim == 2:
             # Shape: (batch_size, N) -- time-independent
             if self._input_data.shape == (self.batch_size, self.num_neurons):
-                self._input_data = np.tile(
-                    self._input_data[np.newaxis, :, :], (self.num_timesteps, 1, 1)
+                self._input_data = jnp.tile(
+                    self._input_data[jnp.newaxis, :, :], (self.num_timesteps, 1, 1)
                 )  # Shape: (T, B, N)
                 return
 
             # Shape:  (T, N) -- Time-varying, single batch
             elif self._input_data.shape == (self.num_timesteps, self.num_neurons):
-                self._input_data = np.tile(
-                    self._input_data[:, np.newaxis, :], (1, self.batch_size, 1)
+                self._input_data = jnp.tile(
+                    self._input_data[:, jnp.newaxis, :], (1, self.batch_size, 1)
                 )  # Shape: (T, B, N)
                 return
 
             # Shape: (T, batch_size) -- time-varying, neuron-independent
             elif self._input_data.shape == (self.num_timesteps, self.batch_size):
-                self._input_data = np.tile(
-                    self._input_data[:, np.newaxis], (1, 1, self.num_neurons)
+                self._input_data = jnp.tile(
+                    self._input_data[:, jnp.newaxis], (1, 1, self.num_neurons)
                 )  # Shape: (T, B, N)
                 return
 
@@ -400,19 +401,19 @@ class InputFunction:
                 )
         # Shape: (N,) -- constant across time and batch
         elif self._input_data.ndim == 1 and self._input_data.shape == (self.num_neurons,):
-            self._input_data = np.tile(
-                self._input_data[np.newaxis, np.newaxis, :], (self.num_timesteps, self.batch_size, 1)
+            self._input_data = jnp.tile(
+                self._input_data[jnp.newaxis, jnp.newaxis, :], (self.num_timesteps, self.batch_size, 1)
             )  # Shape: (T, B, N)
             return
         # Shape: (T,) -- time-varying, neuron- and batch-independent
         elif self._input_data.ndim == 1 and self._input_data.shape == (self.num_timesteps,):
-            self._input_data = np.tile(
-                self._input_data[:, np.newaxis, np.newaxis], (1, self.batch_size, self.num_neurons)
+            self._input_data = jnp.tile(
+                self._input_data[:, jnp.newaxis, jnp.newaxis], (1, self.batch_size, self.num_neurons)
             )  # Shape: (T, B, N)
             return
         # Shape () -- single constant value
         elif self._input_data.ndim == 0:
-            self._input_data = np.full(
+            self._input_data = jnp.full(
                 (self.num_timesteps, self.batch_size, self.num_neurons), self._input_data
             )  # Shape: (T, B, N)
             return
@@ -426,12 +427,12 @@ class InputFunction:
         self._input_data = self._generate_input()
         return
 
-    def get_full_input_data(self) -> np.ndarray:
+    def get_full_input_data(self) -> Array:
         """
         Get all input data, including any stored full data.
 
         Returns:
-            np.ndarray: The full input data array.
+            Array: The full input data array.
         """
         if self._input_data.ndim == 3:
             return self._input_data
@@ -455,7 +456,9 @@ class InputFunction:
             - 'full_size_mb': What the full storage size would be in MB
             - 'memory_efficiency': Ratio of current storage to full storage
         """
-        current_size_bytes = self._input_data.nbytes
+        current_size_bytes = (
+            self._input_data.nbytes if hasattr(self._input_data, "nbytes") else self._input_data.size * 4
+        )
         current_size_mb = current_size_bytes / (1024**2)
 
         full_shape = (self.num_timesteps, self.batch_size, self.num_neurons)

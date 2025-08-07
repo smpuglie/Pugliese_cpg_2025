@@ -6,7 +6,8 @@ and maximum firing rates. All functions support vectorized operations and mainta
 the specified output ranges based on neuron-specific parameters.
 """
 
-import numpy as np
+import jax.numpy as jnp
+from jax import Array
 
 
 class ActivationFunction:
@@ -18,7 +19,7 @@ class ActivationFunction:
     """
 
     @staticmethod
-    def scaled_tanh_relu(x: np.ndarray, relative_gains: np.ndarray, max_rates: np.ndarray) -> np.ndarray:
+    def scaled_tanh_relu(x: Array, relative_gains: Array, max_rates: Array) -> Array:
         """
         Scaled tanh followed by ReLU activation function.
 
@@ -30,10 +31,10 @@ class ActivationFunction:
         Returns:
             Activated values in range [0, max_rates], shape (..., N)
         """
-        return np.maximum(0, max_rates * np.tanh(relative_gains * x / max_rates))
+        return jnp.maximum(0, max_rates * jnp.tanh(relative_gains * x / max_rates))
 
     @staticmethod
-    def tanh_scaled(x: np.ndarray, relative_gains: np.ndarray, max_rates: np.ndarray) -> np.ndarray:
+    def tanh_scaled(x: Array, relative_gains: Array, max_rates: Array) -> Array:
         """
         Scaled hyperbolic tangent activation function.
 
@@ -45,10 +46,10 @@ class ActivationFunction:
         Returns:
             Activated values in range [0, max_rates], shape (..., N)
         """
-        return max_rates * (np.tanh(relative_gains * x / max_rates) + 1) / 2
+        return max_rates * (jnp.tanh(relative_gains * x / max_rates) + 1) / 2
 
     @staticmethod
-    def sigmoid_scaled(x: np.ndarray, relative_gains: np.ndarray, max_rates: np.ndarray) -> np.ndarray:
+    def sigmoid_scaled(x: Array, relative_gains: Array, max_rates: Array) -> Array:
         """
         Scaled sigmoid activation function.
 
@@ -61,11 +62,11 @@ class ActivationFunction:
             Activated values in range [0, max_rates], shape (..., N)
         """
         # Clip input to prevent overflow in exp
-        clipped_x = np.clip(relative_gains * x / max_rates, -500, 500)
-        return max_rates / (1 + np.exp(-clipped_x))
+        clipped_x = jnp.clip(relative_gains * x / max_rates, -500, 500)
+        return max_rates / (1 + jnp.exp(-clipped_x))
 
     @staticmethod
-    def relu_scaled(x: np.ndarray, relative_gains: np.ndarray, max_rates: np.ndarray) -> np.ndarray:
+    def relu_scaled(x: Array, relative_gains: Array, max_rates: Array) -> Array:
         """
         Scaled ReLU activation function with saturation.
 
@@ -80,7 +81,7 @@ class ActivationFunction:
         return ActivationFunction.linear_clipped(x, relative_gains, max_rates)
 
     @staticmethod
-    def linear_clipped(x: np.ndarray, relative_gains: np.ndarray, max_rates: np.ndarray) -> np.ndarray:
+    def linear_clipped(x: Array, relative_gains: Array, max_rates: Array) -> Array:
         """
         Linear activation function with clipping.
 
@@ -92,4 +93,4 @@ class ActivationFunction:
         Returns:
             Activated values in range [0, max_rates], shape (..., N)
         """
-        return np.clip(relative_gains * x / max_rates, 0, max_rates)
+        return jnp.clip(relative_gains * x / max_rates, 0, max_rates)

@@ -5,15 +5,22 @@ A high-performance, biologically-inspired recurrent neural network implementatio
 for simulating neural dynamics in the ventral nerve cord (VNC) of insects.
 
 This package provides:
-- Fast NumPy-based RNN simulation with sparse connectivity support
+- Fast JAX-based RNN simulation with GPU/TPU acceleration support
 - Multiple activation functions and input/noise generators
 - Batch simulation capabilities for parallel processing
+- Deterministic random number generation with JAX PRNG
 - Comprehensive documentation and examples
 
 Example usage:
-    >>> from dt_vnc_rnn import create_random_network, InputFunction
-    >>> network = create_random_network(50, dt=0.001)
-    >>> input_func = lambda: InputFunction.constant(10.0, 50, 1000)
+    >>> import jax.random as random
+    >>> from dt_vnc_rnn_jax import create_random_network, InputFunction
+    >>>
+    >>> # Create a simple weight matrix
+    >>> key = random.PRNGKey(42)
+    >>> weights = random.normal(key, (50, 50)) * 0.1
+    >>>
+    >>> network = create_random_network(50, dt=0.001, weights=weights, random_seed=42)
+    >>> input_func = InputFunction('constant', 50, 1000, amplitude=10.0)
     >>> firing_rates = network.simulate(1000, input_func=input_func)
     >>> print(f"Simulation output: {firing_rates.shape}")
 
