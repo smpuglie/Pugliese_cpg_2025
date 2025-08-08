@@ -7,7 +7,7 @@ n_replicates: 512
 batch_size: 
 dn_screen: False
 stimNeurons: 
-  - [31]
+  - [25]
 removeNeurons: []
 stimI: 
   - [250]

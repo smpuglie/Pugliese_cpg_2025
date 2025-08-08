@@ -7,7 +7,7 @@ n_replicates: 1000
 batch_size: 
 dn_screen: False
 stimNeurons: 
-  - [31, 132]
+  - [25]
   # - [1208]
 removeNeurons: []
 stimI: 
