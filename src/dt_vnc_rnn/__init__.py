@@ -28,7 +28,7 @@ For detailed examples, see example_usage.py
 For performance benchmarks, see benchmark.py
 """
 
-from .vnc_network import VNCRecurrentNetwork, create_random_network
+from .vnc_network import VNCRecurrentNetwork, create_random_network, process_parameter_stats
 from .activation_functions import ActivationFunction
 from .input_functions import InputFunction
 
@@ -37,4 +37,5 @@ __all__ = [
     "ActivationFunction",
     "InputFunction",
     "create_random_network",
+    "process_parameter_stats",
 ]

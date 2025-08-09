@@ -18,6 +18,7 @@ from typing import Union, Callable, Optional
 import warnings
 from .activation_functions import ActivationFunction
 from .input_functions import InputFunction
+from src.sim_utils import set_sizes
 
 
 class VNCRecurrentNetwork:
@@ -343,7 +344,7 @@ def create_random_network(
     max_firing_rates_stats: dict = {"distribution": "normal", "mean": 1.0, "std": 0.3},
     thresholds_stats: dict = {"distribution": "normal", "mean": 1.0, "std": 0.3},
     time_constants_stats: dict = {"distribution": "normal", "mean": 1.0, "std": 0.3},
-    neuron_size_scale: Union[list, Array] = [],
+    neuron_sizes: Union[list, Array] = [],
     relative_inputs_scale: float = 0.03,
     random_seed: Optional[int] = None,
 ) -> VNCRecurrentNetwork:
@@ -359,7 +360,7 @@ def create_random_network(
         max_firing_rates_stats: Statistics for max firing rates (mean, std)
         thresholds_stats: Statistics for thresholds (mean, std)
         time_constants_stats: Statistics for time constants (mean, std)
-        neuron_size_scale: Factors that scale the gains and thresholds of individual neurons based on their size
+        neuron_sizes: Individual neuron size that dictates the scale factor for gains and thresholds
         relative_inputs_scale: Scaling factor for relative inputs
         random_seed: Random seed for reproducibility
         numpy_random: If True, use NumPy for random number generation; if False, use JAX
@@ -376,14 +377,15 @@ def create_random_network(
     max_rates = process_parameter_stats(num_neurons, max_firing_rates_stats, keys[1])
     thresholds = process_parameter_stats(num_neurons, thresholds_stats, keys[2])
     time_constants = process_parameter_stats(num_neurons, time_constants_stats, keys[3])
+    print(gains.shape)
 
     # Apply size scaling if provided
-    if len(neuron_size_scale) == num_neurons:
-        size_scale = jnp.asarray(neuron_size_scale)
-        gains /= size_scale
-        thresholds *= size_scale
+    if len(neuron_sizes) == num_neurons:
+        gains, thresholds = set_sizes(neuron_sizes, gains, thresholds)
+        gains = gains.squeeze()
+        thresholds = thresholds.squeeze()
     else:
-        warnings.warn("neuron_size_scale length does not match num_neurons; skipping size scaling.")
+        warnings.warn("neuron_sizes length does not match num_neurons; skipping size scaling.")
 
     # Create network instance
     return VNCRecurrentNetwork(
