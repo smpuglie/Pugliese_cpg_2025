@@ -137,6 +137,7 @@ class VNCRecurrentNetwork:
         recurrent_noise_std: float = 0.0,
         input_noise_tau: float = 1.0,
         recurrent_noise_tau: float = 1.0,
+        random_seed: int = 11,
     ) -> Array:
         """
         Run simulation(s) of the network using JAX scan optimization.
@@ -153,6 +154,7 @@ class VNCRecurrentNetwork:
             recurrent_noise_std: Standard deviation of recurrent noise (default 0.0)
             input_noise_tau: Time constant for input noise (default 1.0)
             recurrent_noise_tau: Time constant for recurrent noise (default 1.0)
+            random_seed: Random seed for reproducibility (default 11)
 
         Returns:
             Firing rates array, shape (T+1, N) for single sim or (T+1, batch_size, N) for batch
@@ -178,6 +180,7 @@ class VNCRecurrentNetwork:
             recurrent_noise_tau=recurrent_noise_tau,
             batch_size=batch_size,
             initial_state=initial_state,
+            random_seed=random_seed,
         )
 
     @partial(jax.jit, static_argnums=(0,), static_argnames=("num_timesteps", "batch_size", "initial_state"))
