@@ -10,6 +10,7 @@ Mathematical Model:
     where α = dt/τ
 """
 
+import numpy as np
 import jax
 import jax.numpy as jnp
 from jax import Array, random, lax
@@ -55,7 +56,7 @@ class VNCRecurrentNetwork:
         max_firing_rates: Union[float, Array],
         thresholds: Union[float, Array],
         time_constants: Union[float, Array],
-        weights: Array,
+        weights: Union[np.ndarray, Array],
         relative_inputs_scale: float = 0.03,
         activation_function: str = "scaled_tanh_relu",
     ):
@@ -341,13 +342,13 @@ def process_parameter_stats(n_samples: int, stats: dict, key: Array) -> Array:
 def create_random_network(
     num_neurons: int,
     dt: float,
-    weights: Array,
+    weights: Union[np.ndarray, Array],
     activation_function: str = "scaled_tanh_relu",
     gains_stats: dict = {"distribution": "normal", "mean": 1.0, "std": 0.3},
     max_firing_rates_stats: dict = {"distribution": "normal", "mean": 1.0, "std": 0.3},
     thresholds_stats: dict = {"distribution": "normal", "mean": 1.0, "std": 0.3},
     time_constants_stats: dict = {"distribution": "normal", "mean": 1.0, "std": 0.3},
-    neuron_sizes: Union[list, Array] = [],
+    neuron_sizes: Union[list, np.ndarray, Array] = [],
     relative_inputs_scale: float = 0.03,
     random_seed: Optional[int] = None,
 ) -> VNCRecurrentNetwork:
@@ -380,7 +381,6 @@ def create_random_network(
     max_rates = process_parameter_stats(num_neurons, max_firing_rates_stats, keys[1])
     thresholds = process_parameter_stats(num_neurons, thresholds_stats, keys[2])
     time_constants = process_parameter_stats(num_neurons, time_constants_stats, keys[3])
-    print(gains.shape)
 
     # Apply size scaling if provided
     if len(neuron_sizes) == num_neurons:
