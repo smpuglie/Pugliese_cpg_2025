@@ -216,14 +216,14 @@ def compute_oscillation_score(activity, active_mask, prominence=0.05):
     
     # Apply mask: set inactive neurons to 0.0
     score_values = jnp.where(active_mask, all_scores, 0.0)
-    frequencies = jnp.where(active_mask, all_frequencies, 0.0)
+    frequencies = jnp.where(active_mask, all_frequencies, jnp.nan)
     
     # Calculate mean over active neurons only
     num_active = jnp.sum(active_mask)
     
     # Sum scores for active neurons
     active_score_sum = jnp.sum(score_values * active_mask)
-    active_freq_sum = jnp.sum(frequencies * active_mask)
+    # active_freq_sum = jnp.sum(frequencies * active_mask)
     
     # Calculate means, avoiding division by zero
     oscillation_score = jnp.where(
@@ -233,7 +233,8 @@ def compute_oscillation_score(activity, active_mask, prominence=0.05):
     )
     mean_frequency = jnp.where(
         num_active > 0,
-        active_freq_sum / num_active,
+        #active_freq_sum / num_active,
+        jnp.nanmean(jnp.where(jnp.isinf(frequencies),jnp.nan,frequencies)), # I think this is better? Will have to test
         0.0
     )
     
