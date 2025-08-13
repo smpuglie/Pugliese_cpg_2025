@@ -682,7 +682,7 @@ def get_batch_function(sim_config: SimulationConfig):
         "baseline": process_batch_baseline,
         "shuffle": process_batch_shuffle, 
         "noise": process_batch_noise,
-        "prune": process_batch_Wmask
+        "Wmask": process_batch_Wmask
     }
     
     if sim_config.sim_type not in batch_functions:
@@ -1037,6 +1037,7 @@ def _run_with_pruning(
         
         # Move results to CPU to save GPU memory
         batch_results = jax.device_put(batch_results, jax.devices("cpu")[0])
+        mini_circuit = jnp.stack([((jnp.sum(batch_results[:,n],axis=-1)>0) & ~mn_mask) for n in range(batch_results.shape[1])],axis=1)
         mini_circuit = jax.device_put(mini_circuit, jax.devices("cpu")[0])
         
         all_results.append(batch_results)
@@ -1148,6 +1149,9 @@ def prepare_neuron_params(cfg: DictConfig, W_table: Any) -> NeuronParams:
     
     # Initialize W_mask for pruning if needed
     W_mask = jnp.ones((num_sims, W.shape[0], W.shape[1]), dtype=jnp.bool)
+    if len(cfg.experiment.removeNeurons) > 0:
+        W_mask = W_mask.at[:, cfg.experiment.removeNeurons, :].set(False)
+        W_mask = W_mask.at[:, :, cfg.experiment.removeNeurons].set(False)
     
     return NeuronParams(
         W=W, W_mask=W_mask, tau=tau, a=a, threshold=threshold, fr_cap=fr_cap,
@@ -1193,8 +1197,8 @@ def parse_simulation_config(cfg: DictConfig) -> SimulationConfig:
         sim_type = "shuffle"
     elif getattr(cfg.sim, "noise", False):
         sim_type = "noise"
-    elif getattr(cfg.sim, "prune_network", False):
-        sim_type = "prune"
+    elif getattr(cfg.sim, "prune_network", False) | (len(cfg.experiment.removeNeurons) > 0):
+        sim_type = "Wmask"
     
     # Check if pruning is enabled
     enable_pruning = getattr(cfg.sim, "prune_network", False)
