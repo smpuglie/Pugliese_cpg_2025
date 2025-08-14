@@ -10,7 +10,7 @@ stimNeurons:
   - [1164,1211,1337,1404]
 removeNeurons: []
 stimI: 
-  - [250]
+  - [65]
 seed: 1
 saveFigs: True
 useTsp: False
