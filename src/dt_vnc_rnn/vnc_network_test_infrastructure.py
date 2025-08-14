@@ -121,7 +121,8 @@ def simulate_network_static_input(
         synaptic_input = (r_current + noise_recurrent_t) @ weights.T
 
         # Total input
-        total_input = input_data * pulse_active + relative_inputs_scale * synaptic_input - thresholds + noise_input_t
+        # total_input = input_data * pulse_active + relative_inputs_scale * synaptic_input - thresholds + noise_input_t
+        total_input = input_data * pulse_active + synaptic_input - thresholds + noise_input_t
 
         # Apply activation function
         activated = scaled_tanh_relu(total_input, gains, max_firing_rates)
@@ -146,7 +147,7 @@ def simulate_network_static_input(
     # firing_rates = firing_rates.at[1:].set(all_states)
 
     # return firing_rates
-    return all_states
+    return jnp.transpose(all_states)
 
 
 @jax.jit
