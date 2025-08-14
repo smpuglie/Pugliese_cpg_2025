@@ -70,9 +70,11 @@ def simulate_network_static_input(
     recurrent_noise_std = 0
     input_noise_tau = dt
     recurrent_noise_tau = dt
-    batch_size = 1
+    batch_size = inputs.shape[0]
     initial_state = None
     random_key = key
+
+    # jax.debug.print("INPUTS SHAPE: {shp}", shp=inputs.shape)
 
     # Handle initial state
     if initial_state is None:
@@ -85,8 +87,8 @@ def simulate_network_static_input(
             raise ValueError(f"Initial states shape {r.shape} != ({batch_size}, {num_neurons})")
 
     # Prepare storage
-    firing_rates = jnp.zeros((num_timesteps + 1, batch_size, num_neurons))
-    firing_rates = firing_rates.at[0].set(r)
+    # firing_rates = jnp.zeros((num_timesteps + 1, batch_size, num_neurons))
+    # firing_rates = firing_rates.at[0].set(r)
 
     # prepare noise parameters
     alpha_input = dt / input_noise_tau
@@ -141,9 +143,10 @@ def simulate_network_static_input(
     _, all_states = lax.scan(simulation_step, scan_carry, scan_inputs)
 
     # Combine initial state with all simulation states
-    firing_rates = firing_rates.at[1:].set(all_states)
+    # firing_rates = firing_rates.at[1:].set(all_states)
 
-    return firing_rates
+    # return firing_rates
+    return all_states
 
 
 @jax.jit
