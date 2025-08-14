@@ -1,5 +1,5 @@
 import os 
-# os.environ["CUDA_VISIBLE_DEVICES"] = "0"  # Use GPU 1
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"  # Use GPU 1
 os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.95"
 import jax
 
@@ -13,6 +13,7 @@ import hydra
 import sparse
 from omegaconf import DictConfig, OmegaConf
 from pathlib import Path
+import src.io_dict_to_hdf5 as ioh5
 from src.path_utils import convert_dict_to_path, save_config
 from src.vnc_sim import run_vnc_simulation
 
@@ -31,11 +32,12 @@ def main(cfg: DictConfig):
 
     ##### Run the simulation #####
     print("Running VNC simulation with the following configuration:")
-    results, final_mini_circuits = run_vnc_simulation(cfg)
+    results, final_mini_circuits, neuron_params = run_vnc_simulation(cfg)
     
     ##### Save results #####
     print('Saving results to:', cfg.paths.ckpt_dir)
     sparse.save_npz(cfg.paths.ckpt_dir / f"{cfg.experiment.name}_Rs.npz", sparse.COO.from_numpy(results))
+    ioh5.save(cfg.paths.ckpt_dir / 'neuron_params.h5', neuron_params._asdict())
     if final_mini_circuits is not None:
         sparse.save_npz(cfg.paths.ckpt_dir / f"{cfg.experiment.name}_mini_circuits.npz", sparse.COO.from_numpy(final_mini_circuits))
 
