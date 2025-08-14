@@ -1,12 +1,10 @@
 import os 
-# os.environ["CUDA_VISIBLE_DEVICES"] = "0"  # Use GPU 1
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"  # Use GPU 1
 os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.95"
 import jax
 
 # Configure JAX for better performance
 jax.config.update("jax_enable_x64", False)  # Use float32 for better GPU performance
-
-print("JAX backend:", jax.lib.xla_bridge.get_backend().platform)
 print('Gpu devices:', len(jax.devices('gpu')) if jax.devices('gpu') else len(jax.devices('cpu')))
 
 import hydra

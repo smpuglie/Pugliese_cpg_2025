@@ -671,7 +671,7 @@ def process_batch_baseline(
             neuron_params.a[param_idx],
             neuron_params.threshold[param_idx],
             neuron_params.fr_cap[param_idx],
-            neuron_params.input_currents[stim_idx],
+            neuron_params.input_currents[stim_idx, param_idx],
             sim_params,
             neuron_params.seeds[param_idx]
         )
@@ -860,61 +860,60 @@ def _adjust_stimulation_for_batch(
     next_highest = None
     next_lowest = None
     
+
     for adjust_iter in range(sim_config.max_adjustment_iters):
-        # Run test with current stimulation
         test_results = batch_func(adjusted_neuron_params, sim_params, batch_indices)
-        
         if n_devices > 1:
             test_results = test_results.reshape(-1, *test_results.shape[2:])
-        
-        # Calculate activity metrics for this batch
-        max_rates = jnp.max(test_results, axis=2)  # Max over time for each neuron
-        n_active = jnp.sum(jnp.sum(test_results, axis=2) > 0, axis=1)  # Active neurons per simulation
-        n_high_fr = jnp.sum(max_rates > sim_config.high_fr_threshold, axis=1)  # High FR neurons per simulation
 
-        # Use mean across batch for adjustment decisions
-        mean_n_active = jnp.mean(n_active)
-        mean_n_high_fr = jnp.mean(n_high_fr)
-        current_max_stim = jnp.max(adjusted_neuron_params.input_currents)
-        
-        print(f"    Adjustment iter {adjust_iter + 1}: Max stim: {current_max_stim:.6f}, "
-              f"Mean active: {mean_n_active:.1f}, Mean high FR: {mean_n_high_fr:.1f}")
-        
-        # Check if stimulation is appropriate
-        if (mean_n_active > sim_config.n_active_upper) or (mean_n_high_fr > sim_config.n_high_fr_upper):
-            # Too strong - reduce stimulation
-            current_inputs = adjusted_neuron_params.input_currents
-            if next_lowest is None:
-                new_inputs = current_inputs / 2
-            else:
-                new_inputs = (current_inputs + next_lowest) / 2
-            next_highest = current_inputs
+        max_rates = jnp.max(test_results, axis=2)
+        n_active = jnp.sum(jnp.sum(test_results, axis=2) > 0, axis=1)
+        n_high_fr = jnp.sum(max_rates > sim_config.high_fr_threshold, axis=1)
 
-        elif mean_n_active < sim_config.n_active_lower:
-            # Too weak - increase stimulation
-            current_inputs = adjusted_neuron_params.input_currents
-            if next_highest is None:
-                new_inputs = current_inputs * 2
+        current_inputs = adjusted_neuron_params.input_currents.copy()
+        new_inputs = current_inputs.copy()
+        converged = jnp.ones_like(n_active, dtype=bool)
+        for sim_idx in range(len(n_active)):
+            sim_active = n_active[sim_idx]
+            sim_high_fr = n_high_fr[sim_idx]
+            sim_input = current_inputs[sim_idx]
+
+            print(f"    Adjustment iter {adjust_iter + 1}, Sim {sim_idx}: Max stim: {jnp.max(sim_input):.6f}, "
+                  f"Active: {sim_active}, High FR: {sim_high_fr}")
+
+            if (sim_active > sim_config.n_active_upper) or (sim_high_fr > sim_config.n_high_fr_upper):
+                # Too strong - reduce stimulation
+                if next_lowest is None:
+                    new_inputs = new_inputs.at[sim_idx].set(sim_input / 2)
+                else:
+                    new_inputs = new_inputs.at[sim_idx].set((sim_input + next_lowest[sim_idx]) / 2)
+                next_highest = current_inputs
+                converged = converged.at[sim_idx].set(False)
+            elif sim_active < sim_config.n_active_lower:
+                # Too weak - increase stimulation
+                if next_highest is None:
+                    new_inputs = new_inputs.at[sim_idx].set(sim_input * 2)
+                else:
+                    new_inputs = new_inputs.at[sim_idx].set((sim_input + next_highest[sim_idx]) / 2)
+                next_lowest = current_inputs
+                converged = converged.at[sim_idx].set(False)
             else:
-                new_inputs = (current_inputs + next_highest) / 2
-            next_lowest = current_inputs
-            
-        else:
-            # Just right - break out of adjustment loop
-            print(f"    Stimulation appropriate for this batch")
-            break
-        
+                # Just right
+                converged = converged.at[sim_idx].set(True)
+
         # Update neuron params with new stimulation
         adjusted_neuron_params = adjusted_neuron_params._replace(
             input_currents=new_inputs
         )
-        
-        # Clean up memory
+
         del test_results
         gc.collect()
-        
+
+        if jnp.all(converged):
+            print(f"    Stimulation appropriate for all simulations in this batch")
+            break
     else:
-        print(f"    Warning: Maximum adjustment iterations ({sim_params.max_adjustment_iters}) reached for this batch")
+        print(f"    Warning: Maximum adjustment iterations ({sim_config.max_adjustment_iters}) reached for this batch")
 
     return adjusted_neuron_params
 
@@ -1250,7 +1249,7 @@ def prepare_neuron_params(cfg: DictConfig, W_table: Any, param_path: Optional[Pa
     
     input_currents_list = []
     for stim_neurons, stim_input in zip(stim_neurons_list, stim_input_list):
-        input_current = jnp.array(make_input(n_neurons, jnp.array(stim_neurons), stim_input))
+        input_current = jnp.tile(make_input(n_neurons, jnp.array(stim_neurons), stim_input), (num_sims, 1))
         input_currents_list.append(input_current)
     input_currents = jnp.array(input_currents_list)
     
@@ -1262,7 +1261,7 @@ def prepare_neuron_params(cfg: DictConfig, W_table: Any, param_path: Optional[Pa
     if len(cfg.experiment.removeNeurons) > 0:
         W_mask = W_mask.at[:, cfg.experiment.removeNeurons, :].set(False)
         W_mask = W_mask.at[:, :, cfg.experiment.removeNeurons].set(False)
-    if param_path is not None:
+    if (param_path is not None) and param_path.exists():
         import src.io_dict_to_hdf5 as ioh5
         nparams = ioh5.load(param_path, enable_jax=True)
         print('Loaded neuron parameters from', param_path)
