@@ -16,6 +16,7 @@ from src.sim_utils import (
     load_W, load_wTable, sample_trunc_normal, set_sizes, make_input,
     compute_oscillation_score
 )
+from src.dt_vnc_rnn.vnc_network_test_infrastructure import process_batch_baseline_discrete_rnn, run_baseline_discrete_rnn
 
 # #############################################################################################################################=
 # IMMUTABLE CONFIGURATION STRUCTURES
@@ -689,6 +690,7 @@ def get_batch_function(sim_config: SimulationConfig):
         "shuffle": process_batch_shuffle, 
         "noise": process_batch_noise,
         "Wmask": process_batch_Wmask
+        "DiscreteRNN": process_batch_baseline_discrete_rnn
     }
     
     if sim_config.sim_type not in batch_functions:
@@ -1309,7 +1311,9 @@ def parse_simulation_config(cfg: DictConfig) -> SimulationConfig:
         sim_type = "noise"
     elif getattr(cfg.sim, "prune_network", False) | (len(cfg.experiment.removeNeurons) > 0):
         sim_type = "Wmask"
-    
+    elif getattr(cfg.sim, "discrete_rnn", False):
+        sim_type = "DiscreteRNN"
+
     # Check if pruning is enabled
     enable_pruning = getattr(cfg.sim, "prune_network", False)
     
