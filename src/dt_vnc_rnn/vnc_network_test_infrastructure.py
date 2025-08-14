@@ -56,13 +56,13 @@ def simulate_network_static_input(
     """
     num_neurons = W.shape[0]
     weights = W
-    relative_inputs_scale = 0.03
+    # relative_inputs_scale = 0.03
     alpha = dt / tau
     thresholds = threshold
     gains = a
     max_firing_rates = fr_cap
     # activation_function = "scaled_tanh_relu"
-    num_timesteps = t_axis.shape[0]  # jnp.array(T / dt, int)
+    # num_timesteps = t_axis.shape[0]  # jnp.array(T / dt, int)
     input_data = inputs
     pulse_start = pulse_start
     pulse_end = pulse_end
@@ -70,11 +70,9 @@ def simulate_network_static_input(
     recurrent_noise_std = 0
     input_noise_tau = dt
     recurrent_noise_tau = dt
-    batch_size = inputs.shape[0]
+    batch_size = 1
     initial_state = None
     random_key = key
-
-    # jax.debug.print("INPUTS SHAPE: {shp}", shp=inputs.shape)
 
     # Handle initial state
     if initial_state is None:
@@ -167,7 +165,7 @@ def process_batch_baseline_discrete_rnn(
             neuron_params.a[param_idx],
             neuron_params.threshold[param_idx],
             neuron_params.fr_cap[param_idx],
-            neuron_params.input_currents[stim_idx],
+            neuron_params.input_currents[stim_idx, param_idx],
             sim_params,
             neuron_params.seeds[param_idx],
         )
