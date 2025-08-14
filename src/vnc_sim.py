@@ -595,7 +595,7 @@ def process_batch_Wmask(
             neuron_params.a[param_idx],
             neuron_params.threshold[param_idx],
             neuron_params.fr_cap[param_idx],
-            neuron_params.input_currents[stim_idx],
+            neuron_params.input_currents[stim_idx, param_idx],
             sim_params,
             neuron_params.seeds[param_idx]
         )
@@ -623,7 +623,7 @@ def process_batch_shuffle(
             neuron_params.a[param_idx],
             neuron_params.threshold[param_idx],
             neuron_params.fr_cap[param_idx],
-            neuron_params.input_currents[stim_idx],
+            neuron_params.input_currents[stim_idx, param_idx],
             neuron_params.seeds[param_idx],
             shuffle_indices,
             sim_params
@@ -647,7 +647,7 @@ def process_batch_noise(
             neuron_params.a[param_idx],
             neuron_params.threshold[param_idx],
             neuron_params.fr_cap[param_idx],
-            neuron_params.input_currents[stim_idx],
+            neuron_params.input_currents[stim_idx, param_idx],
             neuron_params.seeds[param_idx],
             sim_params.noise_stdv_prop,
             sim_params
@@ -860,7 +860,6 @@ def _adjust_stimulation_for_batch(
     next_highest = None
     next_lowest = None
     
-
     for adjust_iter in range(sim_config.max_adjustment_iters):
         test_results = batch_func(adjusted_neuron_params, sim_params, batch_indices)
         if n_devices > 1:
@@ -872,14 +871,19 @@ def _adjust_stimulation_for_batch(
 
         current_inputs = adjusted_neuron_params.input_currents.copy()
         new_inputs = current_inputs.copy()
-        converged = jnp.ones_like(n_active, dtype=bool)
+        needs_adjustment = jnp.zeros_like(n_active, dtype=bool)
+
+
+        mean_active = float(jnp.mean(n_active))
+        mean_high_fr = float(jnp.mean(n_high_fr))
+        mean_max_stim = float(jnp.mean(jnp.max(current_inputs, axis=1)))
+        print(f"    Adjustment iter {adjust_iter + 1}: Mean max stim: {mean_max_stim:.6f}, "
+              f"Mean active: {mean_active:.1f}, Mean high FR: {mean_high_fr:.1f}")
+
         for sim_idx in range(len(n_active)):
             sim_active = n_active[sim_idx]
             sim_high_fr = n_high_fr[sim_idx]
             sim_input = current_inputs[sim_idx]
-
-            print(f"    Adjustment iter {adjust_iter + 1}, Sim {sim_idx}: Max stim: {jnp.max(sim_input):.6f}, "
-                  f"Active: {sim_active}, High FR: {sim_high_fr}")
 
             if (sim_active > sim_config.n_active_upper) or (sim_high_fr > sim_config.n_high_fr_upper):
                 # Too strong - reduce stimulation
@@ -887,19 +891,15 @@ def _adjust_stimulation_for_batch(
                     new_inputs = new_inputs.at[sim_idx].set(sim_input / 2)
                 else:
                     new_inputs = new_inputs.at[sim_idx].set((sim_input + next_lowest[sim_idx]) / 2)
-                next_highest = current_inputs
-                converged = converged.at[sim_idx].set(False)
+                needs_adjustment = needs_adjustment.at[sim_idx].set(True)
             elif sim_active < sim_config.n_active_lower:
                 # Too weak - increase stimulation
                 if next_highest is None:
                     new_inputs = new_inputs.at[sim_idx].set(sim_input * 2)
                 else:
                     new_inputs = new_inputs.at[sim_idx].set((sim_input + next_highest[sim_idx]) / 2)
-                next_lowest = current_inputs
-                converged = converged.at[sim_idx].set(False)
-            else:
-                # Just right
-                converged = converged.at[sim_idx].set(True)
+                needs_adjustment = needs_adjustment.at[sim_idx].set(True)
+            # else: just right, no adjustment needed
 
         # Update neuron params with new stimulation
         adjusted_neuron_params = adjusted_neuron_params._replace(
@@ -909,7 +909,7 @@ def _adjust_stimulation_for_batch(
         del test_results
         gc.collect()
 
-        if jnp.all(converged):
+        if not jnp.any(needs_adjustment):
             print(f"    Stimulation appropriate for all simulations in this batch")
             break
     else:

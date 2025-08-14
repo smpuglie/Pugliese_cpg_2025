@@ -1,7 +1,6 @@
 ##### Easy Access Variables #####
 # if set to positive integer, overrides the default
 version: 'debug'
-seed: 42
 num_gpus: ''
 run_id: 'Testing'
 load_jobid: ''
@@ -20,16 +19,16 @@ defaults:
 # set the directory where the output files get saved
 hydra:
   job:
-      config:
-        override_dirname:
-          exclude_keys:
-            - paths
-            - version
-            - dataset
-            - run_id
-            - experiment
-            - sim
-            - neuron_params
+    config:
+      override_dirname:
+        exclude_keys:
+          - paths
+          - version
+          - dataset
+          - run_id
+          - experiment
+          - sim
+          - neuron_params
 
   run:
     dir: ${paths.base_dir}/run_id=${run_id}
