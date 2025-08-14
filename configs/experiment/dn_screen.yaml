@@ -1,7 +1,7 @@
 # This is the default configuration for the experiment.
 name: DN_Screen
 
-wPath: ${paths.data_dir}/manc t1 connectome data/W_20250813_DNtoMN_unsorted_withModules.csv
+wPath: ${paths.data_dir}/manc t1 connectome data/W_20250813_DNtoMN_unsorted.csv
 dfPath: ${paths.data_dir}/manc t1 connectome data/wTable_20250813_DNtoMN_unsorted_withModules.csv
 n_replicates: 256
 batch_size: 
