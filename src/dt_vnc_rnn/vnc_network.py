@@ -16,15 +16,9 @@ import jax
 import jax.numpy as jnp
 from jax import Array, random, lax
 from functools import partial
-from typing import Union, Callable, Optional, NamedTuple
+from typing import Union, Optional, NamedTuple
 import warnings
-from .activation_functions import (
-    scaled_tanh_relu,
-    tanh_scaled,
-    sigmoid_scaled,
-    relu_scaled,
-    linear_clipped,
-)
+from .activation_functions import get_activation_function
 from src.sim_utils import set_sizes
 
 
@@ -53,7 +47,7 @@ class NetworkParams(NamedTuple):
     time_constants: Array
     weights: Array
     relative_inputs_scale: float
-    activation_func: Callable
+    activation_function: str
     alpha: Array
 
 
@@ -77,33 +71,6 @@ def ensure_array_shape(param: Union[float, Array], num_neurons: int, name: str) 
         return param
     else:
         raise ValueError(f"{name} shape {param.shape} != (1,) or ({num_neurons},)")
-
-
-def get_activation_function(func_name: str) -> Callable:
-    """
-    Get activation function by name.
-
-    Args:
-        func_name: Name of the activation function
-
-    Returns:
-        Activation function callable
-
-    Raises:
-        ValueError: If activation function name is unknown
-    """
-    func_map = {
-        "scaled_tanh_relu": scaled_tanh_relu,
-        "tanh_scaled": tanh_scaled,
-        "sigmoid_scaled": sigmoid_scaled,
-        "relu_scaled": relu_scaled,
-        "linear_clipped": linear_clipped,
-    }
-
-    if func_name not in func_map:
-        raise ValueError(f"Unknown activation function: {func_name}")
-
-    return func_map[func_name]
 
 
 def create_network_params(
@@ -150,17 +117,14 @@ def create_network_params(
             raise ValueError(f"Weight matrix shape {weights.shape} != ({num_neurons}, {num_neurons})")
     weights_arr = jnp.asarray(weights)
 
-    # Set activation function
-    activation_func = get_activation_function(activation_function)
-
     # Precompute frequently used values for efficiency
     alpha = dt / time_constants_arr
 
-    # Validate alpha values
-    if jnp.any(alpha > 1.0):
-        warnings.warn("Some alpha values > 1.0, simulation may be unstable. Consider smaller dt.")
-    if jnp.any(alpha <= 0.0):
-        raise ValueError("Alpha values must be positive (dt and time_constants must be positive)")
+    # # Validate alpha values
+    # if jnp.any(alpha > 1.0):
+    #     warnings.warn("Some alpha values > 1.0, simulation may be unstable. Consider smaller dt.")
+    # if jnp.any(alpha <= 0.0):
+    #     raise ValueError("Alpha values must be positive (dt and time_constants must be positive)")
 
     return NetworkParams(
         num_neurons=num_neurons,
@@ -171,7 +135,7 @@ def create_network_params(
         time_constants=time_constants_arr,
         weights=weights_arr,
         relative_inputs_scale=relative_inputs_scale,
-        activation_func=activation_func,
+        activation_function=activation_function,
         alpha=alpha,
     )
 
@@ -212,7 +176,7 @@ def update_network_params(
         "time_constants": params.time_constants,
         "weights": params.weights,
         "relative_inputs_scale": params.relative_inputs_scale,
-        "activation_func": params.activation_func,
+        "activation_function": params.activation_function,
         "alpha": params.alpha,
     }
 
@@ -235,7 +199,7 @@ def update_network_params(
     if relative_inputs_scale is not None:
         updated_params["relative_inputs_scale"] = relative_inputs_scale
     if activation_function is not None:
-        updated_params["activation_func"] = get_activation_function(activation_function)
+        updated_params["activation_function"] = get_activation_function(activation_function)
 
     return NetworkParams(**updated_params)
 
@@ -360,6 +324,9 @@ def simulate_network(
     scale_input = jnp.sqrt((2 - alpha_input) / alpha_input)
     scale_recurrent = jnp.sqrt((2 - alpha_recurrent) / alpha_recurrent)
 
+    # parse activation function
+    activation_function = get_activation_function(params.activation_function)
+
     # Define the scan function for the simulation step
     def simulation_step(carry, inputs):
         """Single simulation step for JAX scan."""
@@ -385,7 +352,7 @@ def simulate_network(
         total_input = input_t + params.relative_inputs_scale * synaptic_input - params.thresholds + noise_input_t
 
         # Apply activation function
-        activated = params.activation_func(total_input, params.gains, params.max_firing_rates)
+        activated = activation_function(total_input, params.gains, params.max_firing_rates)
 
         # Update firing rates using Euler integration
         r_new = (1.0 - params.alpha) * r_current + params.alpha * activated
@@ -510,5 +477,5 @@ def get_network_info(params: NetworkParams) -> str:
     """
     return (
         f"VNCRecurrentNetwork(num_neurons={params.num_neurons}, dt={params.dt}, "
-        f"activation={params.activation_func.__name__})"
+        f"activation={params.activation_function})"
     )

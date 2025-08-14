@@ -51,7 +51,6 @@ from .vnc_network import (
     process_parameter_stats,
     get_network_info,
     ensure_array_shape,
-    get_activation_function,
 )
 
 # Activation functions (standalone functions)
@@ -61,10 +60,14 @@ from .activation_functions import (
     sigmoid_scaled,
     relu_scaled,
     linear_clipped,
+    get_activation_function,
 )
 
 # Input functions (still class-based for now)
 from .input_functions import InputFunction
+
+# Testing Simulation Infrastructure
+from .vnc_network_test_infrastructure import process_batch_baseline_discrete_rnn
 
 __all__ = [
     # Core network components
@@ -76,8 +79,8 @@ __all__ = [
     "process_parameter_stats",
     "get_network_info",
     "ensure_array_shape",
-    "get_activation_function",
     # Activation functions
+    "get_activation_function",
     "scaled_tanh_relu",
     "tanh_scaled",
     "sigmoid_scaled",
@@ -85,4 +88,6 @@ __all__ = [
     "linear_clipped",
     # Input functions
     "InputFunction",
+    # Testing Simulation Infrastructure
+    "process_batch_baseline_discrete_rnn",
 ]

@@ -4,8 +4,9 @@ from jax import Array, random, lax
 from functools import partial
 from typing import Optional
 
-from .vnc_network import create_network_params, NetworkParams
-from src.vnc_sim import NeuronParams, SimParams, reweight_connectivity
+from src.dt_vnc_rnn import create_network_params, NetworkParams, get_activation_function
+
+# from src.vnc_sim import NeuronParams, SimParams, reweight_connectivity
 
 
 @jax.jit
@@ -67,7 +68,7 @@ def simulate_network_static_input(
     # Use the JIT-compiled method with pre-computed data
     return _simulate_network_static_input(
         params=params,
-        num_timesteps=int(T / dt),
+        num_timesteps=jnp.array(T / dt, int),
         input_data=inputs,
         pulse_start=pulse_start,
         pulse_end=pulse_end,
@@ -81,7 +82,7 @@ def simulate_network_static_input(
     )
 
 
-@partial(jax.jit, static_argnames=("num_timesteps", "batch_size"))
+@partial(jax.jit, static_argnames=("params", "num_timesteps", "batch_size"))
 def _simulate_network_static_input(
     params: NetworkParams,
     num_timesteps: int,
@@ -137,6 +138,9 @@ def _simulate_network_static_input(
     scale_input = jnp.sqrt((2 - alpha_input) / alpha_input)
     scale_recurrent = jnp.sqrt((2 - alpha_recurrent) / alpha_recurrent)
 
+    # parse activation function
+    activation_function = get_activation_function(params.activation_function)
+
     # Define the scan function for the simulation step
     def simulation_step(carry, time_step):
         """Single simulation step for JAX scan."""
@@ -167,7 +171,7 @@ def _simulate_network_static_input(
         )
 
         # Apply activation function
-        activated = params.activation_func(total_input, params.gains, params.max_firing_rates)
+        activated = activation_function(total_input, params.gains, params.max_firing_rates)
 
         # Update firing rates using Euler integration
         r_new = (1.0 - params.alpha) * r_current + params.alpha * activated
@@ -193,8 +197,8 @@ def _simulate_network_static_input(
 
 @jax.jit
 def process_batch_baseline_discrete_rnn(
-    neuron_params: NeuronParams,
-    sim_params: SimParams,
+    neuron_params,
+    sim_params,
     batch_indices: jnp.ndarray,
 ) -> jnp.ndarray:
     """Process a batch of baseline simulations."""
@@ -217,6 +221,15 @@ def process_batch_baseline_discrete_rnn(
 
 
 @jax.jit
+def reweight_connectivity(W: jnp.ndarray, exc_mult: float, inh_mult: float) -> jnp.ndarray:
+    """Reweight connectivity matrix with multipliers."""
+    Wt = jnp.transpose(W)
+    W_exc = jnp.maximum(Wt, 0)
+    W_inh = jnp.minimum(Wt, 0)
+    return exc_mult * W_exc + inh_mult * W_inh
+
+
+@jax.jit
 def run_baseline_discrete_rnn(
     W: jnp.ndarray,
     tau: jnp.ndarray,
@@ -224,7 +237,7 @@ def run_baseline_discrete_rnn(
     threshold: jnp.ndarray,
     fr_cap: jnp.ndarray,
     inputs: jnp.ndarray,
-    sim_params: SimParams,
+    sim_params,
     seed: jnp.ndarray,
 ) -> jnp.ndarray:
     """Run baseline simulation without shuffle or noise."""

@@ -13,10 +13,7 @@ from pathlib import Path
 # Import utility functions (assumed to exist)
 from src.shuffle_utils import extract_shuffle_indices, full_shuffle
 from src.sim_utils import load_W, load_wTable, sample_trunc_normal, set_sizes, make_input, compute_oscillation_score
-from src.dt_vnc_rnn.vnc_network_test_infrastructure import (
-    process_batch_baseline_discrete_rnn,
-    run_baseline_discrete_rnn,
-)
+from src.dt_vnc_rnn import process_batch_baseline_discrete_rnn
 
 # #############################################################################################################################=
 # IMMUTABLE CONFIGURATION STRUCTURES
