@@ -11,7 +11,7 @@ ckpt_list: []
 # set default task and default training config based on dataset
 defaults:
   - _self_
-  - experiment: stim_neurons
+  - experiment: DNG100_stim
   - neuron_params: default
   - paths: glados
   - sim: default
