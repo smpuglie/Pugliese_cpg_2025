@@ -1,0 +1,17 @@
+# Prune configuration for the simulation
+T: 3.0
+dt: 0.00001
+pulseStart: 0.1
+pulseEnd: 3.0
+adjustStimI: False
+maxIters: 10
+nActiveUpper: 500
+nActiveLower: 5
+nHighFrUpper: 100
+shuffle: False
+noise: False
+noiseStdvProp: 0.1
+noiseMean: 0.0
+noiseStdv: 0.0
+prune_network: False
+discrete_rnn: True
