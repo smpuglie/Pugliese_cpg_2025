@@ -873,13 +873,6 @@ def _adjust_stimulation_for_batch(
         new_inputs = current_inputs.copy()
         needs_adjustment = jnp.zeros_like(n_active, dtype=bool)
 
-
-        mean_active = float(jnp.mean(n_active))
-        mean_high_fr = float(jnp.mean(n_high_fr))
-        mean_max_stim = float(jnp.mean(jnp.max(current_inputs, axis=1)))
-        print(f"    Adjustment iter {adjust_iter + 1}: Mean max stim: {mean_max_stim:.6f}, "
-              f"Mean active: {mean_active:.1f}, Mean high FR: {mean_high_fr:.1f}")
-
         for sim_idx in range(len(n_active)):
             sim_active = n_active[sim_idx]
             sim_high_fr = n_high_fr[sim_idx]
@@ -901,6 +894,9 @@ def _adjust_stimulation_for_batch(
                 needs_adjustment = needs_adjustment.at[sim_idx].set(True)
             # else: just right, no adjustment needed
 
+            print(f"    Adjustment iter {adjust_iter + 1}, Sim {sim_idx}: Max stim: {jnp.max(sim_input):.6f}, "
+                  f"Active: {sim_active}, High FR: {sim_high_fr}")
+            
         # Update neuron params with new stimulation
         adjusted_neuron_params = adjusted_neuron_params._replace(
             input_currents=new_inputs
