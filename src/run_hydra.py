@@ -1,5 +1,5 @@
 import os 
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"  # Use GPU 1
+# os.environ["CUDA_VISIBLE_DEVICES"] = "1"  # Use GPU 1
 os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.95"
 import jax
 
@@ -39,6 +39,7 @@ def main(cfg: DictConfig):
     if final_mini_circuits is not None:
         sparse.save_npz(cfg.paths.ckpt_dir / f"{cfg.experiment.name}_mini_circuits.npz", sparse.COO.from_numpy(final_mini_circuits))
 
-
+    print('Done! :)')
+    
 if __name__ == "__main__":
     main()

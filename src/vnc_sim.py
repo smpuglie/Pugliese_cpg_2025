@@ -730,7 +730,7 @@ def calculate_optimal_batch_size(n_neurons: int, n_timepoints: int, n_replicates
     baseline_batch = n_devices * 4
     
     # Choose optimal batch size considering memory constraints
-    memory_limited_batch = min(max_memory_samples, n_devices*max_batch_size)  # Cap at 256 * n_devices for efficiency
+    memory_limited_batch = min(max_memory_samples, max_batch_size)  # Cap at 256 for efficiency
     optimal_batch = max(baseline_batch, memory_limited_batch)
     # print(f"Memory-limited batch size: {memory_limited_batch}, Baseline batch size: {baseline_batch}, Optimal batch size: {optimal_batch}")
     # Ensure batch size doesn't exceed available replicates
@@ -1392,6 +1392,7 @@ def run_vnc_simulation(cfg: DictConfig) -> Union[jnp.ndarray, Tuple[jnp.ndarray,
     # Run simulation
     start_time = time.time()
     result = run_simulation_engine(neuron_params, sim_params, sim_config)
+    jax.block_until_ready(result)
     
     elapsed = time.time() - start_time
     total_sims = n_stim_configs * sim_params.n_param_sets
