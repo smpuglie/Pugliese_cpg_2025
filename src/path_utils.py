@@ -2,6 +2,9 @@ from pathlib import Path
 from omegaconf import OmegaConf
 import logging
 import os
+from hydra import initialize, compose
+from hydra.core.hydra_config import HydraConfig
+
 logger = logging.getLogger(__name__)
 
 
@@ -106,7 +109,7 @@ def save_config(cfg, path):
     OmegaConf.save(cfg_copy, path)
     
 
-def smart_path_replacement(original_paths, target_template_paths, preserve_relative=True):
+def smart_path_replacement(original_paths, target_template_paths, preserve_relative=True, verbose=True):
     """
     Intelligently replace paths by mapping base directories while preserving relative structure.
     
@@ -114,6 +117,7 @@ def smart_path_replacement(original_paths, target_template_paths, preserve_relat
         original_paths: Dict of original paths from loaded config
         target_template_paths: Dict of target paths from template
         preserve_relative: Whether to preserve relative path structure
+        verbose: Whether to print detailed information about path analysis and mapping
     
     Returns:
         Dict with updated paths
@@ -124,7 +128,8 @@ def smart_path_replacement(original_paths, target_template_paths, preserve_relat
     orig_paths = {k: Path(v) if isinstance(v, str) else v for k, v in original_paths.items()}
     target_paths = {k: Path(v) if isinstance(v, str) else v for k, v in target_template_paths.items()}
     
-    print("🔍 Analyzing path differences...")
+    if verbose:
+        print("🔍 Analyzing path differences...")
     
     # Find common base mappings between original and target
     base_mappings = {}
@@ -136,7 +141,8 @@ def smart_path_replacement(original_paths, target_template_paths, preserve_relat
         if key in orig_paths and key in target_paths:
             orig_base = orig_paths[key]
             target_base = target_paths[key]
-            print(f"   {key}: {orig_base} -> {target_base}")
+            if verbose:
+                print(f"   {key}: {orig_base} -> {target_base}")
             base_mappings[str(orig_base)] = str(target_base)
     
     # If we don't have direct mappings, try to infer them
@@ -191,19 +197,21 @@ def smart_path_replacement(original_paths, target_template_paths, preserve_relat
         for orig_base, target_base in sorted(base_mappings.items(), key=len, reverse=True):
             if orig_str.startswith(orig_base):
                 updated_str = orig_str.replace(orig_base, target_base, 1)
-                print(f"   Mapping {key}: {orig_str} -> {updated_str}")
+                if verbose:
+                    print(f"   Mapping {key}: {orig_str} -> {updated_str}")
                 break
         
         # If no mapping found, use the target template if available
         if updated_str == orig_str and key in target_paths:
             updated_str = str(target_paths[key])
-            print(f"   Direct replacement {key}: {orig_str} -> {updated_str}")
+            if verbose:
+                print(f"   Direct replacement {key}: {orig_str} -> {updated_str}")
         
         updated_paths[key] = updated_str
     
     return updated_paths
 
-def replace_paths_with_template(cfg, paths_template="glados", config_dir="../configs"):
+def replace_paths_with_template(cfg, paths_template="glados", config_dir="../configs", verbose=True):
     """
     Replace all paths in the config with paths from a specified template YAML file.
     
@@ -214,6 +222,7 @@ def replace_paths_with_template(cfg, paths_template="glados", config_dir="../con
         cfg: The configuration object to update
         paths_template: Name of the paths template (e.g., "glados", "hyak")
         config_dir: Directory containing the configs
+        verbose: Whether to print detailed information about path replacements
     
     Returns:
         Updated configuration with new paths
@@ -224,10 +233,12 @@ def replace_paths_with_template(cfg, paths_template="glados", config_dir="../con
     paths_file = Path(config_dir) / "paths" / f"{paths_template}.yaml"
     
     if not paths_file.exists():
-        print(f"❌ Paths template file not found: {paths_file}")
+        if verbose:
+            print(f"❌ Paths template file not found: {paths_file}")
         return cfg
     
-    print(f"🔄 Loading paths template from: {paths_file}")
+    if verbose:
+        print(f"🔄 Loading paths template from: {paths_file}")
     
     # Load the paths template
     paths_template_cfg = OmegaConf.load(paths_file)
@@ -269,16 +280,18 @@ def replace_paths_with_template(cfg, paths_template="glados", config_dir="../con
             # Use smart path replacement
             updated_paths = smart_path_replacement(
                 resolved_original_paths, 
-                resolved_template_paths
+                resolved_template_paths,
+                verbose=verbose
             )
             cfg.paths = OmegaConf.create(updated_paths)
         else:
             cfg.paths = resolved_template_paths
         
-        print(f"✅ Successfully applied template '{paths_template}':")
-        print(f"   Base dir: {cfg.paths.base_dir}")
-        print(f"   Save dir: {cfg.paths.save_dir}")
-        print(f"   Data dir: {cfg.paths.data_dir}")
+        if verbose:
+            print(f"✅ Successfully applied template '{paths_template}':")
+            print(f"   Base dir: {cfg.paths.base_dir}")
+            print(f"   Save dir: {cfg.paths.save_dir}")
+            print(f"   Data dir: {cfg.paths.data_dir}")
         
     except Exception as e:
         print(f"❌ Error resolving paths template: {e}")
@@ -287,7 +300,7 @@ def replace_paths_with_template(cfg, paths_template="glados", config_dir="../con
     return cfg
 
 
-def load_config_with_path_template(config_path, paths_template="glados", experiment=None, version=None, run_id="Testing", config_dir="../configs"):
+def load_config_with_path_template(config_path, paths_template="glados", experiment=None, version=None, run_id="Testing", config_dir="../configs", verbose=False):
     """
     Load a config file and replace paths using a specified template.
     
@@ -302,6 +315,7 @@ def load_config_with_path_template(config_path, paths_template="glados", experim
     Returns:
         Config with updated paths from template
     """
+    
     print(f"📁 Loading config from: {config_path}")
     
     # Load the config
@@ -320,11 +334,11 @@ def load_config_with_path_template(config_path, paths_template="glados", experim
         cfg.run_id = run_id
     
     # Replace paths using the specified template
-    cfg = replace_paths_with_template(cfg, paths_template, config_dir)
+    cfg = replace_paths_with_template(cfg, paths_template, config_dir, verbose=verbose)
     
     return cfg
 
-def create_fresh_config_with_paths(experiment, paths_template="glados", version="debug", run_id="Testing", config_dir="../configs"):
+def create_fresh_config_with_paths(experiment, paths_template="glados", version="debug", run_id="Testing", config_dir="../configs", verbose=True):
     """
     Create a fresh config using Hydra with specified paths template.
     
@@ -334,11 +348,13 @@ def create_fresh_config_with_paths(experiment, paths_template="glados", version=
         version: Version name
         run_id: Run ID for path generation
         config_dir: Directory containing the configs
+        verbose: Whether to print detailed information
     
     Returns:
         Fresh config with paths from template
     """
-    print(f"🔄 Creating fresh config for experiment '{experiment}' with paths template '{paths_template}'")
+    if verbose:
+        print(f"🔄 Creating fresh config for experiment '{experiment}' with paths template '{paths_template}'")
     
     with initialize(version_base=None, config_path=config_dir):
         cfg = compose(
@@ -353,10 +369,11 @@ def create_fresh_config_with_paths(experiment, paths_template="glados", version=
         )
         HydraConfig.instance().set_config(cfg)
     
-    print(f"✅ Created fresh config:")
-    print(f"   Experiment: {cfg.experiment.name}")
-    print(f"   Version: {cfg.version}")
-    print(f"   Paths template: {paths_template}")
-    print(f"   Save dir: {cfg.paths.save_dir}")
+    if verbose:
+        print(f"✅ Created fresh config:")
+        print(f"   Experiment: {cfg.experiment.name}")
+        print(f"   Version: {cfg.version}")
+        print(f"   Paths template: {paths_template}")
+        print(f"   Save dir: {cfg.paths.save_dir}")
     
     return cfg
