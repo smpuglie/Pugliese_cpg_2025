@@ -929,7 +929,7 @@ def calculate_optimal_batch_size(n_neurons: int, n_timepoints: int, n_replicates
         if n_gpu_devices == 1:
             # Single GPU: more conservative limits
             optimal_batch = max(12, optimal_batch)  # Minimum of 12 for single GPU
-            optimal_batch = min(optimal_batch, 64)  # Hard cap of 64 for single GPU stability
+            optimal_batch = min(optimal_batch, max_batch_size)  # Hard cap of 256 for single GPU stability
             print(f"Final batch size (single GPU): {optimal_batch}")
         else:
             # Multi-GPU: higher limits to utilize parallel processing
