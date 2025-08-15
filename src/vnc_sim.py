@@ -1,15 +1,14 @@
 # Combined JAX/JIT VNC Network Simulation - Unified Implementation
 import time
-from typing import NamedTuple, Dict, Any, Optional, Tuple, List, Union
 import jax
 import jax.numpy as jnp
-import numpy as np
-from diffrax import Dopri5, ODETerm, PIDController, SaveAt, diffeqsolve
-from jax import vmap, jit, random, pmap, lax
-from functools import partial
-from omegaconf import DictConfig
 import psutil
 import gc
+from typing import NamedTuple, Dict, Any, Optional, Tuple, List, Union
+from diffrax import Dopri5, ODETerm, PIDController, SaveAt, diffeqsolve, Event
+from jax import vmap, jit, random, pmap
+from omegaconf import DictConfig
+from pathlib import Path
 
 # Import utility functions (assumed to exist)
 from src.shuffle_utils import extract_shuffle_indices, full_shuffle
@@ -79,6 +78,13 @@ class SimulationConfig(NamedTuple):
     oscillation_threshold: float = 0.5
     batch_size: Optional[int] = None
     max_pruning_iterations: int = 200
+    # Auto stimulation adjustment parameters
+    adjustStimI: bool = False
+    max_adjustment_iters: int = 10
+    n_active_upper: int = 500
+    n_active_lower: int = 5
+    n_high_fr_upper: int = 100
+    high_fr_threshold: float = 100.0
 
 
 # #############################################################################################################################=
@@ -139,7 +145,7 @@ def run_single_simulation(
     solver = Dopri5()
     saveat = SaveAt(ts=t_axis)
     controller = PIDController(rtol=r_tol, atol=a_tol)
-    
+
     solution = diffeqsolve(
         term, solver, 0, T, dt, R0,
         args=(inputs, pulse_start, pulse_end, tau, W, threshold, a, fr_cap, key, noise_stdv),
@@ -589,7 +595,7 @@ def process_batch_Wmask(
             neuron_params.a[param_idx],
             neuron_params.threshold[param_idx],
             neuron_params.fr_cap[param_idx],
-            neuron_params.input_currents[stim_idx],
+            neuron_params.input_currents[stim_idx, param_idx],
             sim_params,
             neuron_params.seeds[param_idx]
         )
@@ -617,7 +623,7 @@ def process_batch_shuffle(
             neuron_params.a[param_idx],
             neuron_params.threshold[param_idx],
             neuron_params.fr_cap[param_idx],
-            neuron_params.input_currents[stim_idx],
+            neuron_params.input_currents[stim_idx, param_idx],
             neuron_params.seeds[param_idx],
             shuffle_indices,
             sim_params
@@ -641,7 +647,7 @@ def process_batch_noise(
             neuron_params.a[param_idx],
             neuron_params.threshold[param_idx],
             neuron_params.fr_cap[param_idx],
-            neuron_params.input_currents[stim_idx],
+            neuron_params.input_currents[stim_idx, param_idx],
             neuron_params.seeds[param_idx],
             sim_params.noise_stdv_prop,
             sim_params
@@ -665,7 +671,7 @@ def process_batch_baseline(
             neuron_params.a[param_idx],
             neuron_params.threshold[param_idx],
             neuron_params.fr_cap[param_idx],
-            neuron_params.input_currents[stim_idx],
+            neuron_params.input_currents[stim_idx, param_idx],
             sim_params,
             neuron_params.seeds[param_idx]
         )
@@ -682,7 +688,7 @@ def get_batch_function(sim_config: SimulationConfig):
         "baseline": process_batch_baseline,
         "shuffle": process_batch_shuffle, 
         "noise": process_batch_noise,
-        "prune": process_batch_Wmask
+        "Wmask": process_batch_Wmask
     }
     
     if sim_config.sim_type not in batch_functions:
@@ -691,7 +697,7 @@ def get_batch_function(sim_config: SimulationConfig):
     return batch_functions[sim_config.sim_type]
 
 
-def calculate_optimal_batch_size(n_neurons: int, n_timepoints: int, n_replicates: int, n_devices: int = None) -> int:
+def calculate_optimal_batch_size(n_neurons: int, n_timepoints: int, n_replicates: int, n_devices: int = None, max_batch_size: int = 256) -> int:
     """
     Calculate optimal batch size based on memory and device constraints.
     
@@ -724,7 +730,7 @@ def calculate_optimal_batch_size(n_neurons: int, n_timepoints: int, n_replicates
     baseline_batch = n_devices * 4
     
     # Choose optimal batch size considering memory constraints
-    memory_limited_batch = min(max_memory_samples, 256)  # Cap at 256 for efficiency
+    memory_limited_batch = min(max_memory_samples, max_batch_size)  # Cap at 256 for efficiency
     optimal_batch = max(baseline_batch, memory_limited_batch)
     # print(f"Memory-limited batch size: {memory_limited_batch}, Baseline batch size: {baseline_batch}, Optimal batch size: {optimal_batch}")
     # Ensure batch size doesn't exceed available replicates
@@ -835,20 +841,90 @@ def run_simulation_engine(
         )
     else:
         return _run_stim_neurons(
-            neuron_params, sim_params, batch_func,
-            total_sims, batch_size, n_devices
+            neuron_params, sim_params, sim_config, batch_func,
+            total_sims, batch_size, n_devices,
         )
+
+
+def _adjust_stimulation_for_batch(
+    neuron_params: NeuronParams,
+    sim_params: SimParams,
+    sim_config: SimulationConfig,
+    batch_func,
+    batch_indices: jnp.ndarray,
+    n_devices: int,
+) -> NeuronParams:
+    """Adjust stimulation for a specific batch."""
+    
+    adjusted_neuron_params = neuron_params
+    next_highest = None
+    next_lowest = None
+    
+    for adjust_iter in range(sim_config.max_adjustment_iters):
+        test_results = batch_func(adjusted_neuron_params, sim_params, batch_indices)
+        if n_devices > 1:
+            test_results = test_results.reshape(-1, *test_results.shape[2:])
+
+        max_rates = jnp.max(test_results, axis=2)
+        n_active = jnp.sum(jnp.sum(test_results, axis=2) > 0, axis=1)
+        n_high_fr = jnp.sum(max_rates > sim_config.high_fr_threshold, axis=1)
+
+        current_inputs = adjusted_neuron_params.input_currents.copy()
+        new_inputs = current_inputs.copy()
+        needs_adjustment = jnp.zeros_like(n_active, dtype=bool)
+
+        for sim_idx in range(len(n_active)):
+            sim_active = n_active[sim_idx]
+            sim_high_fr = n_high_fr[sim_idx]
+            sim_input = current_inputs[sim_idx]
+
+            if (sim_active > sim_config.n_active_upper) or (sim_high_fr > sim_config.n_high_fr_upper):
+                # Too strong - reduce stimulation
+                if next_lowest is None:
+                    new_inputs = new_inputs.at[sim_idx].set(sim_input / 2)
+                else:
+                    new_inputs = new_inputs.at[sim_idx].set((sim_input + next_lowest[sim_idx]) / 2)
+                needs_adjustment = needs_adjustment.at[sim_idx].set(True)
+            elif sim_active < sim_config.n_active_lower:
+                # Too weak - increase stimulation
+                if next_highest is None:
+                    new_inputs = new_inputs.at[sim_idx].set(sim_input * 2)
+                else:
+                    new_inputs = new_inputs.at[sim_idx].set((sim_input + next_highest[sim_idx]) / 2)
+                needs_adjustment = needs_adjustment.at[sim_idx].set(True)
+            # else: just right, no adjustment needed
+
+            print(f"    Adjustment iter {adjust_iter + 1}, Sim {sim_idx}: Max stim: {jnp.max(sim_input):.6f}, "
+                  f"Active: {sim_active}, High FR: {sim_high_fr}")
+            
+        # Update neuron params with new stimulation
+        adjusted_neuron_params = adjusted_neuron_params._replace(
+            input_currents=new_inputs
+        )
+
+        del test_results
+        gc.collect()
+
+        if not jnp.any(needs_adjustment):
+            print(f"    Stimulation appropriate for all simulations in this batch")
+            break
+    else:
+        print(f"    Warning: Maximum adjustment iterations ({sim_config.max_adjustment_iters}) reached for this batch")
+
+    return adjusted_neuron_params
 
 
 def _run_stim_neurons(
     neuron_params: NeuronParams,
     sim_params: SimParams, 
+    sim_config: SimulationConfig,
     batch_func,
     total_sims: int,
     batch_size: int,
-    n_devices: int
+    n_devices: int,
 ) -> jnp.ndarray:
-    """Run simulation without pruning."""
+    """Run simulation without pruning, with optional per-batch automatic stimulation adjustment."""
+    
     all_results = []
     n_batches = (total_sims + batch_size - 1) // batch_size
 
@@ -871,7 +947,16 @@ def _run_stim_neurons(
         if n_devices > 1:
             batch_indices = batch_indices.reshape(n_devices, -1)
 
-        batch_results = batch_func(neuron_params, sim_params, batch_indices)
+        # Adjust stimulation for this specific batch if enabled
+        if sim_config.adjustStimI:
+            print(f"Adjusting stimulation for batch {i + 1}/{n_batches}...")
+            adjusted_neuron_params = _adjust_stimulation_for_batch(
+                neuron_params, sim_params, sim_config, batch_func, batch_indices, n_devices)
+        else:
+            adjusted_neuron_params = neuron_params
+
+        # Run the batch with adjusted parameters
+        batch_results = batch_func(adjusted_neuron_params, sim_params, batch_indices)
 
         if n_devices > 1:
             batch_results = batch_results.reshape(-1, *batch_results.shape[2:])
@@ -879,20 +964,20 @@ def _run_stim_neurons(
 
         # Move results to CPU to save GPU memory
         batch_results = jax.device_put(batch_results, jax.devices("cpu")[0])
-        all_results.append(np.asarray(batch_results, dtype=np.float32))
+        all_results.append(batch_results)
         print(f"Batch {i + 1}/{n_batches} completed")
 
         del batch_results  # Free memory
         gc.collect()  # Force garbage collection
 
     # Combine results
-    results = np.concatenate(all_results, axis=0)
+    results = jnp.concatenate(all_results, axis=0)
 
     # Reshape to (n_stim_configs, n_param_sets, n_neurons, n_timepoints)
     return results.reshape(
         sim_params.n_stim_configs, sim_params.n_param_sets,
         sim_params.n_neurons, len(sim_params.t_axis)
-    ), None
+    ), None, adjusted_neuron_params
 
 def _run_with_pruning(
     neuron_params: NeuronParams,
@@ -1037,6 +1122,7 @@ def _run_with_pruning(
         
         # Move results to CPU to save GPU memory
         batch_results = jax.device_put(batch_results, jax.devices("cpu")[0])
+        mini_circuit = jnp.stack([((jnp.sum(batch_results[:,n],axis=-1)>0) & ~mn_mask) for n in range(batch_results.shape[1])],axis=1)
         mini_circuit = jax.device_put(mini_circuit, jax.devices("cpu")[0])
         
         all_results.append(batch_results)
@@ -1058,7 +1144,7 @@ def _run_with_pruning(
         sim_params.n_neurons, len(sim_params.t_axis)
     )
 
-    return reshaped_results, all_mini_circuits
+    return reshaped_results, all_mini_circuits, neuron_params
 
 
 def stack_pruning_states(states_list: List[Pruning_state]) -> Pruning_state:
@@ -1101,7 +1187,7 @@ def trim_state_padding(state: Pruning_state, target_size: int) -> Pruning_state:
 # CONFIGURATION LOADING AND SETUP FUNCTIONS
 # #############################################################################################################################=
 
-def prepare_neuron_params(cfg: DictConfig, W_table: Any) -> NeuronParams:
+def prepare_neuron_params(cfg: DictConfig, W_table: Any, param_path: Optional[Path]=None) -> NeuronParams:
     """Prepare neuron parameters from configuration."""
     # Load connectivity
     W = jnp.array(load_W(cfg.experiment.wPath))
@@ -1137,9 +1223,29 @@ def prepare_neuron_params(cfg: DictConfig, W_table: Any) -> NeuronParams:
         a, threshold = set_sizes(W_table["surf_area_um2"].values, a, threshold)
     
     # Prepare input currents for all stimulus configurations
+    # Test if stimNeurons and stimI are same size, pad with element from index 0 if not
+    stim_neurons_list = cfg.experiment.stimNeurons
+    stim_input_list = cfg.experiment.stimI
+    
+    len_neurons = len(stim_neurons_list)
+    len_inputs = len(stim_input_list)
+    
+    if len_neurons != len_inputs:
+        print(f"Warning: stimNeurons length ({len_neurons}) != stimI length ({len_inputs})")
+        if len_neurons > len_inputs:
+            # Pad stimI with first element
+            padding_needed = len_neurons - len_inputs
+            stim_input_list = list(stim_input_list) + [stim_input_list[0]] * padding_needed
+            print(f"Padded stimI with {padding_needed} copies of first element ({stim_input_list[0]})")
+        else:
+            # Pad stimNeurons with first element
+            padding_needed = len_inputs - len_neurons
+            stim_neurons_list = list(stim_neurons_list) + [stim_neurons_list[0]] * padding_needed
+            print(f"Padded stimNeurons with {padding_needed} copies of first element ({stim_neurons_list[0]})")
+    
     input_currents_list = []
-    for stim_neurons, stim_input in zip(cfg.experiment.stimNeurons, cfg.experiment.stimI):
-        input_current = jnp.array(make_input(n_neurons, jnp.array(stim_neurons), stim_input))
+    for stim_neurons, stim_input in zip(stim_neurons_list, stim_input_list):
+        input_current = jnp.tile(make_input(n_neurons, jnp.array(stim_neurons), stim_input), (num_sims, 1))
         input_currents_list.append(input_current)
     input_currents = jnp.array(input_currents_list)
     
@@ -1148,13 +1254,21 @@ def prepare_neuron_params(cfg: DictConfig, W_table: Any) -> NeuronParams:
     
     # Initialize W_mask for pruning if needed
     W_mask = jnp.ones((num_sims, W.shape[0], W.shape[1]), dtype=jnp.bool)
-    
-    return NeuronParams(
-        W=W, W_mask=W_mask, tau=tau, a=a, threshold=threshold, fr_cap=fr_cap,
-        input_currents=input_currents, seeds=seeds,
-        exc_dn_idxs=exc_dn_idxs, inh_dn_idxs=inh_dn_idxs,
-        exc_in_idxs=exc_in_idxs, inh_in_idxs=inh_in_idxs, mn_idxs=mn_idxs,
-    )
+    if len(cfg.experiment.removeNeurons) > 0:
+        W_mask = W_mask.at[:, cfg.experiment.removeNeurons, :].set(False)
+        W_mask = W_mask.at[:, :, cfg.experiment.removeNeurons].set(False)
+    if (param_path is not None) and param_path.exists():
+        import src.io_dict_to_hdf5 as ioh5
+        nparams = ioh5.load(param_path, enable_jax=True)
+        print('Loaded neuron parameters from', param_path)
+        return NeuronParams(**nparams)
+    else:
+        return NeuronParams(
+            W=W, W_mask=W_mask, tau=tau, a=a, threshold=threshold, fr_cap=fr_cap,
+            input_currents=input_currents, seeds=seeds,
+            exc_dn_idxs=exc_dn_idxs, inh_dn_idxs=inh_dn_idxs,
+            exc_in_idxs=exc_in_idxs, inh_in_idxs=inh_in_idxs, mn_idxs=mn_idxs,
+        )
 
 
 def prepare_sim_params(cfg: DictConfig, n_stim_configs: int, n_neurons: int) -> SimParams:
@@ -1193,8 +1307,8 @@ def parse_simulation_config(cfg: DictConfig) -> SimulationConfig:
         sim_type = "shuffle"
     elif getattr(cfg.sim, "noise", False):
         sim_type = "noise"
-    elif getattr(cfg.sim, "prune_network", False):
-        sim_type = "prune"
+    elif getattr(cfg.sim, "prune_network", False) | (len(cfg.experiment.removeNeurons) > 0):
+        sim_type = "Wmask"
     
     # Check if pruning is enabled
     enable_pruning = getattr(cfg.sim, "prune_network", False)
@@ -1204,7 +1318,13 @@ def parse_simulation_config(cfg: DictConfig) -> SimulationConfig:
         enable_pruning=enable_pruning,
         oscillation_threshold=getattr(cfg.experiment, "oscillation_threshold", 0.5),
         batch_size=getattr(cfg.experiment, "batch_size", None),
-        max_pruning_iterations=getattr(cfg.experiment, "max_pruning_iterations", 200)
+        max_pruning_iterations=getattr(cfg.experiment, "max_pruning_iterations", 200),
+        adjustStimI=getattr(cfg.sim, "adjustStimI", False),
+        max_adjustment_iters=getattr(cfg.sim, "max_adjustment_iters", 10),
+        n_active_upper=getattr(cfg.sim, "n_active_upper", 500),
+        n_active_lower=getattr(cfg.sim, "n_active_lower", 5),
+        n_high_fr_upper=getattr(cfg.sim, "n_high_fr_upper", 100),
+        high_fr_threshold=getattr(cfg.sim, "high_fr_threshold", 100.0)
     )
 
 
@@ -1272,6 +1392,7 @@ def run_vnc_simulation(cfg: DictConfig) -> Union[jnp.ndarray, Tuple[jnp.ndarray,
     # Run simulation
     start_time = time.time()
     result = run_simulation_engine(neuron_params, sim_params, sim_config)
+    jax.block_until_ready(result)
     
     elapsed = time.time() - start_time
     total_sims = n_stim_configs * sim_params.n_param_sets
@@ -1283,14 +1404,14 @@ def run_vnc_simulation(cfg: DictConfig) -> Union[jnp.ndarray, Tuple[jnp.ndarray,
     print(f"  Throughput: {total_sims/elapsed:.2f} sims/second")
     
     if sim_config.enable_pruning:
-        results, final_mini_circuits = result
+        results, final_mini_circuits, neuron_params = result
         print(f"  Results shape: {results.shape}")
         print(f"  Final pruning state returned")
     else:
-        results, final_mini_circuits = result
+        results, final_mini_circuits, neuron_params = result
         print(f"  Results shape: {results.shape}")
 
-    return results, final_mini_circuits
+    return results, final_mini_circuits, neuron_params
 
 
 # #############################################################################################################################=

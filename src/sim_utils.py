@@ -12,29 +12,42 @@ from jax.scipy.signal import correlate
 
 def sample_trunc_normal(key, mean, stdev, shape):
     """Sample from truncated normal for a single simulation."""
-    # Use inverse CDF method for truncated normal
-    # Truncation points in original scale
-    lower_bound = 0.0  # truncate at 0 (positive values only)
-    upper_bound = mean + 100 * stdev  # effectively infinity
+    # Handle edge case when stdev is 0 or very small
+    def handle_zero_stdev():
+        # When stdev is 0, return the mean value (clamped to be non-negative)
+        return jnp.maximum(mean, 0.0) * jnp.ones(shape)
+    
+    def handle_normal_case():
+        # Use inverse CDF method for truncated normal
+        # Truncation points in original scale
+        lower_bound = 0.0  # truncate at 0 (positive values only)
+        upper_bound = mean + 100 * stdev  # effectively infinity
 
-    # Convert to standardized coordinates
-    a = (lower_bound - mean) / stdev  # left truncation point in standard deviations
-    b = (upper_bound - mean) / stdev  # right truncation point in standard deviations
+        # Convert to standardized coordinates
+        a = (lower_bound - mean) / stdev  # left truncation point in standard deviations
+        b = (upper_bound - mean) / stdev  # right truncation point in standard deviations
 
-    # Get CDF values at truncation points for standard normal
-    cdf_a = jax.scipy.stats.norm.cdf(a)
-    cdf_b = jax.scipy.stats.norm.cdf(b)
+        # Get CDF values at truncation points for standard normal
+        cdf_a = jax.scipy.stats.norm.cdf(a)
+        cdf_b = jax.scipy.stats.norm.cdf(b)
 
-    # Sample uniform values between the CDF values
-    u = jax.random.uniform(key, shape=shape, minval=cdf_a, maxval=cdf_b)
+        # Sample uniform values between the CDF values
+        u = jax.random.uniform(key, shape=shape, minval=cdf_a, maxval=cdf_b)
 
-    # Use inverse CDF to get standard normal samples
-    z = jax.scipy.stats.norm.ppf(u)
+        # Use inverse CDF to get standard normal samples
+        z = jax.scipy.stats.norm.ppf(u)
 
-    # Transform to desired mean and standard deviation
-    samples = mean + stdev * z
+        # Transform to desired mean and standard deviation
+        samples = mean + stdev * z
 
-    return samples
+        return samples
+    
+    # Use conditional to handle zero or near-zero standard deviation
+    return jax.lax.cond(
+        stdev < 1e-10,
+        handle_zero_stdev,
+        handle_normal_case
+    )
 
 def set_sizes(sizes, a, threshold):
     """Should correspond to surface area. This method is going to need a lot of improvement, very much testing out"""

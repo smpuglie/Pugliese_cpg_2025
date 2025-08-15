@@ -1,7 +1,6 @@
 ##### Easy Access Variables #####
 # if set to positive integer, overrides the default
-version: 'debug' # stim-replicates
-seed: None
+version: 'debug'
 num_gpus: ''
 run_id: 'walle'
 load_jobid: ''
@@ -11,7 +10,7 @@ ckpt_list: []
 # set default task and default training config based on dataset
 defaults:
   - _self_
-  - experiment: stim_neurons
+  - experiment: DNG100_stim
   - neuron_params: default
   - paths: walle-smpuglie
   - sim: default
@@ -20,16 +19,19 @@ defaults:
 # set the directory where the output files get saved
 hydra:
   job:
-      config:
-        override_dirname:
-          exclude_keys:
-            - paths
-            - version
-            - dataset
-            - run_id
-            - experiment
-            - sim
-            - neuron_params
+    config:
+      override_dirname:
+        exclude_keys:
+          - paths
+          - version
+          - dataset
+          - run_id
+          - experiment
+          - sim
+          - neuron_params
+          - load_jobid
+          - note
+          - sim.noise
 
   run:
     dir: ${paths.base_dir}/run_id=${run_id}
