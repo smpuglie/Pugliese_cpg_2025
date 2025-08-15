@@ -29,6 +29,9 @@ hydra:
           - experiment
           - sim
           - neuron_params
+          - load_jobid
+          - note
+          - sim.noise
 
   run:
     dir: ${paths.base_dir}/run_id=${run_id}
