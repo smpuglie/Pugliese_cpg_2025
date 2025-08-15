@@ -11,7 +11,7 @@ import hydra
 import sparse
 from omegaconf import DictConfig, OmegaConf
 from pathlib import Path
-import src.io_dict_to_hdf5 as ioh5
+import io_dict_to_hdf5 as ioh5
 from src.path_utils import convert_dict_to_path, save_config
 from src.vnc_sim import run_vnc_simulation
 

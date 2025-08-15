@@ -17,4 +17,5 @@ dependencies:
     - "--editable=."
     - hydra-core
     - diffrax
-    - jax[cuda12]
+    - jax[cuda12]==0.6.2
+    - h5py
