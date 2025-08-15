@@ -729,26 +729,123 @@ def calculate_optimal_batch_size(n_neurons: int, n_timepoints: int, n_replicates
     # Try to get GPU memory if available
     gpu_memory = None
     n_gpu_devices = 0
+    gpu_memory_per_device = None
+    
     try:
         devices = jax.devices()
-        n_gpu_devices = len([d for d in devices if 'gpu' in str(d).lower() or 'cuda' in str(d).lower()])
+        gpu_devices = [d for d in devices if 'gpu' in str(d).lower() or 'cuda' in str(d).lower()]
+        n_gpu_devices = len(gpu_devices)
         
         if n_gpu_devices > 0:
-            # NVIDIA Titan RTX with 24GB each
-            gpu_memory_per_device = 24 * (1024 ** 3)  # 24GB per GPU
-            total_gpu_memory = gpu_memory_per_device * n_gpu_devices
-            
-            if n_gpu_devices == 1:
-                print(f"Detected {n_gpu_devices} GPU device")
-                print(f"GPU memory: {gpu_memory_per_device / (1024 ** 3):.0f}GB available")
-            else:
-                print(f"Detected {n_gpu_devices} GPU device")
-                print(f"GPU memory: {gpu_memory_per_device / (1024 ** 3):.0f}GB per device, {total_gpu_memory / (1024 ** 3):.0f}GB total")
-            
-            # Use memory from available GPUs (JAX will distribute across them)
-            gpu_memory = total_gpu_memory
+            # Method 1: Try to get actual GPU memory using nvidia-ml-py3 if available
+            try:
+                import pynvml
+                pynvml.nvmlInit()
+                
+                device_memories = []
+                for i in range(n_gpu_devices):
+                    handle = pynvml.nvmlDeviceGetHandleByIndex(i)
+                    info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+                    device_name = pynvml.nvmlDeviceGetName(handle).decode('utf-8')
+                    memory_gb = info.total / (1024 ** 3)
+                    device_memories.append(info.total)
+                    print(f"GPU {i}: {device_name} - {memory_gb:.1f}GB")
+                
+                # Use the memory of the first device (assume all are the same)
+                gpu_memory_per_device = device_memories[0]
+                total_gpu_memory = sum(device_memories)
+                
+                print(f"Detected {n_gpu_devices} GPU device(s) via nvidia-ml")
+                if n_gpu_devices == 1:
+                    print(f"GPU memory: {gpu_memory_per_device / (1024 ** 3):.1f}GB available")
+                else:
+                    print(f"GPU memory: {gpu_memory_per_device / (1024 ** 3):.1f}GB per device, {total_gpu_memory / (1024 ** 3):.1f}GB total")
+                
+                gpu_memory = total_gpu_memory
+                
+            except ImportError:
+                print("pynvml not available, trying alternative methods...")
+                
+                # Method 2: Try subprocess to call nvidia-smi
+                try:
+                    import subprocess
+                    result = subprocess.run([
+                        'nvidia-smi', '--query-gpu=memory.total', '--format=csv,noheader,nounits'
+                    ], capture_output=True, text=True, timeout=5)
+                    
+                    if result.returncode == 0:
+                        memory_values = [int(x.strip()) for x in result.stdout.strip().split('\n') if x.strip()]
+                        if len(memory_values) >= n_gpu_devices:
+                            # nvidia-smi returns memory in MB
+                            gpu_memory_per_device = memory_values[0] * (1024 ** 2)  # Convert MB to bytes
+                            total_gpu_memory = sum(memory_values) * (1024 ** 2)
+                            
+                            print(f"Detected {n_gpu_devices} GPU device(s) via nvidia-smi")
+                            if n_gpu_devices == 1:
+                                print(f"GPU memory: {gpu_memory_per_device / (1024 ** 3):.1f}GB available")
+                            else:
+                                print(f"GPU memory: {gpu_memory_per_device / (1024 ** 3):.1f}GB per device, {total_gpu_memory / (1024 ** 3):.1f}GB total")
+                            
+                            gpu_memory = total_gpu_memory
+                        else:
+                            raise Exception("nvidia-smi returned unexpected number of devices")
+                    else:
+                        raise Exception(f"nvidia-smi failed with return code {result.returncode}")
+                        
+                except (subprocess.TimeoutExpired, subprocess.CalledProcessError, FileNotFoundError, Exception) as e:
+                    print(f"nvidia-smi method failed: {e}")
+                    
+                    # Method 3: Fallback - estimate based on common GPU types
+                    print("Using fallback GPU memory estimation...")
+                    
+                    # Try to identify GPU type from device string
+                    device_str = str(gpu_devices[0]).lower()
+                    if 'titan' in device_str and 'rtx' in device_str:
+                        gpu_memory_per_device = 24 * (1024 ** 3)  # Titan RTX: 24GB
+                        print("Detected Titan RTX-like GPU, assuming 24GB per device")
+                    elif 'rtx' in device_str:
+                        if '4090' in device_str:
+                            gpu_memory_per_device = 24 * (1024 ** 3)  # RTX 4090: 24GB
+                            print("Detected RTX 4090-like GPU, assuming 24GB per device")
+                        elif '3090' in device_str:
+                            gpu_memory_per_device = 24 * (1024 ** 3)  # RTX 3090: 24GB
+                            print("Detected RTX 3090-like GPU, assuming 24GB per device")
+                        elif '4080' in device_str:
+                            gpu_memory_per_device = 16 * (1024 ** 3)  # RTX 4080: 16GB
+                            print("Detected RTX 4080-like GPU, assuming 16GB per device")
+                        elif '3080' in device_str:
+                            gpu_memory_per_device = 10 * (1024 ** 3)  # RTX 3080: 10GB
+                            print("Detected RTX 3080-like GPU, assuming 10GB per device")
+                        else:
+                            gpu_memory_per_device = 12 * (1024 ** 3)  # Conservative RTX estimate
+                            print("Detected RTX-like GPU, assuming 12GB per device (conservative)")
+                    elif 'v100' in device_str:
+                        gpu_memory_per_device = 32 * (1024 ** 3)  # Tesla V100: 32GB
+                        print("Detected V100-like GPU, assuming 32GB per device")
+                    elif 'a100' in device_str:
+                        gpu_memory_per_device = 40 * (1024 ** 3)  # A100: 40GB (or 80GB, use conservative)
+                        print("Detected A100-like GPU, assuming 40GB per device")
+                    else:
+                        gpu_memory_per_device = 8 * (1024 ** 3)  # Very conservative fallback
+                        print("Unknown GPU type, assuming 8GB per device (conservative)")
+                    
+                    total_gpu_memory = gpu_memory_per_device * n_gpu_devices
+                    gpu_memory = total_gpu_memory
+                    
+                    if n_gpu_devices == 1:
+                        print(f"Estimated GPU memory: {gpu_memory_per_device / (1024 ** 3):.0f}GB available")
+                    else:
+                        print(f"Estimated GPU memory: {gpu_memory_per_device / (1024 ** 3):.0f}GB per device, {total_gpu_memory / (1024 ** 3):.0f}GB total")
+                        
+            except Exception as e:
+                print(f"All GPU memory detection methods failed: {e}")
+                print("Falling back to conservative 8GB estimate per GPU")
+                gpu_memory_per_device = 8 * (1024 ** 3)
+                total_gpu_memory = gpu_memory_per_device * n_gpu_devices
+                gpu_memory = total_gpu_memory
         else:
             print("No GPU devices detected - using CPU mode")
+            
     except Exception as e:
         print(f"GPU detection failed: {e}")
         pass
