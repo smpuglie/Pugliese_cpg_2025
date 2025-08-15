@@ -4,19 +4,43 @@ import h5py
 import jax.numpy as jnp
 #import os
 
-def save(filename, dic):
+def save(filename, dic, compression='gzip', compression_opts=9):
     """
     saves a python dictionary or list, with items that are themselves either
     dictionaries or lists or (in the case of tree-leaves) numpy arrays
     or basic scalar types (int/float/str/bytes) in a recursive
     manner to an hdf5 file, with an intact hierarchy.
+    
+    Parameters:
+    -----------
+    filename : str
+        Path to the HDF5 file to save
+    dic : dict/list
+        Data structure to save
+    compression : str, optional
+        Compression algorithm ('gzip', 'lzf', 'szip', None). Default is 'gzip'
+    compression_opts : int, optional
+        Compression level (0-9 for gzip). Default is 9 (maximum compression)
     """
     with h5py.File(filename, 'w') as h5file:
-        recursively_save_dict_contents_to_group(h5file, '/', dic)
+        recursively_save_dict_contents_to_group(h5file, '/', dic, compression, compression_opts)
 
-def recursively_save_dict_contents_to_group(h5file, path, dic):
+def recursively_save_dict_contents_to_group(h5file, path, dic, compression='gzip', compression_opts=9):
     """
-    ....
+    Recursively save dictionary contents to HDF5 group with compression support.
+    
+    Parameters:
+    -----------
+    h5file : h5py.File
+        The HDF5 file object
+    path : str
+        Current path in the HDF5 hierarchy
+    dic : dict/list/object
+        Data structure to save
+    compression : str, optional
+        Compression algorithm ('gzip', 'lzf', 'szip', None). Default is 'gzip'
+    compression_opts : int, optional
+        Compression level (0-9 for gzip). Default is 9 (maximum compression)
     """
     if isinstance(dic,dict):
         iterator = dic.items()
@@ -31,9 +55,15 @@ def recursively_save_dict_contents_to_group(h5file, path, dic):
         if isinstance(dic,(list, tuple)):
             key = str(key)
         if isinstance(item, (jnp.ndarray, np.ndarray, np.int64, np.float64, int, float, str, bytes)):
-            h5file[path + key] = item       #equivalent to h5file[path].create_dataset(key,data=item)
+            # Use create_dataset with compression for arrays and numeric data
+            if isinstance(item, (jnp.ndarray, np.ndarray)) and item.size > 1:
+                # Apply compression for arrays with more than one element
+                h5file.create_dataset(path + key, data=item, compression=compression, compression_opts=compression_opts)
+            else:
+                # For scalars and single-element arrays, compression may not be beneficial
+                h5file[path + key] = item
         elif isinstance(item, (dict,list,object)): # or isinstance(item,list) or isinstance(item,tuple):
-            recursively_save_dict_contents_to_group(h5file, path + key + '/', item)
+            recursively_save_dict_contents_to_group(h5file, path + key + '/', item, compression, compression_opts)
         else:
             raise ValueError('Cannot save %s type'%type(item))
 
