@@ -6,7 +6,7 @@ pulseStart: 0.02 # Start time for the pulse
 pulseEnd: 1.999 # End time for the pulse
 shuffle: False # Shuffle weight matrix
 noise: False # Add noise to weight matrix
-noiseStdvProp: 0.1 # Proportional standard deviation of weight noise
+noiseStdvProp: 0.0 # Proportional standard deviation of weight noise
 noiseMean: 0.0 # Mean of input noise
 noiseStdv: 0.0 # Standard deviation of input noise
 prune_network: False # Whether to prune the network or not

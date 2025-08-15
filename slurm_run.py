@@ -15,7 +15,7 @@ def slurm_submit(script):
         print(f"Error submitting job: {e.output}", file=sys.stderr)
         sys.exit(1)
 
-def submit(gpus, partition, job_name, mem, cpus, time, note, experiment, sim, load_jobid, gpu_type, override):
+def submit(gpus, partition, job_name, mem, cpus, time, note, experiment, sim, mode, load_jobid, gpu_type, override):
     """
     Construct and submit the SLURM script with the specified parameters.
     """
@@ -55,7 +55,7 @@ nvidia-smi
 conda activate bdn2cpg
 unset LD_LIBRARY_PATH
 echo $SLURMD_NODENAME
-python -u ./src/run_hydra.py paths=hyak note={note} version=hyak experiment={experiment} sim={sim} load_jobid={load_jobid} run_id=$SLURM_JOB_ID {override}
+python -u ./src/run_hydra.py hydra.mode={mode} paths=hyak note={note} version=hyak experiment={experiment} sim={sim} load_jobid={load_jobid} run_id=$SLURM_JOB_ID {override}
             """
     print(f"Submitting job")
     print(script)
@@ -85,6 +85,8 @@ def main():
                         help='Name of experiment yaml  (default: stim_neurons)')
     parser.add_argument('--sim', type=str, default='default',
                         help='Name of simulation yaml  (default: default)')
+    parser.add_argument('--mode', type=str, default=None,
+                        help='Mode for the simulation (default: None)')
     parser.add_argument('--load_jobid', type=str, default='',
                         help='JobID to resume training (default: '')')
     parser.add_argument('--override', type=str, default='',
@@ -102,6 +104,7 @@ def main():
         note=args.note,
         experiment=args.experiment,
         sim=args.sim,
+        mode=args.mode,
         load_jobid=args.load_jobid,
         gpu_type=args.gpu_type,
         override=args.override,
