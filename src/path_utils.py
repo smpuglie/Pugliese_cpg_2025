@@ -1,47 +1,65 @@
 from pathlib import Path
 from omegaconf import OmegaConf
 import logging
-
+import os
 logger = logging.getLogger(__name__)
+
 
 def register_custom_resolvers():
     """Register custom OmegaConf resolvers for interpolations."""
     
-    def output_dir_resolver(cfg):
+    def output_dir_resolver():
         """
         Custom resolver that returns hydra.runtime.output_dir if available,
-        otherwise falls back to ${paths.base_dir}/run_id=${run_id}/
+        otherwise falls back to environment variables or default path.
         """
+        # First try to get from Hydra's current working directory
         try:
-            # Try to get hydra runtime output dir
-            if hasattr(cfg, 'hydra') and hasattr(cfg.hydra, 'runtime') and hasattr(cfg.hydra.runtime, 'output_dir'):
-                return cfg.hydra.runtime.output_dir
+            hydra_output_dir = os.environ.get('HYDRA_RUNTIME_OUTPUT_DIR')
+            if hydra_output_dir:
+                return hydra_output_dir
         except Exception as e:
-            logger.debug(f"Could not access hydra.runtime.output_dir: {e}")
+            logger.debug(f"Could not get HYDRA_RUNTIME_OUTPUT_DIR: {e}")
         
-        # Fallback to custom path construction
+        # Try to get from current working directory if it looks like a hydra output dir
         try:
-            base_dir = OmegaConf.select(cfg, "paths.base_dir")
-            run_id = OmegaConf.select(cfg, "run_id")
-            
-            if base_dir is not None and run_id is not None:
-                return f"{base_dir}/run_id={run_id}/"
-            else:
-                logger.warning("Could not construct fallback path - missing base_dir or run_id")
-                return None
+            cwd = os.getcwd()
+            if 'outputs' in cwd or 'multirun' in cwd:
+                return cwd
         except Exception as e:
-            logger.error(f"Error constructing fallback path: {e}")
-            return None
+            logger.debug(f"Could not use current working directory: {e}")
+        
+        # If we can't determine the output dir, return None 
+        # This will trigger the fallback in the YAML
+        return None
     
-    # Register the resolver
+    def fallback_path_resolver(base_dir: str, run_id: str = None):
+        """
+        Fallback resolver that constructs the path from base_dir and run_id.
+        """
+        if run_id is None:
+            # Generate a simple timestamp-based run_id if not provided
+            from datetime import datetime
+            run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        return f"{base_dir}/run_id={run_id}/"
+    
+    # Register both resolvers
     OmegaConf.register_new_resolver(
-        "output_dir_or_fallback", 
+        "hydra_output_dir", 
         output_dir_resolver,
-        use_cache=False  # Don't cache since hydra.runtime.output_dir might change
+        use_cache=False
+    )
+    
+    OmegaConf.register_new_resolver(
+        "fallback_path", 
+        fallback_path_resolver,
+        use_cache=False
     )
 
 # Auto-register when module is imported
 register_custom_resolvers()
+
 
 def convert_to_string(value):
     """Convert a value to a string, handling Path objects."""
