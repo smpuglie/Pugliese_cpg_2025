@@ -300,7 +300,7 @@ def replace_paths_with_template(cfg, paths_template="glados", config_dir="../con
     return cfg
 
 
-def load_config_with_path_template(config_path, paths_template="glados", experiment=None, version=None, run_id=None, config_dir="../configs", verbose=False):
+def load_config_with_path_template(config_path, paths_template=None, experiment=None, version=None, run_id=None, config_dir="../configs", verbose=False):
     """
     Load a config file and replace paths using a specified template.
     
@@ -320,7 +320,8 @@ def load_config_with_path_template(config_path, paths_template="glados", experim
     
     # Load the config
     cfg = OmegaConf.load(config_path)
-    
+    if paths_template is None:
+        return cfg
     # Override experiment/version if provided
     if experiment:
         if 'experiment' not in cfg:
