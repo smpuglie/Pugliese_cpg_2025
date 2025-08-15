@@ -706,6 +706,7 @@ def calculate_optimal_batch_size(n_neurons: int, n_timepoints: int, n_replicates
         n_timepoints: Number of time points per sample
         n_replicates: Total number of replicates (batch dimension)
         n_devices: Number of devices available (defaults to JAX device count)
+        max_batch_size: Maximum allowed batch size (default 256)
     
     Returns:
         Optimal batch size that respects memory limits and device constraints
@@ -718,31 +719,133 @@ def calculate_optimal_batch_size(n_neurons: int, n_timepoints: int, n_replicates
     if n_replicates < n_devices:
         return n_replicates
     
-    # Estimate memory usage per sample
-    available_memory = psutil.virtual_memory().available
-    print(f"Available memory: {available_memory / (1024 ** 3):.2f} GB")
-    bytes_per_sample = n_neurons * n_timepoints * 8  # float64 + overhead
-    print(f"Estimated bytes per sample: {bytes_per_sample / (1024 ** 2):.2f} MB")
-    # Calculate memory-constrained batch size (use 75% of available memory for safety)
-    max_memory_samples = int(available_memory * 0.75 / bytes_per_sample)
+    # Get memory information
+    memory_info = psutil.virtual_memory()
+    available_memory = memory_info.available
+    total_memory = memory_info.total
     
-    # Start with a reasonable baseline: 4 samples per device
-    baseline_batch = n_devices * 4
+    print(f"System memory: {total_memory / (1024 ** 3):.2f} GB total, {available_memory / (1024 ** 3):.2f} GB available")
     
-    # Choose optimal batch size considering memory constraints
-    memory_limited_batch = min(max_memory_samples, max_batch_size)  # Cap at 256 for efficiency
+    # Try to get GPU memory if available
+    gpu_memory = None
+    n_gpu_devices = 0
+    try:
+        devices = jax.devices()
+        n_gpu_devices = len([d for d in devices if 'gpu' in str(d).lower() or 'cuda' in str(d).lower()])
+        
+        if n_gpu_devices > 0:
+            # NVIDIA Titan RTX with 24GB each
+            gpu_memory_per_device = 24 * (1024 ** 3)  # 24GB per GPU
+            total_gpu_memory = gpu_memory_per_device * n_gpu_devices
+            
+            if n_gpu_devices == 1:
+                print(f"Detected {n_gpu_devices} GPU device")
+                print(f"GPU memory: {gpu_memory_per_device / (1024 ** 3):.0f}GB available")
+            else:
+                print(f"Detected {n_gpu_devices} GPU device")
+                print(f"GPU memory: {gpu_memory_per_device / (1024 ** 3):.0f}GB per device, {total_gpu_memory / (1024 ** 3):.0f}GB total")
+            
+            # Use memory from available GPUs (JAX will distribute across them)
+            gpu_memory = total_gpu_memory
+        else:
+            print("No GPU devices detected - using CPU mode")
+    except Exception as e:
+        print(f"GPU detection failed: {e}")
+        pass
+    
+    # Estimate memory usage per sample with more realistic overhead
+    # Each sample needs:
+    # 1. Output array: n_neurons * n_timepoints * 4 bytes (float32)
+    # 2. Intermediate computations: ~2x the output size for ODE solving (reduced from 3x)
+    # 3. Weight matrix operations: n_neurons^2 * 4 bytes 
+    # 4. Additional overhead: ~1.5x for JAX compilation and caching (reduced from 2x)
+    
+    output_size = n_neurons * n_timepoints * 4  # float32
+    intermediate_size = output_size * 2  # ODE solver intermediates (reduced)
+    weight_ops_size = n_neurons * n_neurons * 4  # Weight matrix operations
+    overhead_factor = 1.5  # JAX compilation and caching overhead (reduced)
+    
+    bytes_per_sample = (output_size + intermediate_size + weight_ops_size) * overhead_factor
+    
+    print(f"Estimated memory per sample: {bytes_per_sample / (1024 ** 2):.1f} MB")
+    print(f"  - Output array: {output_size / (1024 ** 2):.1f} MB")
+    print(f"  - Intermediate computations: {intermediate_size / (1024 ** 2):.1f} MB") 
+    print(f"  - Weight operations: {weight_ops_size / (1024 ** 2):.1f} MB")
+    print(f"  - Overhead factor: {overhead_factor}x")
+    
+    # Choose memory limit based on available hardware
+    if gpu_memory is not None:
+        # With 2x Titan RTX (48GB total), use 80% for computations
+        usable_memory = gpu_memory * 0.8
+        print(f"Using GPU memory constraint: {usable_memory / (1024 ** 3):.2f} GB ({gpu_memory / (1024 ** 3):.0f}GB total)")
+    else:
+        # Use system memory with reasonable safety margin (50% of available, max 32GB)
+        usable_memory = min(available_memory * 0.5, 32 * (1024 ** 3))
+        print(f"Using system memory constraint: {usable_memory / (1024 ** 3):.2f} GB")
+    
+    # Calculate memory-constrained batch size
+    max_memory_samples = max(1, int(usable_memory / bytes_per_sample))
+    print(f"Memory-limited batch size: {max_memory_samples}")
+    
+    # Start with reasonable baseline based on GPU setup
+    if gpu_memory is not None:
+        if n_gpu_devices == 1:
+            # Single GPU: more conservative baseline but still efficient
+            baseline_batch = max(16, n_devices * 12)  # 12 samples per JAX device for single GPU
+            print(f"Baseline batch size (single GPU): {baseline_batch}")
+        else:
+            # Multi-GPU: higher baseline to utilize parallel processing
+            baseline_batch = max(16, n_devices * 16)  # 16 samples per JAX device for multi-GPU
+            print(f"Baseline batch size (multi-GPU): {baseline_batch}")
+    else:
+        baseline_batch = max(8, n_devices * 8)   # Lower baseline for CPU-only
+        print(f"Baseline batch size (CPU): {baseline_batch}")
+    
+    # Choose the smaller of memory constraint and reasonable upper limit
+    # With high-end GPUs, allow larger batch sizes
+    if gpu_memory is not None:
+        if n_gpu_devices == 1:
+            reasonable_upper_limit = min(128, max_batch_size)  # More conservative for single GPU
+        else:
+            reasonable_upper_limit = min(256, max_batch_size)  # Higher limit for multi-GPU setup
+    else:
+        reasonable_upper_limit = min(64, max_batch_size)   # Lower limit for CPU-only
+    
+    memory_limited_batch = min(max_memory_samples, reasonable_upper_limit)
+    
+    # Take the larger of baseline and memory-limited (less conservative)
     optimal_batch = max(baseline_batch, memory_limited_batch)
-    # print(f"Memory-limited batch size: {memory_limited_batch}, Baseline batch size: {baseline_batch}, Optimal batch size: {optimal_batch}")
+    print(f"Initial optimal batch size: {optimal_batch}")
+    
     # Ensure batch size doesn't exceed available replicates
     optimal_batch = min(optimal_batch, n_replicates)
-    # print(f"Adjusted optimal batch size: {optimal_batch} (limited by replicates)")
+    print(f"Replicate-limited batch size: {optimal_batch}")
+    
     # Make batch size divisible by device count for even distribution
-    # But only if we have enough replicates to justify it
-    if optimal_batch >= n_devices:
-        optimal_batch = (optimal_batch // n_devices) * n_devices
-    print('Final optimal batch size:', max(1, optimal_batch))
-    # Final safety check - ensure we return at least 1
-    return max(1, optimal_batch)
+    # But only if we have enough samples to justify it
+    if optimal_batch >= n_devices and n_devices > 1:
+        optimal_batch = max(n_devices, (optimal_batch // n_devices) * n_devices)
+        print(f"Device-aligned batch size: {optimal_batch}")
+    
+    # Final safety checks with hardware-appropriate minimums
+    if gpu_memory is not None:
+        if n_gpu_devices == 1:
+            # Single GPU: more conservative limits
+            optimal_batch = max(12, optimal_batch)  # Minimum of 12 for single GPU
+            optimal_batch = min(optimal_batch, 64)  # Hard cap of 64 for single GPU stability
+            print(f"Final batch size (single GPU): {optimal_batch}")
+        else:
+            # Multi-GPU: higher limits to utilize parallel processing
+            optimal_batch = max(16, optimal_batch)  # Minimum of 16 for multi-GPU setup
+            optimal_batch = min(optimal_batch, 128)  # Hard cap of 128 for multi-GPU stability
+            print(f"Final batch size (multi-GPU): {optimal_batch}")
+    else:
+        optimal_batch = max(8, optimal_batch)   # Minimum of 8 for CPU setup
+        optimal_batch = min(optimal_batch, 32)  # Hard cap of 32 for CPU
+        print(f"Final batch size (CPU): {optimal_batch}")
+    
+    print(f'Final optimal batch size: {optimal_batch}')
+    return optimal_batch
 
 
 def initialize_pruning_state(
