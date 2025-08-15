@@ -146,19 +146,10 @@ def run_single_simulation(
     saveat = SaveAt(ts=t_axis)
     controller = PIDController(rtol=r_tol, atol=a_tol)
 
-    # Define event to stop integration if any output is inf or nan
-    def event_fn(t, y, args, **kwargs):
-        # y is the current state vector
-        is_bad = jnp.any(jnp.isnan(y)) | jnp.any(jnp.isinf(y))
-        return is_bad
-
-    event = Event(event_fn)
-
     solution = diffeqsolve(
         term, solver, 0, T, dt, R0,
         args=(inputs, pulse_start, pulse_end, tau, W, threshold, a, fr_cap, key, noise_stdv),
         saveat=saveat, stepsize_controller=controller,
-        event=event,
         max_steps=100000, throw=False
     )
     return jnp.transpose(solution.ys)
