@@ -1,7 +1,7 @@
 import os 
 # os.environ["CUDA_VISIBLE_DEVICES"] = "1"  # Use GPU 1
-# os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
-os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.95"
+os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
+# os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.95"
 import jax
 
 # Configure JAX for better performance
