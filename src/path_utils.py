@@ -7,54 +7,59 @@ logger = logging.getLogger(__name__)
 
 def register_custom_resolvers():
     """Register custom OmegaConf resolvers for interpolations."""
+
     
-    def output_dir_resolver():
+    def multirun_aware_save_dir_resolver(base_dir: str, run_id: str):
         """
-        Custom resolver that returns hydra.runtime.output_dir if available,
-        otherwise falls back to environment variables or default path.
+        Custom resolver that checks if it's a multirun.
+        If multirun: use hydra.runtime.output_dir (which will be the subdir in sweep)
+        If not multirun: use ${base_dir}/run_id=${run_id}/
+        
+        Args:
+            base_dir: The base directory path
+            run_id: The run ID
         """
-        # First try to get from Hydra's current working directory
         try:
-            hydra_output_dir = os.environ.get('HYDRA_RUNTIME_OUTPUT_DIR')
-            if hydra_output_dir:
-                return hydra_output_dir
+            # Check if we're in a multirun context
+            from hydra.core.hydra_config import HydraConfig
+            
+            # Try to get the current Hydra config
+            if HydraConfig.initialized():
+                hydra_cfg = HydraConfig.get()
+                # Check if it's a multirun by looking at the job config
+                is_multirun = hydra_cfg.mode.name == "MULTIRUN"
+                
+                if is_multirun:
+                    # For multirun, use the current output directory (which is the subdir)
+                    # This should be something like .../run_id=Testing/sim.noiseStdvProp=0.0/
+                    hydra_output_dir = hydra_cfg.runtime.output_dir
+                    if hydra_output_dir:
+                        return str(hydra_output_dir)
+                    
+                    # Fallback: construct the path manually using override_dirname
+                    override_dirname = hydra_cfg.job.override_dirname
+                    if override_dirname:
+                        return f"{base_dir}/run_id={run_id}/{override_dirname}"
+                    else:
+                        return f"{base_dir}/run_id={run_id}"
+                else:
+                    # For single run, use the standard path
+                    return f"{base_dir}/run_id={run_id}"
+            else:
+                # If Hydra not initialized, assume single run
+                return f"{base_dir}/run_id={run_id}"
+                
         except Exception as e:
-            logger.debug(f"Could not get HYDRA_RUNTIME_OUTPUT_DIR: {e}")
-        
-        # Try to get from current working directory if it looks like a hydra output dir
-        try:
-            cwd = os.getcwd()
-            if 'outputs' in cwd or 'multirun' in cwd:
-                return cwd
-        except Exception as e:
-            logger.debug(f"Could not use current working directory: {e}")
-        
-        # If we can't determine the output dir, return None 
-        # This will trigger the fallback in the YAML
-        return None
+            logger.debug(f"Could not determine if multirun: {e}")
+            # If we can't determine, use the standard path
+            return f"{base_dir}/run_id={run_id}"
     
-    def fallback_path_resolver(base_dir: str, run_id: str = None):
-        """
-        Fallback resolver that constructs the path from base_dir and run_id.
-        """
-        if run_id is None:
-            # Generate a simple timestamp-based run_id if not provided
-            from datetime import datetime
-            run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-        
-        return f"{base_dir}/run_id={run_id}/"
-    
-    # Register both resolvers
+    # Register all resolvers (with replace=True to avoid conflicts if already registered)
     OmegaConf.register_new_resolver(
-        "hydra_output_dir", 
-        output_dir_resolver,
-        use_cache=False
-    )
-    
-    OmegaConf.register_new_resolver(
-        "fallback_path", 
-        fallback_path_resolver,
-        use_cache=False
+        "multirun_save_dir",
+        multirun_aware_save_dir_resolver,
+        use_cache=False,
+        replace=True
     )
 
 # Auto-register when module is imported
@@ -88,5 +93,14 @@ def convert_dict_to_path(d):
 
 def save_config(cfg, path):
     """Save the configuration to a file."""
-    cfg.paths = convert_dict_to_string(cfg.paths)
-    OmegaConf.save(cfg, path)
+    # Create a copy of the config to avoid modifying the original
+    cfg_copy = OmegaConf.create(cfg)
+    
+    # Resolve all interpolations in the paths section before converting to strings
+    if 'paths' in cfg_copy:
+        # Resolve interpolations first
+        OmegaConf.resolve(cfg_copy.paths)
+        # Then convert to strings
+        cfg_copy.paths = convert_dict_to_string(cfg_copy.paths)
+    
+    OmegaConf.save(cfg_copy, path)
