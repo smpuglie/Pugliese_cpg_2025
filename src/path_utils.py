@@ -300,7 +300,7 @@ def replace_paths_with_template(cfg, paths_template="glados", config_dir="../con
     return cfg
 
 
-def load_config_with_path_template(config_path, paths_template="glados", experiment=None, version=None, run_id="Testing", config_dir="../configs", verbose=False):
+def load_config_with_path_template(config_path, paths_template="glados", experiment=None, version=None, run_id=None, config_dir="../configs", verbose=False):
     """
     Load a config file and replace paths using a specified template.
     
@@ -330,7 +330,7 @@ def load_config_with_path_template(config_path, paths_template="glados", experim
     if version:
         cfg.version = version
         
-    if run_id:
+    if run_id is not None:
         cfg.run_id = run_id
     
     # Replace paths using the specified template
