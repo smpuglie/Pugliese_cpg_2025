@@ -157,10 +157,23 @@ def main(cfg: DictConfig):
             if final_mini_circuits is not None:
                 sparse.save_npz(cfg.paths.ckpt_dir / f"{cfg.experiment.name}_mini_circuits.npz", sparse.COO.from_numpy(final_mini_circuits))
 
+            # Clean up checkpoints if simulation completed successfully
+            if hasattr(cfg.sim, 'enable_checkpointing') and cfg.sim.enable_checkpointing:
+                checkpoint_dir = cfg.paths.ckpt_dir / "checkpoints"
+                if checkpoint_dir.exists():
+                    print("Simulation completed successfully. Cleaning up checkpoints...")
+                    import shutil
+                    try:
+                        shutil.rmtree(checkpoint_dir)
+                        print("Checkpoints cleaned up.")
+                    except Exception as e:
+                        print(f"Warning: Could not clean up checkpoints: {e}")
+
             print('Done! :)')
             
     except KeyboardInterrupt:
         logger.error("Keyboard interrupt received. Cleaning up...")
+        print("\nSimulation interrupted. Checkpoints (if any) have been preserved for resuming.")
         cleanup_jax()
         cleanup_logging(logger)
         logger.info("Cleanup completed. Exiting...")

@@ -15,3 +15,7 @@ n_active_upper: 500
 n_active_lower: 5
 n_high_fr_upper: 100
 high_fr_threshold: 100.0
+
+# Checkpointing configuration
+enable_checkpointing: True # Enable intermediate checkpointing
+checkpoint_interval: 1 # Save checkpoint every N batches (set to 1 to save after each batch)
