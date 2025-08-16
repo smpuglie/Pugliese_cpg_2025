@@ -1,0 +1,18 @@
+# Default configuration for the simulation
+
+T: 2.0 # Total simulation time
+dt: 0.001 # Time step for the simulation
+pulseStart: 0.02 # Start time for the pulse
+pulseEnd: 1.999 # End time for the pulse
+shuffle: False # Shuffle weight matrix
+noise: False # Add noise to weight matrix
+noiseStdvProp: 0.0 # Proportional standard deviation of weight noise
+noiseMean: 0.0 # Mean of input noise
+noiseStdv: 0.0 # Standard deviation of input noise
+prune_network: False # Whether to prune the network or not
+adjustStimI: True # Adjust stimulus current
+max_adjustment_iters: 10 # Maximum iterations for simulation with adjusted stimulus current
+n_active_upper: 500 # Upper limit for active neurons
+n_active_lower: 5 # Lower limit for active neurons
+n_high_fr_upper: 100 # Upper limit for high frequency neurons
+high_fr_threshold: 100.0 # Upper limit for high frequency neurons
