@@ -28,7 +28,7 @@ class NeuronParams(NamedTuple):
     a: jnp.ndarray  # Activation parameters
     threshold: jnp.ndarray  # Thresholds for activation
     fr_cap: jnp.ndarray  # Firing rate caps
-    input_currents: jnp.ndarray  # Shape: (n_stim_configs, n_neurons)
+    input_currents: jnp.ndarray  # Shape: (n_stim_configs, n_param_sets, n_neurons)
     seeds: jnp.ndarray  # Random seeds for reproducibility
     exc_dn_idxs: jnp.ndarray  # Indices of excitatory descending neurons
     inh_dn_idxs: jnp.ndarray  # Indices of inhibitory descending neurons
@@ -1091,7 +1091,6 @@ def _adjust_stimulation_for_batch(
         for sim_idx in range(len(n_active)):
             sim_active = n_active[sim_idx]
             sim_high_fr = n_high_fr[sim_idx]
-            sim_input = current_inputs[sim_idx]
 
             # Calculate the actual global simulation index and its components
             if n_devices > 1:
@@ -1105,20 +1104,23 @@ def _adjust_stimulation_for_batch(
             # Calculate replicate and stimulus indices from global simulation index
             replicate_idx = int(global_sim_idx % sim_params.n_param_sets)
             stim_idx = int(global_sim_idx // sim_params.n_param_sets)
+            
+            # Get the correct input for this specific stimulus and replicate
+            sim_input = current_inputs[stim_idx, replicate_idx]
 
             if (sim_active > sim_config.n_active_upper) or (sim_high_fr > sim_config.n_high_fr_upper):
                 # Too strong - reduce stimulation
                 if next_lowest is None:
-                    new_inputs = new_inputs.at[sim_idx].set(sim_input / 2)
+                    new_inputs = new_inputs.at[stim_idx, replicate_idx].set(sim_input / 2)
                 else:
-                    new_inputs = new_inputs.at[sim_idx].set((sim_input + next_lowest[sim_idx]) / 2)
+                    new_inputs = new_inputs.at[stim_idx, replicate_idx].set((sim_input + next_lowest[stim_idx, replicate_idx]) / 2)
                 needs_adjustment = needs_adjustment.at[sim_idx].set(True)
             elif sim_active < sim_config.n_active_lower:
                 # Too weak - increase stimulation
                 if next_highest is None:
-                    new_inputs = new_inputs.at[sim_idx].set(sim_input * 2)
+                    new_inputs = new_inputs.at[stim_idx, replicate_idx].set(sim_input * 2)
                 else:
-                    new_inputs = new_inputs.at[sim_idx].set((sim_input + next_highest[sim_idx]) / 2)
+                    new_inputs = new_inputs.at[stim_idx, replicate_idx].set((sim_input + next_highest[stim_idx, replicate_idx]) / 2)
                 needs_adjustment = needs_adjustment.at[sim_idx].set(True)
             # else: just right, no adjustment needed
 
