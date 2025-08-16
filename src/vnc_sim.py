@@ -1124,8 +1124,11 @@ def _adjust_stimulation_for_batch(
                 needs_adjustment = needs_adjustment.at[sim_idx].set(True)
             # else: just right, no adjustment needed
 
+            # Determine if this simulation needs adjustment
+            sim_needs_adjustment = (sim_active > sim_config.n_active_upper) or (sim_high_fr > sim_config.n_high_fr_upper) or (sim_active < sim_config.n_active_lower)
+            
             print(f"    Adjustment iter {adjust_iter + 1}, Stim {stim_idx}, Replicate {replicate_idx}: Max stim: {jnp.max(sim_input):.6f}, "
-                  f"Active: {sim_active}, High FR: {sim_high_fr}")
+                  f"Active: {sim_active}, High FR: {sim_high_fr}, Needs adjustment: {sim_needs_adjustment}")
             
         # Update neuron params with new stimulation
         adjusted_neuron_params = adjusted_neuron_params._replace(
@@ -1136,10 +1139,10 @@ def _adjust_stimulation_for_batch(
         gc.collect()
 
         if not jnp.any(needs_adjustment):
-            print(f"    Stimulation appropriate for all simulations in this batch")
+            print(f"    Stimulation appropriate for all simulations in this batch - adjustment complete: True")
             break
     else:
-        print(f"    Warning: Maximum adjustment iterations ({sim_config.max_adjustment_iters}) reached for this batch")
+        print(f"    Warning: Maximum adjustment iterations ({sim_config.max_adjustment_iters}) reached for this batch - adjustment complete: False")
 
     return adjusted_neuron_params
 
