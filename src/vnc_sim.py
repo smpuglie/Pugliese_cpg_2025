@@ -1404,18 +1404,6 @@ def stack_pruning_states(states_list: List[Pruning_state]) -> Pruning_state:
     return stacked_state
 
 
-def trim_state_padding(state: Pruning_state, target_size: int) -> Pruning_state:
-    """Remove padding from state to match target batch size using jax.lax.map."""
-    def trim_field(field_value):
-        if hasattr(field_value, 'shape') and len(field_value.shape) > 0:
-            # Trim the first dimension (batch dimension) to target_size
-            return field_value[:target_size]
-        else:
-            # Keep scalar or non-array fields as is
-            return field_value
-    
-    return jax.lax.map(trim_field, state)
-
 # #############################################################################################################################=
 # CONFIGURATION LOADING AND SETUP FUNCTIONS
 # #############################################################################################################################=
@@ -1654,8 +1642,6 @@ def run_vnc_simulation(cfg: DictConfig) -> Union[jnp.ndarray, Tuple[jnp.ndarray,
 """
 MAIN INTERFACE FUNCTIONS:
 - run_vnc_simulation(cfg): Unified function for all simulation types
-- run_vnc_simulation_optimized(cfg): Backward compatibility for standard simulation
-- run_vnc_prune_optimized(cfg): Backward compatibility for pruning simulation
 
 CORE SIMULATION FUNCTIONS:
 - run_baseline(): Standard simulation without modifications  
@@ -1672,6 +1658,7 @@ SIMULATION ENGINE:
 - get_batch_function(): Get appropriate batch processing function
 - _run_stim_neurons(): Execute simulation without pruning
 - _run_with_pruning(): Execute simulation with pruning
+- _adjust_stimulation_for_batch(): Adjust stimulation parameters for specific batch
 
 BATCH PROCESSING FUNCTIONS:
 - process_batch_baseline(): Process batch of baseline simulations
@@ -1687,7 +1674,7 @@ PRUNING-SPECIFIC FUNCTIONS:
 - reshape_state_for_pmap(): Reshape state for multi-device processing
 - reshape_state_from_pmap(): Reshape state back from multi-device format
 - pad_state_for_devices(): Pad state for device alignment
-- trim_state_padding(): Remove padding from state
+- trim_state_padding(): Remove padding from state to get back to actual batch size
 - stack_pruning_states(): Stack multiple pruning states into single state
 - save_state()/load_state(): Persist pruning state to/from disk
 
@@ -1697,10 +1684,20 @@ CONFIGURATION AND SETUP:
 - parse_simulation_config(): Parse simulation configuration from config
 - calculate_optimal_batch_size(): Determine optimal batch size
 
+IMPORTED UTILITY FUNCTIONS (from src.sim_utils and src.shuffle_utils):
+- load_W(): Load connectivity matrix from file
+- load_wTable(): Load neuron metadata table from file
+- sample_trunc_normal(): Sample from truncated normal distribution
+- set_sizes(): Set neuron parameters based on surface area
+- make_input(): Create input current arrays for stimulation
+- compute_oscillation_score(): Compute oscillation scores for activity
+- extract_shuffle_indices(): Extract neuron type indices for shuffling
+- full_shuffle(): Perform complete connectivity matrix shuffling
+
 CONFIGURATION STRUCTURES:
-- NeuronParams: Immutable neuron parameter container
-- SimParams: Immutable simulation parameter container  
-- Pruning_state: Pruning algorithm state container
-- SimulationConfig: Simulation execution configuration
+- NeuronParams: NamedTuple for immutable neuron parameter storage
+- SimParams: NamedTuple for immutable simulation parameter storage  
+- Pruning_state: NamedTuple for pruning algorithm state storage
+- SimulationConfig: NamedTuple for simulation execution configuration
 
 """
