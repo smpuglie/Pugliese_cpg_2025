@@ -697,7 +697,7 @@ def get_batch_function(sim_config: SimulationConfig):
     return batch_functions[sim_config.sim_type]
 
 
-def calculate_optimal_batch_size(n_neurons: int, n_timepoints: int, n_replicates: int, n_devices: int = None, max_batch_size: int = 256) -> int:
+def calculate_optimal_batch_size(n_neurons: int, n_timepoints: int, n_replicates: int, n_devices: int = None, max_batch_size: int = 256, total_sims: int = None) -> int:
     """
     Calculate optimal batch size based on memory and device constraints.
     
@@ -707,6 +707,8 @@ def calculate_optimal_batch_size(n_neurons: int, n_timepoints: int, n_replicates
         n_replicates: Total number of replicates (batch dimension)
         n_devices: Number of devices available (defaults to JAX device count)
         max_batch_size: Maximum allowed batch size (default 256)
+        total_sims: Total number of simulations (n_sims * n_replicates). If provided,
+                   will try to process all simulations in a single batch when feasible.
     
     Returns:
         Optimal batch size that respects memory limits and device constraints
@@ -715,9 +717,17 @@ def calculate_optimal_batch_size(n_neurons: int, n_timepoints: int, n_replicates
     if n_devices is None:
         n_devices = jax.device_count()
     
-    # Handle edge case where we have fewer replicates than devices
-    if n_replicates < n_devices:
-        return n_replicates
+    # Use total_sims as the basis for calculation if provided, otherwise use n_replicates
+    if total_sims is not None:
+        print(f"Total simulations to process: {total_sims}")
+        effective_total = total_sims
+    else:
+        effective_total = n_replicates
+        print(f"Using n_replicates as total: {effective_total}")
+    
+    # Handle edge case where we have fewer simulations than devices
+    if effective_total < n_devices:
+        return effective_total
     
     # Get memory information
     memory_info = psutil.virtual_memory()
@@ -914,9 +924,14 @@ def calculate_optimal_batch_size(n_neurons: int, n_timepoints: int, n_replicates
     optimal_batch = max(baseline_batch, memory_limited_batch)
     print(f"Initial optimal batch size: {optimal_batch}")
     
-    # Ensure batch size doesn't exceed available replicates
-    optimal_batch = min(optimal_batch, n_replicates)
-    print(f"Replicate-limited batch size: {optimal_batch}")
+    # Special case: if we can fit all simulations in one batch and it's not too large, do it
+    if effective_total <= max_memory_samples and effective_total <= reasonable_upper_limit:
+        print(f"Can process all {effective_total} simulations in a single batch")
+        optimal_batch = effective_total
+    else:
+        # Ensure batch size doesn't exceed available simulations
+        optimal_batch = min(optimal_batch, effective_total)
+        print(f"Simulation-limited batch size: {optimal_batch}")
     
     # Make batch size divisible by device count for even distribution
     # But only if we have enough samples to justify it
@@ -929,12 +944,12 @@ def calculate_optimal_batch_size(n_neurons: int, n_timepoints: int, n_replicates
         if n_gpu_devices == 1:
             # Single GPU: more conservative limits
             optimal_batch = max(12, optimal_batch)  # Minimum of 12 for single GPU
-            optimal_batch = min(optimal_batch, max_batch_size)  # Hard cap of 256 for single GPU stability
+            optimal_batch = min(optimal_batch, max_batch_size)  # Hard cap for single GPU stability
             print(f"Final batch size (single GPU): {optimal_batch}")
         else:
             # Multi-GPU: higher limits to utilize parallel processing
             optimal_batch = max(16, optimal_batch)  # Minimum of 16 for multi-GPU setup
-            optimal_batch = min(optimal_batch, 128)  # Hard cap of 128 for multi-GPU stability
+            optimal_batch = min(optimal_batch, max_batch_size)  # Hard cap for multi-GPU stability
             print(f"Final batch size (multi-GPU): {optimal_batch}")
     else:
         optimal_batch = max(8, optimal_batch)   # Minimum of 8 for CPU setup
@@ -1015,7 +1030,7 @@ def run_simulation_engine(
     batch_size = sim_config.batch_size
     if batch_size is None:
         batch_size = calculate_optimal_batch_size(
-            sim_params.n_neurons, len(sim_params.t_axis), sim_params.n_param_sets, n_devices
+            sim_params.n_neurons, len(sim_params.t_axis), sim_params.n_param_sets, n_devices, total_sims=total_sims
         )
     
     # Adjust batch size for multiple devices
@@ -1061,13 +1076,13 @@ def _adjust_stimulation_for_batch(
     next_lowest = None
     
     for adjust_iter in range(sim_config.max_adjustment_iters):
-        test_results = batch_func(adjusted_neuron_params, sim_params, batch_indices)
+        test_results = batch_func(adjusted_neuron_params, sim_params, batch_indices) # (Devices, Batch, Neurons, Time)
         if n_devices > 1:
-            test_results = test_results.reshape(-1, *test_results.shape[2:])
+            test_results = test_results.reshape(-1, *test_results.shape[2:]) # (Batch, Neurons, Time)
 
-        max_rates = jnp.max(test_results, axis=2)
-        n_active = jnp.sum(jnp.sum(test_results, axis=2) > 0, axis=1)
-        n_high_fr = jnp.sum(max_rates > sim_config.high_fr_threshold, axis=1)
+        max_rates = jnp.max(test_results, axis=2) # (Batch, Neurons, Time) -> (Batch, Neurons)
+        n_active = jnp.sum(jnp.sum(test_results, axis=2) > 0, axis=1) # (Batch, Neurons) -> # (Batch,)
+        n_high_fr = jnp.sum(max_rates > sim_config.high_fr_threshold, axis=1) # (Batch, Neurons) -> (Batch,)
 
         current_inputs = adjusted_neuron_params.input_currents.copy()
         new_inputs = current_inputs.copy()
@@ -1077,6 +1092,19 @@ def _adjust_stimulation_for_batch(
             sim_active = n_active[sim_idx]
             sim_high_fr = n_high_fr[sim_idx]
             sim_input = current_inputs[sim_idx]
+
+            # Calculate the actual global simulation index and its components
+            if n_devices > 1:
+                # batch_indices is reshaped for devices, so flatten it first
+                flat_batch_indices = batch_indices.copy().reshape(-1)
+                global_sim_idx = flat_batch_indices[sim_idx] if sim_idx < len(flat_batch_indices) else flat_batch_indices[-1]
+            else:
+                global_sim_idx = batch_indices.copy()
+                global_sim_idx = global_sim_idx[sim_idx] if sim_idx < len(global_sim_idx) else global_sim_idx[-1]
+            
+            # Calculate replicate and stimulus indices from global simulation index
+            replicate_idx = int(global_sim_idx % sim_params.n_param_sets)
+            stim_idx = int(global_sim_idx // sim_params.n_param_sets)
 
             if (sim_active > sim_config.n_active_upper) or (sim_high_fr > sim_config.n_high_fr_upper):
                 # Too strong - reduce stimulation
@@ -1094,7 +1122,7 @@ def _adjust_stimulation_for_batch(
                 needs_adjustment = needs_adjustment.at[sim_idx].set(True)
             # else: just right, no adjustment needed
 
-            print(f"    Adjustment iter {adjust_iter + 1}, Sim {sim_idx}: Max stim: {jnp.max(sim_input):.6f}, "
+            print(f"    Adjustment iter {adjust_iter + 1}, Stim {stim_idx}, Replicate {replicate_idx}: Max stim: {jnp.max(sim_input):.6f}, "
                   f"Active: {sim_active}, High FR: {sim_high_fr}")
             
         # Update neuron params with new stimulation
