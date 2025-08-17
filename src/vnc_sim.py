@@ -17,74 +17,9 @@ from src.sim_utils import (
     compute_oscillation_score
 )
 
-# #############################################################################################################################=
-# IMMUTABLE CONFIGURATION STRUCTURES
-# #############################################################################################################################=
-
-class NeuronParams(NamedTuple):
-    """Immutable neuron parameters for JIT compilation."""
-    W: jnp.ndarray
-    tau: jnp.ndarray  # Time constants for neurons
-    a: jnp.ndarray  # Activation parameters
-    threshold: jnp.ndarray  # Thresholds for activation
-    fr_cap: jnp.ndarray  # Firing rate caps
-    input_currents: jnp.ndarray  # Shape: (n_stim_configs, n_param_sets, n_neurons)
-    seeds: jnp.ndarray  # Random seeds for reproducibility
-    exc_dn_idxs: jnp.ndarray  # Indices of excitatory descending neurons
-    inh_dn_idxs: jnp.ndarray  # Indices of inhibitory descending neurons
-    exc_in_idxs: jnp.ndarray  # Indices of excitatory interneurons
-    inh_in_idxs: jnp.ndarray  # Indices of inhibitory interneurons
-    mn_idxs: jnp.ndarray  # Indices of motor neurons
-    W_mask: Optional[jnp.ndarray] = None  # Mask for connectivity
-
-
-class SimParams(NamedTuple):
-    """Immutable simulation parameters for JIT compilation."""
-    n_neurons: int
-    n_param_sets: int
-    n_stim_configs: int
-    T: float
-    dt: float
-    pulse_start: float
-    pulse_end: float
-    t_axis: jnp.ndarray
-    exc_multiplier: float
-    inh_multiplier: float
-    noise_stdv_prop: float
-    r_tol: float
-    a_tol: float
-    noise_stdv: jnp.ndarray  # Standard deviation for noise, if applicable
-
-
-class Pruning_state(NamedTuple):
-    """Parameters for pruning simulation."""
-    W_mask: jnp.ndarray
-    interneuron_mask: jnp.ndarray
-    level: jnp.ndarray
-    total_removed_neurons: jnp.ndarray
-    removed_stim_neurons: jnp.ndarray
-    neurons_put_back: jnp.ndarray
-    prev_put_back: jnp.ndarray
-    last_removed: jnp.ndarray
-    remove_p: jnp.ndarray
-    min_circuit: jnp.ndarray
-    keys: jnp.ndarray
-
-
-class SimulationConfig(NamedTuple):
-    """Configuration for simulation execution."""
-    sim_type: str  # "baseline", "shuffle", "noise", "prune"
-    enable_pruning: bool = False
-    oscillation_threshold: float = 0.5
-    batch_size: Optional[int] = None
-    max_pruning_iterations: int = 200
-    # Auto stimulation adjustment parameters
-    adjustStimI: bool = False
-    max_adjustment_iters: int = 10
-    n_active_upper: int = 500
-    n_active_lower: int = 5
-    n_high_fr_upper: int = 100
-    high_fr_threshold: float = 100.0
+from data_classes import (
+    NeuronParams, SimParams, SimulationConfig, Pruning_state, CheckpointState
+)
 
 
 # #############################################################################################################################=
@@ -121,6 +56,17 @@ def add_noise_to_weights(W: jnp.ndarray, key: jnp.ndarray, stdv_prop: float) -> 
     return W + stdvs * noise
 
 
+
+@jit
+def nan_inf_event_func(t, y, args, **kwargs):
+    """Event function to detect NaNs or infs in the solution."""
+    # Returns 0 when NaN or inf is detected, triggering the event
+    has_nan = jnp.any(jnp.isnan(y))
+    has_inf = jnp.any(jnp.isinf(y))
+    # Return a negative value when NaN/inf detected to trigger the event
+    return jnp.where(has_nan | has_inf, -1.0, 1.0)
+
+
 @jit
 def run_single_simulation(
     W: jnp.ndarray,
@@ -145,11 +91,15 @@ def run_single_simulation(
     solver = Dopri5()
     saveat = SaveAt(ts=t_axis)
     controller = PIDController(rtol=r_tol, atol=a_tol)
+    
+    # Create event to detect NaN/inf and stop early
+    nan_inf_event = Event(nan_inf_event_func)
 
     solution = diffeqsolve(
         term, solver, 0, T, dt, R0,
         args=(inputs, pulse_start, pulse_end, tau, W, threshold, a, fr_cap, key, noise_stdv),
         saveat=saveat, stepsize_controller=controller,
+        event=nan_inf_event,
         max_steps=100000, throw=False
     )
     return jnp.transpose(solution.ys)
