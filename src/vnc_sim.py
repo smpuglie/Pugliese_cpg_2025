@@ -57,7 +57,6 @@ def add_noise_to_weights(W: jnp.ndarray, key: jnp.ndarray, stdv_prop: float) -> 
 
 
 
-@jit
 def nan_inf_event_func(t, y, args, **kwargs):
     """Event function to detect NaNs or infs in the solution."""
     # Returns 0 when NaN or inf is detected, triggering the event
