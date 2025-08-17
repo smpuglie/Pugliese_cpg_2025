@@ -73,9 +73,7 @@ class SimulationConfig(NamedTuple):
     high_fr_threshold: float = 100.0
     # Checkpointing parameters
     enable_checkpointing: bool = False
-    checkpoint_interval: int = 1  # Save checkpoint every N batches
-    checkpoint_dir: Optional[Path] = None
-
+    
 class CheckpointState(NamedTuple):
     """State information for simulation checkpointing."""
     batch_index: int
@@ -84,8 +82,5 @@ class CheckpointState(NamedTuple):
     # Large arrays are stored separately as sparse files
     n_result_batches: int  # Number of result batches (for reconstruction)
     accumulated_mini_circuits: Optional[List[jnp.ndarray]] = None  # For pruning simulations
-    neuron_params: Optional[NeuronParams] = None
     neuron_params_batch_range: Optional[jnp.ndarray] = None  # (start_idx, end_idx) for the saved batch
-    sim_params: Optional[SimParams] = None
-    sim_config: Optional[SimulationConfig] = None
     pruning_state: Optional[Pruning_state] = None
