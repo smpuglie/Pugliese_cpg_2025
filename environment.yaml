@@ -21,3 +21,4 @@ dependencies:
     - h5py
     - natsort
     - nvidia-ml-py3
+    - tqdm
