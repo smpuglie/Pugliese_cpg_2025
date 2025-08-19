@@ -131,6 +131,13 @@ def main(cfg: DictConfig):
         
         # Use context manager to redirect print statements to log file (clean console output)
         with CleanLoggingRedirect(logger):
+            if (("load_jobid" in cfg) and (cfg["load_jobid"] is not None) and (cfg["load_jobid"] != "")):
+                run_id = cfg.load_jobid
+                load_cfg_path = (
+                    Path(cfg.paths.base_dir) / f"run_id={run_id}/logs/run_config.yaml"
+                )
+                cfg = OmegaConf.load(load_cfg_path)
+                
             # Ensure paths are set correctly
             cfg.paths = convert_dict_to_path(cfg.paths)
 
