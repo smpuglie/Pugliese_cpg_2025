@@ -4,6 +4,7 @@ import jax.numpy as jnp
 import numpy as np
 from jax import vmap, jit
 import jax
+import yaml
 # from scipy.stats import truncnorm
 
 import os
@@ -283,6 +284,11 @@ def load_W(wPath):
 
     return W
 
+def load_from_yaml(yamlPath):
+    """load data from .yml file path"""
+    with open(yamlPath,'r') as file:
+        data = yaml.safe_load(file)
+    return data
 
 def load_wTable(dfPath):
     dfExt = os.path.splitext(dfPath)[1]
