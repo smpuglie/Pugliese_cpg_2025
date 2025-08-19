@@ -16,11 +16,12 @@ from src.sim_utils import (
     load_W, load_wTable, sample_trunc_normal, set_sizes, make_input,
     compute_oscillation_score
 )
-
-from data_classes import (
+from src.data_classes import (
     NeuronParams, SimParams, SimulationConfig, Pruning_state, CheckpointState
 )
-
+from src.checkpointing import (
+    load_checkpoint, save_checkpoint, find_latest_checkpoint, cleanup_old_checkpoints
+)
 
 # #############################################################################################################################=
 # CORE SIMULATION FUNCTIONS - ALL JIT COMPILED
@@ -959,7 +960,8 @@ def initialize_pruning_state(
 def run_simulation_engine(
     neuron_params: NeuronParams,
     sim_params: SimParams,
-    sim_config: SimulationConfig
+    sim_config: SimulationConfig,
+    checkpoint_dir: Optional[Path] = None,
 ) -> Union[jnp.ndarray, Tuple[jnp.ndarray, Pruning_state]]:
     """
     Unified simulation engine that handles all simulation types.
@@ -1001,12 +1003,12 @@ def run_simulation_engine(
     if sim_config.enable_pruning:
         return _run_with_pruning(
             neuron_params, sim_params, sim_config, batch_func, 
-            total_sims, batch_size, n_devices
+            total_sims, batch_size, n_devices, checkpoint_dir
         )
     else:
         return _run_stim_neurons(
             neuron_params, sim_params, sim_config, batch_func,
-            total_sims, batch_size, n_devices,
+            total_sims, batch_size, n_devices, checkpoint_dir
         )
 
 
@@ -1104,13 +1106,32 @@ def _run_stim_neurons(
     total_sims: int,
     batch_size: int,
     n_devices: int,
+    checkpoint_dir: Optional[Path] = None
 ) -> jnp.ndarray:
-    """Run simulation without pruning, with optional per-batch automatic stimulation adjustment."""
+    """Run simulation without pruning, with optional per-batch automatic stimulation adjustment and checkpointing."""
     
-    all_results = []
     n_batches = (total_sims + batch_size - 1) // batch_size
+    
+    # Check for existing checkpoint to resume from
+    checkpoint_state = None
+    start_batch = 0
+    all_results = []
+    adjusted_neuron_params = neuron_params
+    
+    if sim_config.enable_checkpointing and (checkpoint_dir is not None):
+        latest_checkpoint, base_name = find_latest_checkpoint(checkpoint_dir)
+        if latest_checkpoint:
+            try:
+                checkpoint_state, adjusted_neuron_params, metadata = load_checkpoint(latest_checkpoint, base_name, neuron_params)
+                start_batch = checkpoint_state.batch_index + 1
+                print(f"Resuming from batch {start_batch}/{n_batches}")
+            except Exception as e:
+                print(f"Warning: Could not load checkpoint {latest_checkpoint}: {e}")
+                print("Starting from beginning...")
+                start_batch = 0
+                all_results = []
 
-    for i in range(n_batches):
+    for i in range(start_batch, n_batches):
         start_idx = i * batch_size
         end_idx = min((i + 1) * batch_size, total_sims)
         actual_batch_size = end_idx - start_idx
@@ -1128,17 +1149,15 @@ def _run_stim_neurons(
         # Reshape for devices if using pmap
         if n_devices > 1:
             batch_indices = batch_indices.reshape(n_devices, -1)
-
+        print('Batch Inds:', batch_indices)
         # Adjust stimulation for this specific batch if enabled
         if sim_config.adjustStimI:
             print(f"Adjusting stimulation for batch {i + 1}/{n_batches}...")
             adjusted_neuron_params = _adjust_stimulation_for_batch(
-                neuron_params, sim_params, sim_config, batch_func, batch_indices, n_devices)
-        else:
-            adjusted_neuron_params = neuron_params
+                adjusted_neuron_params, sim_params, sim_config, batch_func, batch_indices, n_devices)
 
         # Run the batch with adjusted parameters
-        batch_results = batch_func(adjusted_neuron_params, sim_params, batch_indices)
+        batch_results = jax.block_until_ready(batch_func(adjusted_neuron_params, sim_params, batch_indices))
 
         if n_devices > 1:
             batch_results = batch_results.reshape(-1, *batch_results.shape[2:])
@@ -1148,6 +1167,28 @@ def _run_stim_neurons(
         batch_results = jax.device_put(batch_results, jax.devices("cpu")[0])
         all_results.append(batch_results)
         print(f"Batch {i + 1}/{n_batches} completed")
+
+        # Save checkpoint if enabled and conditions are met
+        if sim_config.enable_checkpointing and (checkpoint_dir is not None):  
+            checkpoint_state = CheckpointState(
+                batch_index=i,
+                completed_batches=i + 1,
+                total_batches=n_batches,
+                n_result_batches=len(all_results),
+                accumulated_mini_circuits=None,
+                neuron_params=neuron_params,
+                pruning_state=None
+            )
+            checkpoint_path = checkpoint_dir / f"checkpoint_batch_{i}.h5"
+            metadata = {
+                "sim_type": sim_config.sim_type,
+                "enable_pruning": sim_config.enable_pruning,
+                "total_sims": total_sims,
+                "batch_size": batch_size,
+                "n_devices": n_devices
+            }
+            save_checkpoint(checkpoint_state, checkpoint_path, metadata, results=all_results, batch_start_idx=i)
+            cleanup_old_checkpoints(checkpoint_dir=checkpoint_dir, keep_last_n=2)
 
         del batch_results  # Free memory
         gc.collect()  # Force garbage collection
@@ -1161,6 +1202,7 @@ def _run_stim_neurons(
         sim_params.n_neurons, len(sim_params.t_axis)
     ), None, adjusted_neuron_params
 
+
 def _run_with_pruning(
     neuron_params: NeuronParams,
     sim_params: SimParams,
@@ -1168,7 +1210,8 @@ def _run_with_pruning(
     batch_func,
     total_sims: int,
     batch_size: int,
-    n_devices: int
+    n_devices: int,
+    checkpoint_dir: Optional[Path] = None,
 ) -> Tuple[jnp.ndarray, List[Pruning_state]]:
     """Run simulation with pruning, saving states across all batches."""
     
@@ -1289,10 +1332,13 @@ def _run_with_pruning(
         
         # Run simulation
         batch_results = batch_func(neuron_params, sim_params, batch_indices)    
+        # batch_results shape: (n_devices, batch_per_device, n_neurons, n_timepoints) if n_devices > 1
+        #                      (batch_size, n_neurons, n_timepoints) if n_devices == 1
         
         # Reshape results and state back to flat format if using pmap
         if n_devices > 1:
             batch_results = batch_results.reshape(-1, *batch_results.shape[2:])
+            # batch_results shape after reshape: (batch_size, n_neurons, n_timepoints)
             final_state = reshape_state_from_pmap(state)
         else:
             final_state = state
@@ -1300,6 +1346,7 @@ def _run_with_pruning(
         # Remove padding if it was added
         if actual_batch_size < len(batch_results):
             batch_results = batch_results[:actual_batch_size]
+            # batch_results shape after padding removal: (actual_batch_size, n_neurons, n_timepoints)
             final_state = trim_state_padding(final_state, actual_batch_size)
         
         # Move results to CPU to save GPU memory
@@ -1468,7 +1515,6 @@ def prepare_sim_params(cfg: DictConfig, n_stim_configs: int, n_neurons: int) -> 
         noise_stdv=cfg.sim.noiseStdv
     )
 
-
 def parse_simulation_config(cfg: DictConfig) -> SimulationConfig:
     """Parse simulation configuration from DictConfig."""
     # Determine simulation type
@@ -1494,9 +1540,9 @@ def parse_simulation_config(cfg: DictConfig) -> SimulationConfig:
         n_active_upper=getattr(cfg.sim, "n_active_upper", 500),
         n_active_lower=getattr(cfg.sim, "n_active_lower", 5),
         n_high_fr_upper=getattr(cfg.sim, "n_high_fr_upper", 100),
-        high_fr_threshold=getattr(cfg.sim, "high_fr_threshold", 100.0)
+        high_fr_threshold=getattr(cfg.sim, "high_fr_threshold", 100.0),
+        enable_checkpointing=getattr(cfg.sim, "enable_checkpointing", False),
     )
-
 
 # #############################################################################################################################=
 # STATE PERSISTENCE FUNCTIONS
@@ -1559,9 +1605,13 @@ def run_vnc_simulation(cfg: DictConfig) -> Union[jnp.ndarray, Tuple[jnp.ndarray,
     if sim_config.enable_pruning:
         print(f"  Pruning enabled with oscillation threshold: {sim_config.oscillation_threshold}")
     
+    # Parse checkpointing configuration
+    checkpoint_dir = None
+    if cfg.sim.enable_checkpointing and hasattr(cfg, 'paths'):
+        checkpoint_dir = Path(cfg.paths.ckpt_dir) / "checkpoints"
     # Run simulation
     start_time = time.time()
-    result = run_simulation_engine(neuron_params, sim_params, sim_config)
+    result = run_simulation_engine(neuron_params, sim_params, sim_config, checkpoint_dir)
     jax.block_until_ready(result)
     
     elapsed = time.time() - start_time

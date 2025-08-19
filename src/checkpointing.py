@@ -104,7 +104,7 @@ def merge_neuron_params_batch(full_neuron_params: NeuronParams,
 
 
 def save_checkpoint(checkpoint_state: CheckpointState, checkpoint_path: Path, 
-                   metadata: Dict[str, Any] = None, accumulated_results: List[jnp.ndarray] = None,
+                   metadata: Dict[str, Any] = None, results: List[jnp.ndarray] = None,
                    batch_start_idx: Optional[int] = None, batch_end_idx: Optional[int] = None):
     """Save simulation checkpoint to disk using HDF5, YAML, and sparse NPZ files."""
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
@@ -118,96 +118,40 @@ def save_checkpoint(checkpoint_state: CheckpointState, checkpoint_path: Path,
         "has_mini_circuits": checkpoint_state.accumulated_mini_circuits is not None,
         "has_pruning_state": checkpoint_state.pruning_state is not None,
         "n_result_batches": checkpoint_state.n_result_batches,
-        "neuron_params_batch_range": checkpoint_state.neuron_params_batch_range,
     }
     if metadata:
         metadata_dict.update(metadata)
     
 
     # Save accumulated results as separate sparse NPZ files
-    results_dir = checkpoint_path / f"results_{checkpoint_path.stem}"
-    results_dir.mkdir(exist_ok=True)
+    results_dir = checkpoint_path.parent / f"results_{checkpoint_path.stem}"
+    results_dir.mkdir(parents=True, exist_ok=True)
     
     # Save the metadata YAML file (with all configuration data) in the same directory as results
     metadata_path = results_dir / f"{checkpoint_path.stem}.yaml"
     with open(metadata_path, 'w') as f:
         yaml.dump(metadata_dict, f, default_flow_style=False, indent=2)
     
-    
-    if accumulated_results:
-        for i, result in enumerate(accumulated_results):
-            result_path = results_dir / f"batch_{i}.npz"
-            sparse.save_npz(result_path, sparse.COO.from_numpy(jnp.asarray(result)))
-    
-    # Create dictionary structure for checkpoint data (only large arrays go in HDF5)
+
+    result_path = results_dir / f"batch_{batch_start_idx}.npz"
+    sparse.save_npz(result_path, sparse.COO.from_numpy(jnp.asarray(results)))
+
+        # Create dictionary structure for checkpoint data (only large arrays go in HDF5)
     checkpoint_dict = {
         "batch_index": checkpoint_state.batch_index,
         "completed_batches": checkpoint_state.completed_batches,
         "total_batches": checkpoint_state.total_batches,
         "n_result_batches": checkpoint_state.n_result_batches,
     }
-    
-    # Store batch range info if available (convert tuple to list for HDF5 compatibility)
-    if checkpoint_state.neuron_params_batch_range is not None:
-        checkpoint_dict["neuron_params_batch_range"] = list(checkpoint_state.neuron_params_batch_range)
-    
-    # Store mini circuits if available (large arrays in HDF5)
-    if checkpoint_state.accumulated_mini_circuits is not None:
-        checkpoint_dict["accumulated_mini_circuits"] = {}
-        for i, mini_circuit in enumerate(checkpoint_state.accumulated_mini_circuits):
-            checkpoint_dict["accumulated_mini_circuits"][f"batch_{i}"] = jnp.asarray(mini_circuit)
-    
-    # Store neuron parameters if available (large arrays in HDF5)
-    # Extract only the processed batch to save memory
-    if checkpoint_state.neuron_params is not None:
-        checkpoint_dict["neuron_params"] = {}
-        
-        # If batch range is provided, extract only that batch to save memory
-        if (batch_start_idx is not None and batch_end_idx is not None and 
-            checkpoint_state.neuron_params_batch_range is None):
-            # Extract batch data from the full neuron_params
-            batch_neuron_params = extract_neuron_params_batch(
-                checkpoint_state.neuron_params, batch_start_idx, batch_end_idx
-            )
-            checkpoint_dict["neuron_params_batch_range"] = (batch_start_idx, batch_end_idx)
-            neuron_params_to_save = batch_neuron_params
-        else:
-            # Use the neuron_params as-is (might already be a batch extract)
-            neuron_params_to_save = checkpoint_state.neuron_params
-            if checkpoint_state.neuron_params_batch_range is not None:
-                checkpoint_dict["neuron_params_batch_range"] = checkpoint_state.neuron_params_batch_range
-        
-        neuron_params_dict = neuron_params_to_save._asdict()
-        for key, value in neuron_params_dict.items():
-            if value is not None:
-                # Handle tuples and other special types that HDF5 can't save directly
-                if isinstance(value, tuple):
-                    # Convert tuples to lists for HDF5 compatibility
-                    checkpoint_dict["neuron_params"][key] = list(value)
-                else:
-                    checkpoint_dict["neuron_params"][key] = jnp.asarray(value)
-    
-    # Store pruning_state if available (large arrays in HDF5)
-    if checkpoint_state.pruning_state is not None:
-        checkpoint_dict["pruning_state"] = {}
-        pruning_state_dict = checkpoint_state.pruning_state._asdict()
-        for key, value in pruning_state_dict.items():
-            if value is not None:
-                checkpoint_dict["pruning_state"][key] = jnp.asarray(value)
-    
+    checkpoint_dict["neuron_params"] = checkpoint_state.neuron_params._asdict()
     # Save checkpoint data using HDF5 (in the same directory as results)
     checkpoint_h5_path = results_dir / f"{checkpoint_path.stem}.h5"
     ioh5.save(checkpoint_h5_path, checkpoint_dict)
-    
+
     print(f"Checkpoint saved: {checkpoint_h5_path}")
-    print(f"Results saved: {results_dir} ({len(accumulated_results) if accumulated_results else 0} batches)")
     print(f"Metadata saved: {metadata_path}")
     print(f"Completed {checkpoint_state.completed_batches}/{checkpoint_state.total_batches} batches")
     
-    # Memory saving info
-    if batch_start_idx is not None and batch_end_idx is not None:
-        batch_size = batch_end_idx - batch_start_idx
-        print(f"Memory optimized: saved only batch range [{batch_start_idx}:{batch_end_idx}] ({batch_size} parameter sets)")
 
 
 def load_checkpoint(checkpoint_path: Path, base_name: str, full_neuron_params: Optional[NeuronParams] = None) -> Tuple[CheckpointState, List[jnp.ndarray], Dict[str, Any]]:
@@ -227,10 +171,6 @@ def load_checkpoint(checkpoint_path: Path, base_name: str, full_neuron_params: O
     # First try the new location (inside results directory)
     checkpoint_h5_path = checkpoint_path / f"{base_name}.h5"
 
-    # If new location doesn't exist, try the old location for backwards compatibility
-    if not checkpoint_h5_path.exists():
-        checkpoint_h5_path = checkpoint_path / f"{base_name}.h5"
-
     if not checkpoint_h5_path.exists():
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_h5_path}")
     
@@ -242,8 +182,8 @@ def load_checkpoint(checkpoint_path: Path, base_name: str, full_neuron_params: O
         metadata = OmegaConf.load(metadata_yaml_path)
 
     # Load checkpoint data from HDF5 (without automatic JAX conversion to handle strings)
-    checkpoint_dict = ioh5.load(checkpoint_h5_path, enable_jax=False)
-    
+    checkpoint_dict = ioh5.load(checkpoint_h5_path, enable_jax=True)
+
     # Convert relevant arrays to JAX arrays manually
     for key in ['batch_index', 'completed_batches', 'total_batches', 'n_result_batches']:
         if key in checkpoint_dict:
@@ -257,12 +197,6 @@ def load_checkpoint(checkpoint_path: Path, base_name: str, full_neuron_params: O
         'n_result_batches': int(checkpoint_dict['n_result_batches']),
     }
     
-    # Extract batch range information
-    neuron_params_batch_range = None
-    if "neuron_params_batch_range" in checkpoint_dict:
-        neuron_params_batch_range = tuple(checkpoint_dict["neuron_params_batch_range"])
-    elif "neuron_params_batch_range" in metadata:
-        neuron_params_batch_range = tuple(metadata["neuron_params_batch_range"])
     
     # Reconstruct accumulated mini circuits if available
     accumulated_mini_circuits = None
@@ -274,20 +208,10 @@ def load_checkpoint(checkpoint_path: Path, base_name: str, full_neuron_params: O
         for key in sorted_keys:
             accumulated_mini_circuits.append(jnp.asarray(mini_circuits_dict[key]))
     
-
-    loaded_neuron_params_dict = ioh5.load_dict(checkpoint_h5_path, enable_jax=False)
+    del full_neuron_params
+    gc.collect()  # Free memory before loading neuron_params
     # Create the loaded neuron_params (might be a batch extract)
-    loaded_neuron_params = NeuronParams(**loaded_neuron_params_dict)
-        
-    # If we have a full_neuron_params and batch range, merge the batch data back
-    if (full_neuron_params is not None and neuron_params_batch_range is not None):
-        start_idx, end_idx = neuron_params_batch_range
-        neuron_params = merge_neuron_params_batch(
-            full_neuron_params, loaded_neuron_params, start_idx, end_idx
-        )
-        print(f"Merged batch data [{start_idx}:{end_idx}] into full neuron_params")
-    else:
-        neuron_params = loaded_neuron_params
+    neuron_params = NeuronParams(**checkpoint_dict['neuron_params'])
 
     # Reconstruct pruning_state if available
     pruning_state = None
@@ -305,18 +229,13 @@ def load_checkpoint(checkpoint_path: Path, base_name: str, full_neuron_params: O
     # Create checkpoint state
     checkpoint_state = CheckpointState(
         **basic_fields,
+        neuron_params=neuron_params,
         accumulated_mini_circuits=accumulated_mini_circuits,
-        neuron_params_batch_range=neuron_params_batch_range,
-        pruning_state=pruning_state
+        pruning_state=pruning_state,
     )
     
     print(f"Checkpoint loaded: {checkpoint_h5_path}")
     print(f"Resuming from batch {checkpoint_state.batch_index} ({checkpoint_state.completed_batches}/{checkpoint_state.total_batches} batches completed)")
-    
-    if neuron_params_batch_range:
-        start_idx, end_idx = neuron_params_batch_range
-        batch_size = end_idx - start_idx
-        print(f"Memory optimized: loaded batch range [{start_idx}:{end_idx}] ({batch_size} parameter sets)")
     
     return checkpoint_state, neuron_params, metadata
 
@@ -334,13 +253,14 @@ def find_latest_checkpoint(checkpoint_dir: Path, pattern: str = "checkpoint_batc
     """
     if not checkpoint_dir.exists():
         print(f"Checkpoint directory does not exist starting from scratch: {checkpoint_dir}")
-        return None
+        return None, None
     
     # Look for results directories that contain the checkpoints
     results_dirs = natsorted(list(checkpoint_dir.glob(f"results_{pattern}")))
-    
+
     # Extract batch numbers and find the latest
     latest_checkpoint = None
+    base_name = None
     latest_batch = -1
     
     # Check new-style checkpoints (in results directories)
@@ -359,9 +279,8 @@ def find_latest_checkpoint(checkpoint_dir: Path, pattern: str = "checkpoint_batc
         except (ValueError, IndexError):
             # Skip directories that don't match expected naming pattern
             continue
-    
-    return latest_checkpoint, base_name
 
+    return latest_checkpoint, base_name
 
 def cleanup_old_checkpoints(checkpoint_dir: Path, keep_last_n: int = 3, pattern: str = "checkpoint_batch_*"):
     """

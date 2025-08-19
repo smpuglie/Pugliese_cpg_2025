@@ -4,14 +4,14 @@ name: DN_Screen
 wPath: ${paths.data_dir}/manc t1 connectome data/W_20250813_DNtoMN_unsorted.csv
 dfPath: ${paths.data_dir}/manc t1 connectome data/wTable_20250813_DNtoMN_unsorted_withModules.csv
 n_replicates: 16
-batch_size: 
+batch_size: 128
 dn_screen: True
 stimNeurons: 
   - [31]
   # - [31,132]
 removeNeurons: []
 stimI: 
-  - [10]
+  - [128]
 seed: 1
 saveFigs: True
 useTsp: False

@@ -79,8 +79,7 @@ class CheckpointState(NamedTuple):
     batch_index: int
     completed_batches: int
     total_batches: int
-    # Large arrays are stored separately as sparse files
+    neuron_params: NeuronParams
     n_result_batches: int  # Number of result batches (for reconstruction)
     accumulated_mini_circuits: Optional[List[jnp.ndarray]] = None  # For pruning simulations
-    neuron_params_batch_range: Optional[jnp.ndarray] = None  # (start_idx, end_idx) for the saved batch
     pruning_state: Optional[Pruning_state] = None
