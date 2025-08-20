@@ -133,8 +133,9 @@ def save_checkpoint(checkpoint_state: CheckpointState, checkpoint_path: Path,
         yaml.dump(metadata_dict, f, default_flow_style=False, indent=2)
     
 
-    result_path = results_dir / f"batch_{batch_start_idx}.npz"
-    sparse.save_npz(result_path, sparse.COO.from_numpy(jnp.asarray(results)))
+    if results is not None:
+        result_path = results_dir / f"batch_{batch_start_idx}.npz"
+        sparse.save_npz(result_path, sparse.COO.from_numpy(jnp.asarray(results)))
 
         # Create dictionary structure for checkpoint data (only large arrays go in HDF5)
     checkpoint_dict = {

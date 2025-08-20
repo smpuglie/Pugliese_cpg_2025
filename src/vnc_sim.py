@@ -1187,14 +1187,71 @@ def _run_stim_neurons(
                 "batch_size": batch_size,
                 "n_devices": n_devices
             }
-            save_checkpoint(checkpoint_state, checkpoint_path, metadata, results=all_results, batch_start_idx=i)
+            save_checkpoint(checkpoint_state, checkpoint_path, metadata, batch_start_idx=i)
             cleanup_old_checkpoints(checkpoint_dir=checkpoint_dir, keep_last_n=2)
 
         del batch_results  # Free memory
         gc.collect()  # Force garbage collection
 
+    # If adjustStimI was used, run a final set of simulations with the final adjusted stimuli
+    if sim_config.adjustStimI:
+        print(f"\nRunning final simulations with adjusted stimulation across all {n_batches} batches...")
+        
+        final_all_results = []
+        
+        # Process all batches with final adjusted parameters
+        for i in range(n_batches):
+            start_idx = i * batch_size
+            end_idx = min((i + 1) * batch_size, total_sims)
+            actual_batch_size = end_idx - start_idx
+            
+            batch_indices = jnp.arange(start_idx, end_idx)
+            
+            # Pad if necessary for pmap
+            if n_devices > 1 and len(batch_indices) < batch_size:
+                pad_size = batch_size - len(batch_indices)
+                batch_indices = jnp.concatenate([
+                    batch_indices,
+                    jnp.repeat(batch_indices[-1], pad_size)
+                ])
+            
+            # Reshape for devices if using pmap
+            if n_devices > 1:
+                batch_indices = batch_indices.reshape(n_devices, -1)
+            
+            # Run simulation with final adjusted parameters
+            final_batch_results = jax.block_until_ready(
+                batch_func(adjusted_neuron_params, sim_params, batch_indices)
+            )
+            
+            if n_devices > 1:
+                final_batch_results = final_batch_results.reshape(-1, *final_batch_results.shape[2:])
+                final_batch_results = final_batch_results[:actual_batch_size]  # Remove padding
+            
+            # Move to CPU to save memory
+            final_batch_results = jax.device_put(final_batch_results, jax.devices("cpu")[0])
+            final_all_results.append(final_batch_results)
+            
+            print(f"Final batch {i + 1}/{n_batches} completed")
+            
+            # Clean up memory
+            del final_batch_results
+            gc.collect()
+        
+        # Combine final results
+        results = jnp.concatenate(final_all_results, axis=0)
+        
+        print(f"Final simulations with adjusted stimulation completed.")
+        
+        # Clean up
+        del final_all_results
+        gc.collect()
+    else:
+        # Combine results from adjustment phase
+        results = jnp.concatenate(all_results, axis=0)
+    
     # Combine results
-    results = jnp.concatenate(all_results, axis=0)
+    # results = jnp.concatenate(all_results, axis=0)
 
     # Reshape to (n_stim_configs, n_param_sets, n_neurons, n_timepoints)
     return results.reshape(
