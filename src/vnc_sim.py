@@ -1170,6 +1170,7 @@ def _run_stim_neurons(
 
         # Save checkpoint if enabled and conditions are met
         if sim_config.enable_checkpointing and (checkpoint_dir is not None):  
+
             checkpoint_state = CheckpointState(
                 batch_index=i,
                 completed_batches=i + 1,
@@ -1187,7 +1188,13 @@ def _run_stim_neurons(
                 "batch_size": batch_size,
                 "n_devices": n_devices
             }
+            
+            print(f"Saving checkpoint for batch {i + 1}...")
+            checkpoint_start_time = time.time()
             save_checkpoint(checkpoint_state, checkpoint_path, metadata, batch_start_idx=i)
+            checkpoint_elapsed = time.time() - checkpoint_start_time
+            print(f"Checkpoint saved in {checkpoint_elapsed:.2f} seconds")
+            
             cleanup_old_checkpoints(checkpoint_dir=checkpoint_dir, keep_last_n=2)
 
         del batch_results  # Free memory

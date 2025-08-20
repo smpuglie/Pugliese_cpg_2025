@@ -105,7 +105,8 @@ def merge_neuron_params_batch(full_neuron_params: NeuronParams,
 
 def save_checkpoint(checkpoint_state: CheckpointState, checkpoint_path: Path, 
                    metadata: Dict[str, Any] = None, results: List[jnp.ndarray] = None,
-                   batch_start_idx: Optional[int] = None, batch_end_idx: Optional[int] = None):
+                   batch_start_idx: Optional[int] = None, batch_end_idx: Optional[int] = None,
+                   compression_opts: int = 5):
     """Save simulation checkpoint to disk using HDF5, YAML, and sparse NPZ files."""
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
     
@@ -147,7 +148,7 @@ def save_checkpoint(checkpoint_state: CheckpointState, checkpoint_path: Path,
     checkpoint_dict["neuron_params"] = checkpoint_state.neuron_params._asdict()
     # Save checkpoint data using HDF5 (in the same directory as results)
     checkpoint_h5_path = results_dir / f"{checkpoint_path.stem}.h5"
-    ioh5.save(checkpoint_h5_path, checkpoint_dict)
+    ioh5.save(checkpoint_h5_path, checkpoint_dict, compression_opts=compression_opts)
 
     print(f"Checkpoint saved: {checkpoint_h5_path}")
     print(f"Metadata saved: {metadata_path}")
