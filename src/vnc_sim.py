@@ -2,6 +2,7 @@
 import time
 import jax
 import jax.numpy as jnp
+import numpy as np
 import psutil
 import gc
 from typing import NamedTuple, Dict, Any, Optional, Tuple, List, Union
@@ -1203,9 +1204,10 @@ def _run_stim_neurons(
     # If adjustStimI was used, run a final set of simulations with the final adjusted stimuli
     if sim_config.adjustStimI:
         print(f"\nRunning final simulations with adjusted stimulation across all {n_batches} batches...")
-        
+        import sparse
         final_all_results = []
-        
+        results_dir = checkpoint_dir / f"results_final"
+        results_dir.mkdir(parents=True, exist_ok=True)
         # Process all batches with final adjusted parameters
         for i in range(n_batches):
             start_idx = i * batch_size
@@ -1237,8 +1239,8 @@ def _run_stim_neurons(
             
             # Move to CPU to save memory
             final_batch_results = jax.device_put(final_batch_results, jax.devices("cpu")[0])
-            final_all_results.append(final_batch_results)
-            
+            final_all_results.append(np.asarray(final_batch_results))
+            sparse.save_npz(results_dir / f"Final_batch_Rs_{i}.npz", sparse.COO.from_numpy(final_batch_results))
             print(f"Final batch {i + 1}/{n_batches} completed")
             
             # Clean up memory
@@ -1246,7 +1248,7 @@ def _run_stim_neurons(
             gc.collect()
         
         # Combine final results
-        results = jnp.concatenate(final_all_results, axis=0)
+        results = np.concatenate(final_all_results, axis=0)
         
         print(f"Final simulations with adjusted stimulation completed.")
         

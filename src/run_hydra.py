@@ -159,22 +159,12 @@ def main(cfg: DictConfig):
             
             ##### Save results #####
             print('Saving results to:', cfg.paths.ckpt_dir)
-            sparse.save_npz(cfg.paths.ckpt_dir / f"{cfg.experiment.name}_Rs.npz", sparse.COO.from_numpy(results))
+            if cfg.experiment.dn_screen==False:
+                sparse.save_npz(cfg.paths.ckpt_dir / f"{cfg.experiment.name}_Rs.npz", sparse.COO.from_numpy(results))
             ioh5.save(cfg.paths.ckpt_dir / 'neuron_params.h5', neuron_params._asdict())
             if final_mini_circuits is not None:
                 sparse.save_npz(cfg.paths.ckpt_dir / f"{cfg.experiment.name}_mini_circuits.npz", sparse.COO.from_numpy(final_mini_circuits))
 
-            # Clean up checkpoints if simulation completed successfully
-            if hasattr(cfg.sim, 'enable_checkpointing') and cfg.sim.enable_checkpointing:
-                checkpoint_dir = cfg.paths.ckpt_dir / "checkpoints"
-                if checkpoint_dir.exists():
-                    print("Simulation completed successfully. Cleaning up checkpoints...")
-                    import shutil
-                    try:
-                        shutil.rmtree(checkpoint_dir)
-                        print("Checkpoints cleaned up.")
-                    except Exception as e:
-                        print(f"Warning: Could not clean up checkpoints: {e}")
 
             print('Done! :)')
             
