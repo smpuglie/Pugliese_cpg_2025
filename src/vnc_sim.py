@@ -1540,6 +1540,14 @@ def prepare_neuron_params(cfg: DictConfig, W_table: Any, param_path: Optional[Pa
     if len(cfg.experiment.removeNeurons) > 0:
         W_mask = W_mask.at[:, cfg.experiment.removeNeurons, :].set(False)
         W_mask = W_mask.at[:, :, cfg.experiment.removeNeurons].set(False)
+        print(f"Initial removal of neurons at indices: {cfg.experiment.removeNeurons}")
+    elif len(cfg.experiment.keepOnly) > 0:
+        mn_mask = jnp.isin(jnp.arange(n_neurons), mn_idxs)
+        keep_neurons = jnp.zeros(n_neurons, dtype=jnp.bool)
+        keep_neurons = keep_neurons.at[cfg.experiment.keepOnly].set(True)
+        keep_neurons = jnp.where(keep_neurons | mn_mask, True, False)
+        W_mask = W_mask.at[:, keep_neurons, :].set(True)
+        print(f"Initial keeping of neurons at indices: {cfg.experiment.keepOnly}")
     if (param_path is not None) and param_path.exists():
         import src.io_dict_to_hdf5 as ioh5
         nparams = ioh5.load(param_path, enable_jax=True)

@@ -10,6 +10,7 @@ stimNeurons:
   - [31]
   # - [31,132]
 removeNeurons: []
+keepOnly: []
 stimI: 
   - [128]
 seed: 1
