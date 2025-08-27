@@ -33,7 +33,7 @@ def sort_motor_modules(neuronData,colName="motor module"):
     return neuronData.sort_values(by=colName)
 
 def get_active_data(R,neuronData):
-    return neuronData.loc[neuronData.index[np.where(np.sum(R,1)>1)]]
+    return neuronData.loc[neuronData.index[np.where(np.max(R,1)>0)]]
 
 def neuron_plot_labels(neuronData,fanc=False):
     if fanc:
