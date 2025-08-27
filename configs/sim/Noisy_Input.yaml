@@ -15,3 +15,6 @@ n_active_upper: 500 # Upper limit for active neurons
 n_active_lower: 5 # Upper and lower limits for active neurons
 n_high_fr_upper: 100 # Upper limit for high frequency neurons
 high_fr_threshold: 100.0 # Upper limit for high frequency neurons
+
+# Checkpointing configuration
+enable_checkpointing: False # Enable intermediate checkpointing

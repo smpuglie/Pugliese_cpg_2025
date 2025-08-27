@@ -16,76 +16,12 @@ from src.sim_utils import (
     load_W, load_wTable, sample_trunc_normal, set_sizes, make_input,
     compute_oscillation_score
 )
-
-# #############################################################################################################################=
-# IMMUTABLE CONFIGURATION STRUCTURES
-# #############################################################################################################################=
-
-class NeuronParams(NamedTuple):
-    """Immutable neuron parameters for JIT compilation."""
-    W: jnp.ndarray
-    tau: jnp.ndarray  # Time constants for neurons
-    a: jnp.ndarray  # Activation parameters
-    threshold: jnp.ndarray  # Thresholds for activation
-    fr_cap: jnp.ndarray  # Firing rate caps
-    input_currents: jnp.ndarray  # Shape: (n_stim_configs, n_neurons)
-    seeds: jnp.ndarray  # Random seeds for reproducibility
-    exc_dn_idxs: jnp.ndarray  # Indices of excitatory descending neurons
-    inh_dn_idxs: jnp.ndarray  # Indices of inhibitory descending neurons
-    exc_in_idxs: jnp.ndarray  # Indices of excitatory interneurons
-    inh_in_idxs: jnp.ndarray  # Indices of inhibitory interneurons
-    mn_idxs: jnp.ndarray  # Indices of motor neurons
-    W_mask: Optional[jnp.ndarray] = None  # Mask for connectivity
-
-
-class SimParams(NamedTuple):
-    """Immutable simulation parameters for JIT compilation."""
-    n_neurons: int
-    n_param_sets: int
-    n_stim_configs: int
-    T: float
-    dt: float
-    pulse_start: float
-    pulse_end: float
-    t_axis: jnp.ndarray
-    exc_multiplier: float
-    inh_multiplier: float
-    noise_stdv_prop: float
-    r_tol: float
-    a_tol: float
-    noise_stdv: jnp.ndarray  # Standard deviation for noise, if applicable
-
-
-class Pruning_state(NamedTuple):
-    """Parameters for pruning simulation."""
-    W_mask: jnp.ndarray
-    interneuron_mask: jnp.ndarray
-    level: jnp.ndarray
-    total_removed_neurons: jnp.ndarray
-    removed_stim_neurons: jnp.ndarray
-    neurons_put_back: jnp.ndarray
-    prev_put_back: jnp.ndarray
-    last_removed: jnp.ndarray
-    remove_p: jnp.ndarray
-    min_circuit: jnp.ndarray
-    keys: jnp.ndarray
-
-
-class SimulationConfig(NamedTuple):
-    """Configuration for simulation execution."""
-    sim_type: str  # "baseline", "shuffle", "noise", "prune"
-    enable_pruning: bool = False
-    oscillation_threshold: float = 0.5
-    batch_size: Optional[int] = None
-    max_pruning_iterations: int = 200
-    # Auto stimulation adjustment parameters
-    adjustStimI: bool = False
-    max_adjustment_iters: int = 10
-    n_active_upper: int = 500
-    n_active_lower: int = 5
-    n_high_fr_upper: int = 100
-    high_fr_threshold: float = 100.0
-
+from src.data_classes import (
+    NeuronParams, SimParams, SimulationConfig, Pruning_state, CheckpointState
+)
+from src.checkpointing import (
+    load_checkpoint, save_checkpoint, find_latest_checkpoint, cleanup_old_checkpoints
+)
 
 # #############################################################################################################################=
 # CORE SIMULATION FUNCTIONS - ALL JIT COMPILED
@@ -121,6 +57,16 @@ def add_noise_to_weights(W: jnp.ndarray, key: jnp.ndarray, stdv_prop: float) -> 
     return W + stdvs * noise
 
 
+
+def nan_inf_event_func(t, y, args, **kwargs):
+    """Event function to detect NaNs or infs in the solution."""
+    # Returns 0 when NaN or inf is detected, triggering the event
+    has_nan = jnp.any(jnp.isnan(y))
+    has_inf = jnp.any(jnp.isinf(y))
+    # Return a negative value when NaN/inf detected to trigger the event
+    return jnp.where(has_nan | has_inf, -1.0, 1.0)
+
+
 @jit
 def run_single_simulation(
     W: jnp.ndarray,
@@ -145,11 +91,15 @@ def run_single_simulation(
     solver = Dopri5()
     saveat = SaveAt(ts=t_axis)
     controller = PIDController(rtol=r_tol, atol=a_tol)
+    
+    # Create event to detect NaN/inf and stop early
+    nan_inf_event = Event(nan_inf_event_func)
 
     solution = diffeqsolve(
         term, solver, 0, T, dt, R0,
         args=(inputs, pulse_start, pulse_end, tau, W, threshold, a, fr_cap, key, noise_stdv),
         saveat=saveat, stepsize_controller=controller,
+        event=nan_inf_event,
         max_steps=100000, throw=False
     )
     return jnp.transpose(solution.ys)
@@ -697,7 +647,7 @@ def get_batch_function(sim_config: SimulationConfig):
     return batch_functions[sim_config.sim_type]
 
 
-def calculate_optimal_batch_size(n_neurons: int, n_timepoints: int, n_replicates: int, n_devices: int = None, max_batch_size: int = 256) -> int:
+def calculate_optimal_batch_size(n_neurons: int, n_timepoints: int, n_replicates: int, n_devices: int = None, max_batch_size: int = 256, total_sims: int = None) -> int:
     """
     Calculate optimal batch size based on memory and device constraints.
     
@@ -706,6 +656,9 @@ def calculate_optimal_batch_size(n_neurons: int, n_timepoints: int, n_replicates
         n_timepoints: Number of time points per sample
         n_replicates: Total number of replicates (batch dimension)
         n_devices: Number of devices available (defaults to JAX device count)
+        max_batch_size: Maximum allowed batch size (default 256)
+        total_sims: Total number of simulations (n_sims * n_replicates). If provided,
+                   will try to process all simulations in a single batch when feasible.
     
     Returns:
         Optimal batch size that respects memory limits and device constraints
@@ -714,35 +667,247 @@ def calculate_optimal_batch_size(n_neurons: int, n_timepoints: int, n_replicates
     if n_devices is None:
         n_devices = jax.device_count()
     
-    # Handle edge case where we have fewer replicates than devices
-    if n_replicates < n_devices:
-        return n_replicates
+    # Use total_sims as the basis for calculation if provided, otherwise use n_replicates
+    if total_sims is not None:
+        print(f"Total simulations to process: {total_sims}")
+        effective_total = total_sims
+    else:
+        effective_total = n_replicates
+        print(f"Using n_replicates as total: {effective_total}")
     
-    # Estimate memory usage per sample
-    available_memory = psutil.virtual_memory().available
-    print(f"Available memory: {available_memory / (1024 ** 3):.2f} GB")
-    bytes_per_sample = n_neurons * n_timepoints * 8  # float64 + overhead
-    print(f"Estimated bytes per sample: {bytes_per_sample / (1024 ** 2):.2f} MB")
-    # Calculate memory-constrained batch size (use 75% of available memory for safety)
-    max_memory_samples = int(available_memory * 0.75 / bytes_per_sample)
+    # Handle edge case where we have fewer simulations than devices
+    if effective_total < n_devices:
+        return effective_total
     
-    # Start with a reasonable baseline: 4 samples per device
-    baseline_batch = n_devices * 4
+    # Get memory information
+    memory_info = psutil.virtual_memory()
+    available_memory = memory_info.available
+    total_memory = memory_info.total
     
-    # Choose optimal batch size considering memory constraints
-    memory_limited_batch = min(max_memory_samples, max_batch_size)  # Cap at 256 for efficiency
+    print(f"System memory: {total_memory / (1024 ** 3):.2f} GB total, {available_memory / (1024 ** 3):.2f} GB available")
+    
+    # Try to get GPU memory if available
+    gpu_memory = None
+    n_gpu_devices = 0
+    gpu_memory_per_device = None
+    
+    try:
+        devices = jax.devices()
+        gpu_devices = [d for d in devices if 'gpu' in str(d).lower() or 'cuda' in str(d).lower()]
+        n_gpu_devices = len(gpu_devices)
+        
+        if n_gpu_devices > 0:
+            # Method 1: Try to get actual GPU memory using nvidia-ml-py3 if available
+            try:
+                import pynvml
+                pynvml.nvmlInit()
+                
+                device_memories = []
+                for i in range(n_gpu_devices):
+                    handle = pynvml.nvmlDeviceGetHandleByIndex(i)
+                    info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+                    device_name = pynvml.nvmlDeviceGetName(handle).decode('utf-8')
+                    memory_gb = info.total / (1024 ** 3)
+                    device_memories.append(info.total)
+                    print(f"GPU {i}: {device_name} - {memory_gb:.1f}GB")
+                
+                # Use the memory of the first device (assume all are the same)
+                gpu_memory_per_device = device_memories[0]
+                total_gpu_memory = sum(device_memories)
+                
+                print(f"Detected {n_gpu_devices} GPU device(s) via nvidia-ml")
+                if n_gpu_devices == 1:
+                    print(f"GPU memory: {gpu_memory_per_device / (1024 ** 3):.1f}GB available")
+                else:
+                    print(f"GPU memory: {gpu_memory_per_device / (1024 ** 3):.1f}GB per device, {total_gpu_memory / (1024 ** 3):.1f}GB total")
+                
+                gpu_memory = total_gpu_memory
+                
+            except ImportError:
+                print("pynvml not available, trying alternative methods...")
+                
+                # Method 2: Try subprocess to call nvidia-smi
+                try:
+                    import subprocess
+                    result = subprocess.run([
+                        'nvidia-smi', '--query-gpu=memory.total', '--format=csv,noheader,nounits'
+                    ], capture_output=True, text=True, timeout=5)
+                    
+                    if result.returncode == 0:
+                        memory_values = [int(x.strip()) for x in result.stdout.strip().split('\n') if x.strip()]
+                        if len(memory_values) >= n_gpu_devices:
+                            # nvidia-smi returns memory in MB
+                            gpu_memory_per_device = memory_values[0] * (1024 ** 2)  # Convert MB to bytes
+                            total_gpu_memory = sum(memory_values) * (1024 ** 2)
+                            
+                            print(f"Detected {n_gpu_devices} GPU device(s) via nvidia-smi")
+                            if n_gpu_devices == 1:
+                                print(f"GPU memory: {gpu_memory_per_device / (1024 ** 3):.1f}GB available")
+                            else:
+                                print(f"GPU memory: {gpu_memory_per_device / (1024 ** 3):.1f}GB per device, {total_gpu_memory / (1024 ** 3):.1f}GB total")
+                            
+                            gpu_memory = total_gpu_memory
+                        else:
+                            raise Exception("nvidia-smi returned unexpected number of devices")
+                    else:
+                        raise Exception(f"nvidia-smi failed with return code {result.returncode}")
+                        
+                except (subprocess.TimeoutExpired, subprocess.CalledProcessError, FileNotFoundError, Exception) as e:
+                    print(f"nvidia-smi method failed: {e}")
+                    
+                    # Method 3: Fallback - estimate based on common GPU types
+                    print("Using fallback GPU memory estimation...")
+                    
+                    # Try to identify GPU type from device string
+                    device_str = str(gpu_devices[0]).lower()
+                    if 'titan' in device_str and 'rtx' in device_str:
+                        gpu_memory_per_device = 24 * (1024 ** 3)  # Titan RTX: 24GB
+                        print("Detected Titan RTX-like GPU, assuming 24GB per device")
+                    elif 'rtx' in device_str:
+                        if '4090' in device_str:
+                            gpu_memory_per_device = 24 * (1024 ** 3)  # RTX 4090: 24GB
+                            print("Detected RTX 4090-like GPU, assuming 24GB per device")
+                        elif '3090' in device_str:
+                            gpu_memory_per_device = 24 * (1024 ** 3)  # RTX 3090: 24GB
+                            print("Detected RTX 3090-like GPU, assuming 24GB per device")
+                        elif '4080' in device_str:
+                            gpu_memory_per_device = 16 * (1024 ** 3)  # RTX 4080: 16GB
+                            print("Detected RTX 4080-like GPU, assuming 16GB per device")
+                        elif '3080' in device_str:
+                            gpu_memory_per_device = 10 * (1024 ** 3)  # RTX 3080: 10GB
+                            print("Detected RTX 3080-like GPU, assuming 10GB per device")
+                        else:
+                            gpu_memory_per_device = 12 * (1024 ** 3)  # Conservative RTX estimate
+                            print("Detected RTX-like GPU, assuming 12GB per device (conservative)")
+                    elif 'v100' in device_str:
+                        gpu_memory_per_device = 32 * (1024 ** 3)  # Tesla V100: 32GB
+                        print("Detected V100-like GPU, assuming 32GB per device")
+                    elif 'a100' in device_str:
+                        gpu_memory_per_device = 40 * (1024 ** 3)  # A100: 40GB (or 80GB, use conservative)
+                        print("Detected A100-like GPU, assuming 40GB per device")
+                    else:
+                        gpu_memory_per_device = 8 * (1024 ** 3)  # Very conservative fallback
+                        print("Unknown GPU type, assuming 8GB per device (conservative)")
+                    
+                    total_gpu_memory = gpu_memory_per_device * n_gpu_devices
+                    gpu_memory = total_gpu_memory
+                    
+                    if n_gpu_devices == 1:
+                        print(f"Estimated GPU memory: {gpu_memory_per_device / (1024 ** 3):.0f}GB available")
+                    else:
+                        print(f"Estimated GPU memory: {gpu_memory_per_device / (1024 ** 3):.0f}GB per device, {total_gpu_memory / (1024 ** 3):.0f}GB total")
+                        
+            except Exception as e:
+                print(f"All GPU memory detection methods failed: {e}")
+                print("Falling back to conservative 8GB estimate per GPU")
+                gpu_memory_per_device = 8 * (1024 ** 3)
+                total_gpu_memory = gpu_memory_per_device * n_gpu_devices
+                gpu_memory = total_gpu_memory
+        else:
+            print("No GPU devices detected - using CPU mode")
+            
+    except Exception as e:
+        print(f"GPU detection failed: {e}")
+        pass
+    
+    # Estimate memory usage per sample with more realistic overhead
+    # Each sample needs:
+    # 1. Output array: n_neurons * n_timepoints * 4 bytes (float32)
+    # 2. Intermediate computations: ~2x the output size for ODE solving (reduced from 3x)
+    # 3. Weight matrix operations: n_neurons^2 * 4 bytes 
+    # 4. Additional overhead: ~1.5x for JAX compilation and caching (reduced from 2x)
+    
+    output_size = n_neurons * n_timepoints * 4  # float32
+    intermediate_size = output_size * 2  # ODE solver intermediates (reduced)
+    weight_ops_size = n_neurons * n_neurons * 4  # Weight matrix operations
+    overhead_factor = 1.5  # JAX compilation and caching overhead (reduced)
+    
+    bytes_per_sample = (output_size + intermediate_size + weight_ops_size) * overhead_factor
+    
+    print(f"Estimated memory per sample: {bytes_per_sample / (1024 ** 2):.1f} MB")
+    print(f"  - Output array: {output_size / (1024 ** 2):.1f} MB")
+    print(f"  - Intermediate computations: {intermediate_size / (1024 ** 2):.1f} MB") 
+    print(f"  - Weight operations: {weight_ops_size / (1024 ** 2):.1f} MB")
+    print(f"  - Overhead factor: {overhead_factor}x")
+    
+    # Choose memory limit based on available hardware
+    if gpu_memory is not None:
+        # With 2x Titan RTX (48GB total), use 80% for computations
+        usable_memory = gpu_memory * 0.8
+        print(f"Using GPU memory constraint: {usable_memory / (1024 ** 3):.2f} GB ({gpu_memory / (1024 ** 3):.0f}GB total)")
+    else:
+        # Use system memory with reasonable safety margin (50% of available, max 32GB)
+        usable_memory = min(available_memory * 0.5, 32 * (1024 ** 3))
+        print(f"Using system memory constraint: {usable_memory / (1024 ** 3):.2f} GB")
+    
+    # Calculate memory-constrained batch size
+    max_memory_samples = max(1, int(usable_memory / bytes_per_sample))
+    print(f"Memory-limited batch size: {max_memory_samples}")
+    
+    # Start with reasonable baseline based on GPU setup
+    if gpu_memory is not None:
+        if n_gpu_devices == 1:
+            # Single GPU: more conservative baseline but still efficient
+            baseline_batch = max(16, n_devices * 12)  # 12 samples per JAX device for single GPU
+            print(f"Baseline batch size (single GPU): {baseline_batch}")
+        else:
+            # Multi-GPU: higher baseline to utilize parallel processing
+            baseline_batch = max(16, n_devices * 16)  # 16 samples per JAX device for multi-GPU
+            print(f"Baseline batch size (multi-GPU): {baseline_batch}")
+    else:
+        baseline_batch = max(8, n_devices * 8)   # Lower baseline for CPU-only
+        print(f"Baseline batch size (CPU): {baseline_batch}")
+    
+    # Choose the smaller of memory constraint and reasonable upper limit
+    # With high-end GPUs, allow larger batch sizes
+    if gpu_memory is not None:
+        if n_gpu_devices == 1:
+            reasonable_upper_limit = min(128, max_batch_size)  # More conservative for single GPU
+        else:
+            reasonable_upper_limit = min(256, max_batch_size)  # Higher limit for multi-GPU setup
+    else:
+        reasonable_upper_limit = min(64, max_batch_size)   # Lower limit for CPU-only
+    
+    memory_limited_batch = min(max_memory_samples, reasonable_upper_limit)
+    
+    # Take the larger of baseline and memory-limited (less conservative)
     optimal_batch = max(baseline_batch, memory_limited_batch)
-    # print(f"Memory-limited batch size: {memory_limited_batch}, Baseline batch size: {baseline_batch}, Optimal batch size: {optimal_batch}")
-    # Ensure batch size doesn't exceed available replicates
-    optimal_batch = min(optimal_batch, n_replicates)
-    # print(f"Adjusted optimal batch size: {optimal_batch} (limited by replicates)")
+    print(f"Initial optimal batch size: {optimal_batch}")
+    
+    # Special case: if we can fit all simulations in one batch and it's not too large, do it
+    if effective_total <= max_memory_samples and effective_total <= reasonable_upper_limit:
+        print(f"Can process all {effective_total} simulations in a single batch")
+        optimal_batch = effective_total
+    else:
+        # Ensure batch size doesn't exceed available simulations
+        optimal_batch = min(optimal_batch, effective_total)
+        print(f"Simulation-limited batch size: {optimal_batch}")
+    
     # Make batch size divisible by device count for even distribution
-    # But only if we have enough replicates to justify it
-    if optimal_batch >= n_devices:
-        optimal_batch = (optimal_batch // n_devices) * n_devices
-    print('Final optimal batch size:', max(1, optimal_batch))
-    # Final safety check - ensure we return at least 1
-    return max(1, optimal_batch)
+    # But only if we have enough samples to justify it
+    if optimal_batch >= n_devices and n_devices > 1:
+        optimal_batch = max(n_devices, (optimal_batch // n_devices) * n_devices)
+        print(f"Device-aligned batch size: {optimal_batch}")
+    
+    # Final safety checks with hardware-appropriate minimums
+    if gpu_memory is not None:
+        if n_gpu_devices == 1:
+            # Single GPU: more conservative limits
+            optimal_batch = max(12, optimal_batch)  # Minimum of 12 for single GPU
+            optimal_batch = min(optimal_batch, max_batch_size)  # Hard cap for single GPU stability
+            print(f"Final batch size (single GPU): {optimal_batch}")
+        else:
+            # Multi-GPU: higher limits to utilize parallel processing
+            optimal_batch = max(16, optimal_batch)  # Minimum of 16 for multi-GPU setup
+            optimal_batch = min(optimal_batch, max_batch_size)  # Hard cap for multi-GPU stability
+            print(f"Final batch size (multi-GPU): {optimal_batch}")
+    else:
+        optimal_batch = max(8, optimal_batch)   # Minimum of 8 for CPU setup
+        optimal_batch = min(optimal_batch, 32)  # Hard cap of 32 for CPU
+        print(f"Final batch size (CPU): {optimal_batch}")
+    
+    print(f'Final optimal batch size: {optimal_batch}')
+    return optimal_batch
 
 
 def initialize_pruning_state(
@@ -795,7 +960,8 @@ def initialize_pruning_state(
 def run_simulation_engine(
     neuron_params: NeuronParams,
     sim_params: SimParams,
-    sim_config: SimulationConfig
+    sim_config: SimulationConfig,
+    checkpoint_dir: Optional[Path] = None,
 ) -> Union[jnp.ndarray, Tuple[jnp.ndarray, Pruning_state]]:
     """
     Unified simulation engine that handles all simulation types.
@@ -815,7 +981,7 @@ def run_simulation_engine(
     batch_size = sim_config.batch_size
     if batch_size is None:
         batch_size = calculate_optimal_batch_size(
-            sim_params.n_neurons, len(sim_params.t_axis), sim_params.n_param_sets, n_devices
+            sim_params.n_neurons, len(sim_params.t_axis), sim_params.n_param_sets, n_devices, total_sims=total_sims
         )
     
     # Adjust batch size for multiple devices
@@ -837,12 +1003,12 @@ def run_simulation_engine(
     if sim_config.enable_pruning:
         return _run_with_pruning(
             neuron_params, sim_params, sim_config, batch_func, 
-            total_sims, batch_size, n_devices
+            total_sims, batch_size, n_devices, checkpoint_dir
         )
     else:
         return _run_stim_neurons(
             neuron_params, sim_params, sim_config, batch_func,
-            total_sims, batch_size, n_devices,
+            total_sims, batch_size, n_devices, checkpoint_dir
         )
 
 
@@ -861,13 +1027,13 @@ def _adjust_stimulation_for_batch(
     next_lowest = None
     
     for adjust_iter in range(sim_config.max_adjustment_iters):
-        test_results = batch_func(adjusted_neuron_params, sim_params, batch_indices)
+        test_results = batch_func(adjusted_neuron_params, sim_params, batch_indices) # (Devices, Batch, Neurons, Time)
         if n_devices > 1:
-            test_results = test_results.reshape(-1, *test_results.shape[2:])
+            test_results = test_results.reshape(-1, *test_results.shape[2:]) # (Batch, Neurons, Time)
 
-        max_rates = jnp.max(test_results, axis=2)
-        n_active = jnp.sum(jnp.sum(test_results, axis=2) > 0, axis=1)
-        n_high_fr = jnp.sum(max_rates > sim_config.high_fr_threshold, axis=1)
+        max_rates = jnp.max(test_results, axis=2) # (Batch, Neurons, Time) -> (Batch, Neurons)
+        n_active = jnp.sum(jnp.sum(test_results, axis=2) > 0, axis=1) # (Batch, Neurons) -> # (Batch,)
+        n_high_fr = jnp.sum(max_rates > sim_config.high_fr_threshold, axis=1) # (Batch, Neurons) -> (Batch,)
 
         current_inputs = adjusted_neuron_params.input_currents.copy()
         new_inputs = current_inputs.copy()
@@ -876,26 +1042,44 @@ def _adjust_stimulation_for_batch(
         for sim_idx in range(len(n_active)):
             sim_active = n_active[sim_idx]
             sim_high_fr = n_high_fr[sim_idx]
-            sim_input = current_inputs[sim_idx]
+
+            # Calculate the actual global simulation index and its components
+            if n_devices > 1:
+                # batch_indices is reshaped for devices, so flatten it first
+                flat_batch_indices = batch_indices.copy().reshape(-1)
+                global_sim_idx = flat_batch_indices[sim_idx] if sim_idx < len(flat_batch_indices) else flat_batch_indices[-1]
+            else:
+                global_sim_idx = batch_indices.copy()
+                global_sim_idx = global_sim_idx[sim_idx] if sim_idx < len(global_sim_idx) else global_sim_idx[-1]
+            
+            # Calculate replicate and stimulus indices from global simulation index
+            replicate_idx = int(global_sim_idx % sim_params.n_param_sets)
+            stim_idx = int(global_sim_idx // sim_params.n_param_sets)
+            
+            # Get the correct input for this specific stimulus and replicate
+            sim_input = current_inputs[stim_idx, replicate_idx]
 
             if (sim_active > sim_config.n_active_upper) or (sim_high_fr > sim_config.n_high_fr_upper):
                 # Too strong - reduce stimulation
                 if next_lowest is None:
-                    new_inputs = new_inputs.at[sim_idx].set(sim_input / 2)
+                    new_inputs = new_inputs.at[stim_idx, replicate_idx].set(sim_input / 2)
                 else:
-                    new_inputs = new_inputs.at[sim_idx].set((sim_input + next_lowest[sim_idx]) / 2)
+                    new_inputs = new_inputs.at[stim_idx, replicate_idx].set((sim_input + next_lowest[stim_idx, replicate_idx]) / 2)
                 needs_adjustment = needs_adjustment.at[sim_idx].set(True)
             elif sim_active < sim_config.n_active_lower:
                 # Too weak - increase stimulation
                 if next_highest is None:
-                    new_inputs = new_inputs.at[sim_idx].set(sim_input * 2)
+                    new_inputs = new_inputs.at[stim_idx, replicate_idx].set(sim_input * 2)
                 else:
-                    new_inputs = new_inputs.at[sim_idx].set((sim_input + next_highest[sim_idx]) / 2)
+                    new_inputs = new_inputs.at[stim_idx, replicate_idx].set((sim_input + next_highest[stim_idx, replicate_idx]) / 2)
                 needs_adjustment = needs_adjustment.at[sim_idx].set(True)
             # else: just right, no adjustment needed
 
-            print(f"    Adjustment iter {adjust_iter + 1}, Sim {sim_idx}: Max stim: {jnp.max(sim_input):.6f}, "
-                  f"Active: {sim_active}, High FR: {sim_high_fr}")
+            # Determine if this simulation needs adjustment
+            sim_needs_adjustment = (sim_active > sim_config.n_active_upper) or (sim_high_fr > sim_config.n_high_fr_upper) or (sim_active < sim_config.n_active_lower)
+            
+            print(f"    Adjustment iter {adjust_iter + 1}, Stim {stim_idx}, Replicate {replicate_idx}: Max stim: {jnp.max(sim_input):.6f}, "
+                  f"Active: {sim_active}, High FR: {sim_high_fr}, Needs adjustment: {sim_needs_adjustment}")
             
         # Update neuron params with new stimulation
         adjusted_neuron_params = adjusted_neuron_params._replace(
@@ -906,10 +1090,10 @@ def _adjust_stimulation_for_batch(
         gc.collect()
 
         if not jnp.any(needs_adjustment):
-            print(f"    Stimulation appropriate for all simulations in this batch")
+            print(f"    Stimulation appropriate for all simulations in this batch - adjustment complete: True")
             break
     else:
-        print(f"    Warning: Maximum adjustment iterations ({sim_config.max_adjustment_iters}) reached for this batch")
+        print(f"    Warning: Maximum adjustment iterations ({sim_config.max_adjustment_iters}) reached for this batch - adjustment complete: False")
 
     return adjusted_neuron_params
 
@@ -922,13 +1106,32 @@ def _run_stim_neurons(
     total_sims: int,
     batch_size: int,
     n_devices: int,
+    checkpoint_dir: Optional[Path] = None
 ) -> jnp.ndarray:
-    """Run simulation without pruning, with optional per-batch automatic stimulation adjustment."""
+    """Run simulation without pruning, with optional per-batch automatic stimulation adjustment and checkpointing."""
     
-    all_results = []
     n_batches = (total_sims + batch_size - 1) // batch_size
+    
+    # Check for existing checkpoint to resume from
+    checkpoint_state = None
+    start_batch = 0
+    all_results = []
+    adjusted_neuron_params = neuron_params
+    
+    if sim_config.enable_checkpointing and (checkpoint_dir is not None):
+        latest_checkpoint, base_name = find_latest_checkpoint(checkpoint_dir)
+        if latest_checkpoint:
+            try:
+                checkpoint_state, adjusted_neuron_params, metadata = load_checkpoint(latest_checkpoint, base_name, neuron_params)
+                start_batch = checkpoint_state.batch_index + 1
+                print(f"Resuming from batch {start_batch}/{n_batches}")
+            except Exception as e:
+                print(f"Warning: Could not load checkpoint {latest_checkpoint}: {e}")
+                print("Starting from beginning...")
+                start_batch = 0
+                all_results = []
 
-    for i in range(n_batches):
+    for i in range(start_batch, n_batches):
         start_idx = i * batch_size
         end_idx = min((i + 1) * batch_size, total_sims)
         actual_batch_size = end_idx - start_idx
@@ -946,17 +1149,15 @@ def _run_stim_neurons(
         # Reshape for devices if using pmap
         if n_devices > 1:
             batch_indices = batch_indices.reshape(n_devices, -1)
-
+        print('Batch Inds:', batch_indices)
         # Adjust stimulation for this specific batch if enabled
         if sim_config.adjustStimI:
             print(f"Adjusting stimulation for batch {i + 1}/{n_batches}...")
             adjusted_neuron_params = _adjust_stimulation_for_batch(
-                neuron_params, sim_params, sim_config, batch_func, batch_indices, n_devices)
-        else:
-            adjusted_neuron_params = neuron_params
+                adjusted_neuron_params, sim_params, sim_config, batch_func, batch_indices, n_devices)
 
         # Run the batch with adjusted parameters
-        batch_results = batch_func(adjusted_neuron_params, sim_params, batch_indices)
+        batch_results = jax.block_until_ready(batch_func(adjusted_neuron_params, sim_params, batch_indices))
 
         if n_devices > 1:
             batch_results = batch_results.reshape(-1, *batch_results.shape[2:])
@@ -966,6 +1167,28 @@ def _run_stim_neurons(
         batch_results = jax.device_put(batch_results, jax.devices("cpu")[0])
         all_results.append(batch_results)
         print(f"Batch {i + 1}/{n_batches} completed")
+
+        # Save checkpoint if enabled and conditions are met
+        if sim_config.enable_checkpointing and (checkpoint_dir is not None):  
+            checkpoint_state = CheckpointState(
+                batch_index=i,
+                completed_batches=i + 1,
+                total_batches=n_batches,
+                n_result_batches=len(all_results),
+                accumulated_mini_circuits=None,
+                neuron_params=neuron_params,
+                pruning_state=None
+            )
+            checkpoint_path = checkpoint_dir / f"checkpoint_batch_{i}.h5"
+            metadata = {
+                "sim_type": sim_config.sim_type,
+                "enable_pruning": sim_config.enable_pruning,
+                "total_sims": total_sims,
+                "batch_size": batch_size,
+                "n_devices": n_devices
+            }
+            save_checkpoint(checkpoint_state, checkpoint_path, metadata, results=all_results, batch_start_idx=i)
+            cleanup_old_checkpoints(checkpoint_dir=checkpoint_dir, keep_last_n=2)
 
         del batch_results  # Free memory
         gc.collect()  # Force garbage collection
@@ -979,6 +1202,7 @@ def _run_stim_neurons(
         sim_params.n_neurons, len(sim_params.t_axis)
     ), None, adjusted_neuron_params
 
+
 def _run_with_pruning(
     neuron_params: NeuronParams,
     sim_params: SimParams,
@@ -986,7 +1210,8 @@ def _run_with_pruning(
     batch_func,
     total_sims: int,
     batch_size: int,
-    n_devices: int
+    n_devices: int,
+    checkpoint_dir: Optional[Path] = None,
 ) -> Tuple[jnp.ndarray, List[Pruning_state]]:
     """Run simulation with pruning, saving states across all batches."""
     
@@ -1107,10 +1332,13 @@ def _run_with_pruning(
         
         # Run simulation
         batch_results = batch_func(neuron_params, sim_params, batch_indices)    
+        # batch_results shape: (n_devices, batch_per_device, n_neurons, n_timepoints) if n_devices > 1
+        #                      (batch_size, n_neurons, n_timepoints) if n_devices == 1
         
         # Reshape results and state back to flat format if using pmap
         if n_devices > 1:
             batch_results = batch_results.reshape(-1, *batch_results.shape[2:])
+            # batch_results shape after reshape: (batch_size, n_neurons, n_timepoints)
             final_state = reshape_state_from_pmap(state)
         else:
             final_state = state
@@ -1118,11 +1346,12 @@ def _run_with_pruning(
         # Remove padding if it was added
         if actual_batch_size < len(batch_results):
             batch_results = batch_results[:actual_batch_size]
+            # batch_results shape after padding removal: (actual_batch_size, n_neurons, n_timepoints)
             final_state = trim_state_padding(final_state, actual_batch_size)
         
         # Move results to CPU to save GPU memory
         batch_results = jax.device_put(batch_results, jax.devices("cpu")[0])
-        mini_circuit = jnp.stack([((jnp.sum(batch_results[:,n],axis=-1)>0) & ~mn_mask) for n in range(batch_results.shape[1])],axis=1)
+        mini_circuit = jnp.stack([((jnp.sum(batch_results[n],axis=-1)>0) & ~mn_mask) for n in range(batch_results.shape[0])],axis=1)
         mini_circuit = jax.device_put(mini_circuit, jax.devices("cpu")[0])
         
         all_results.append(batch_results)
@@ -1170,18 +1399,6 @@ def stack_pruning_states(states_list: List[Pruning_state]) -> Pruning_state:
     
     return stacked_state
 
-
-def trim_state_padding(state: Pruning_state, target_size: int) -> Pruning_state:
-    """Remove padding from state to match target batch size using jax.lax.map."""
-    def trim_field(field_value):
-        if hasattr(field_value, 'shape') and len(field_value.shape) > 0:
-            # Trim the first dimension (batch dimension) to target_size
-            return field_value[:target_size]
-        else:
-            # Keep scalar or non-array fields as is
-            return field_value
-    
-    return jax.lax.map(trim_field, state)
 
 # #############################################################################################################################=
 # CONFIGURATION LOADING AND SETUP FUNCTIONS
@@ -1298,7 +1515,6 @@ def prepare_sim_params(cfg: DictConfig, n_stim_configs: int, n_neurons: int) -> 
         noise_stdv=cfg.sim.noiseStdv
     )
 
-
 def parse_simulation_config(cfg: DictConfig) -> SimulationConfig:
     """Parse simulation configuration from DictConfig."""
     # Determine simulation type
@@ -1324,9 +1540,9 @@ def parse_simulation_config(cfg: DictConfig) -> SimulationConfig:
         n_active_upper=getattr(cfg.sim, "n_active_upper", 500),
         n_active_lower=getattr(cfg.sim, "n_active_lower", 5),
         n_high_fr_upper=getattr(cfg.sim, "n_high_fr_upper", 100),
-        high_fr_threshold=getattr(cfg.sim, "high_fr_threshold", 100.0)
+        high_fr_threshold=getattr(cfg.sim, "high_fr_threshold", 100.0),
+        enable_checkpointing=getattr(cfg.sim, "enable_checkpointing", False),
     )
-
 
 # #############################################################################################################################=
 # STATE PERSISTENCE FUNCTIONS
@@ -1389,9 +1605,13 @@ def run_vnc_simulation(cfg: DictConfig) -> Union[jnp.ndarray, Tuple[jnp.ndarray,
     if sim_config.enable_pruning:
         print(f"  Pruning enabled with oscillation threshold: {sim_config.oscillation_threshold}")
     
+    # Parse checkpointing configuration
+    checkpoint_dir = None
+    if cfg.sim.enable_checkpointing and hasattr(cfg, 'paths'):
+        checkpoint_dir = Path(cfg.paths.ckpt_dir) / "checkpoints"
     # Run simulation
     start_time = time.time()
-    result = run_simulation_engine(neuron_params, sim_params, sim_config)
+    result = run_simulation_engine(neuron_params, sim_params, sim_config, checkpoint_dir)
     jax.block_until_ready(result)
     
     elapsed = time.time() - start_time
@@ -1421,8 +1641,6 @@ def run_vnc_simulation(cfg: DictConfig) -> Union[jnp.ndarray, Tuple[jnp.ndarray,
 """
 MAIN INTERFACE FUNCTIONS:
 - run_vnc_simulation(cfg): Unified function for all simulation types
-- run_vnc_simulation_optimized(cfg): Backward compatibility for standard simulation
-- run_vnc_prune_optimized(cfg): Backward compatibility for pruning simulation
 
 CORE SIMULATION FUNCTIONS:
 - run_baseline(): Standard simulation without modifications  
@@ -1439,6 +1657,7 @@ SIMULATION ENGINE:
 - get_batch_function(): Get appropriate batch processing function
 - _run_stim_neurons(): Execute simulation without pruning
 - _run_with_pruning(): Execute simulation with pruning
+- _adjust_stimulation_for_batch(): Adjust stimulation parameters for specific batch
 
 BATCH PROCESSING FUNCTIONS:
 - process_batch_baseline(): Process batch of baseline simulations
@@ -1454,7 +1673,7 @@ PRUNING-SPECIFIC FUNCTIONS:
 - reshape_state_for_pmap(): Reshape state for multi-device processing
 - reshape_state_from_pmap(): Reshape state back from multi-device format
 - pad_state_for_devices(): Pad state for device alignment
-- trim_state_padding(): Remove padding from state
+- trim_state_padding(): Remove padding from state to get back to actual batch size
 - stack_pruning_states(): Stack multiple pruning states into single state
 - save_state()/load_state(): Persist pruning state to/from disk
 
@@ -1464,10 +1683,20 @@ CONFIGURATION AND SETUP:
 - parse_simulation_config(): Parse simulation configuration from config
 - calculate_optimal_batch_size(): Determine optimal batch size
 
+IMPORTED UTILITY FUNCTIONS (from src.sim_utils and src.shuffle_utils):
+- load_W(): Load connectivity matrix from file
+- load_wTable(): Load neuron metadata table from file
+- sample_trunc_normal(): Sample from truncated normal distribution
+- set_sizes(): Set neuron parameters based on surface area
+- make_input(): Create input current arrays for stimulation
+- compute_oscillation_score(): Compute oscillation scores for activity
+- extract_shuffle_indices(): Extract neuron type indices for shuffling
+- full_shuffle(): Perform complete connectivity matrix shuffling
+
 CONFIGURATION STRUCTURES:
-- NeuronParams: Immutable neuron parameter container
-- SimParams: Immutable simulation parameter container  
-- Pruning_state: Pruning algorithm state container
-- SimulationConfig: Simulation execution configuration
+- NeuronParams: NamedTuple for immutable neuron parameter storage
+- SimParams: NamedTuple for immutable simulation parameter storage  
+- Pruning_state: NamedTuple for pruning algorithm state storage
+- SimulationConfig: NamedTuple for simulation execution configuration
 
 """

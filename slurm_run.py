@@ -85,8 +85,8 @@ def main():
                         help='Name of experiment yaml  (default: stim_neurons)')
     parser.add_argument('--sim', type=str, default='default',
                         help='Name of simulation yaml  (default: default)')
-    parser.add_argument('--mode', type=str, default=None,
-                        help='Mode for the simulation (default: None)')
+    parser.add_argument('--mode', type=str, default="RUN",
+                        help='Mode for the simulation (default: RUN)')
     parser.add_argument('--load_jobid', type=str, default='',
                         help='JobID to resume training (default: '')')
     parser.add_argument('--override', type=str, default='',

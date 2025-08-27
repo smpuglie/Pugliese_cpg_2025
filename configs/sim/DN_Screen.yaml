@@ -10,13 +10,12 @@ noiseStdvProp: 0.0 # Proportional standard deviation of weight noise
 noiseMean: 0.0 # Mean of input noise
 noiseStdv: 0.0 # Standard deviation of input noise
 prune_network: False # Whether to prune the network or not
-adjustStimI: False # Adjust stimulus current
+adjustStimI: True # Adjust stimulus current
 max_adjustment_iters: 10 # Maximum iterations for simulation with adjusted stimulus current
-n_active_upper: 500 # Upper limit for active neurons
+n_active_upper: 1500 # Upper limit for active neurons
 n_active_lower: 5 # Lower limit for active neurons
 n_high_fr_upper: 100 # Upper limit for high frequency neurons
 high_fr_threshold: 100.0 # Upper limit for high frequency neurons
 
 # Checkpointing configuration
 enable_checkpointing: True # Enable intermediate checkpointing
-checkpoint_interval: 1 # Save checkpoint every N batches (set to 1 to save after each batch)
