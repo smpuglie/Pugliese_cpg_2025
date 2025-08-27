@@ -1544,9 +1544,10 @@ def prepare_neuron_params(cfg: DictConfig, W_table: Any, param_path: Optional[Pa
     elif len(cfg.experiment.keepOnly) > 0:
         mn_mask = jnp.isin(jnp.arange(n_neurons), mn_idxs)
         keep_neurons = jnp.zeros(n_neurons, dtype=jnp.bool)
-        keep_neurons = keep_neurons.at[cfg.experiment.keepOnly].set(True)
+        keep_neurons = keep_neurons.at[jnp.asarray(cfg.experiment.keepOnly)].set(True)
         keep_neurons = jnp.where(keep_neurons | mn_mask, True, False)
         W_mask = W_mask.at[:, keep_neurons, :].set(True)
+        W_mask = W_mask.at[:, :, keep_neurons].set(True)
         print(f"Initial keeping of neurons at indices: {cfg.experiment.keepOnly}")
     if (param_path is not None) and param_path.exists():
         import src.io_dict_to_hdf5 as ioh5
@@ -1671,6 +1672,7 @@ def run_vnc_simulation(cfg: DictConfig) -> Union[jnp.ndarray, Tuple[jnp.ndarray,
     sim_params = prepare_sim_params(cfg, n_stim_configs, neuron_params.W.shape[0])
     sim_config = parse_simulation_config(cfg)
 
+    jax.clear_caches()
     print(f"Running {sim_config.sim_type} simulation with:")
     print(f"  {n_stim_configs} stimulus configurations")
     print(f"  {sim_params.n_param_sets} parameter sets")

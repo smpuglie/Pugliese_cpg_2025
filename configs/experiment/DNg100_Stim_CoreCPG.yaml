@@ -10,7 +10,7 @@ stimNeurons:
   - [31]
   # - [31,132]
 removeNeurons: []
-keepOnly: []
+keepOnly: [31, 277,  617, 1167]
 stimI: 
   - [250]
   # - [250]
