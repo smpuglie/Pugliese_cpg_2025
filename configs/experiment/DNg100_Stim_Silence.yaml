@@ -9,6 +9,7 @@ dn_screen: False
 stimNeurons: 
   - [31]
 removeNeurons: []
+keepOnly: []
 stimI: 
   - [250]
 seed: 1

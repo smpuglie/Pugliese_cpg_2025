@@ -2,6 +2,7 @@
 import time
 import jax
 import jax.numpy as jnp
+import numpy as np
 import psutil
 import gc
 from typing import NamedTuple, Dict, Any, Optional, Tuple, List, Union
@@ -1170,6 +1171,7 @@ def _run_stim_neurons(
 
         # Save checkpoint if enabled and conditions are met
         if sim_config.enable_checkpointing and (checkpoint_dir is not None):  
+
             checkpoint_state = CheckpointState(
                 batch_index=i,
                 completed_batches=i + 1,
@@ -1187,14 +1189,78 @@ def _run_stim_neurons(
                 "batch_size": batch_size,
                 "n_devices": n_devices
             }
-            save_checkpoint(checkpoint_state, checkpoint_path, metadata, results=all_results, batch_start_idx=i)
+            
+            print(f"Saving checkpoint for batch {i + 1}...")
+            checkpoint_start_time = time.time()
+            save_checkpoint(checkpoint_state, checkpoint_path, metadata, batch_start_idx=i)
+            checkpoint_elapsed = time.time() - checkpoint_start_time
+            print(f"Checkpoint saved in {checkpoint_elapsed:.2f} seconds")
+            
             cleanup_old_checkpoints(checkpoint_dir=checkpoint_dir, keep_last_n=2)
 
         del batch_results  # Free memory
         gc.collect()  # Force garbage collection
 
+    # If adjustStimI was used, run a final set of simulations with the final adjusted stimuli
+    if sim_config.adjustStimI:
+        print(f"\nRunning final simulations with adjusted stimulation across all {n_batches} batches...")
+        import sparse
+        final_all_results = []
+        results_dir = checkpoint_dir / f"results_final"
+        results_dir.mkdir(parents=True, exist_ok=True)
+        # Process all batches with final adjusted parameters
+        for i in range(n_batches):
+            start_idx = i * batch_size
+            end_idx = min((i + 1) * batch_size, total_sims)
+            actual_batch_size = end_idx - start_idx
+            
+            batch_indices = jnp.arange(start_idx, end_idx)
+            
+            # Pad if necessary for pmap
+            if n_devices > 1 and len(batch_indices) < batch_size:
+                pad_size = batch_size - len(batch_indices)
+                batch_indices = jnp.concatenate([
+                    batch_indices,
+                    jnp.repeat(batch_indices[-1], pad_size)
+                ])
+            
+            # Reshape for devices if using pmap
+            if n_devices > 1:
+                batch_indices = batch_indices.reshape(n_devices, -1)
+            
+            # Run simulation with final adjusted parameters
+            final_batch_results = jax.block_until_ready(
+                batch_func(adjusted_neuron_params, sim_params, batch_indices)
+            )
+            
+            if n_devices > 1:
+                final_batch_results = final_batch_results.reshape(-1, *final_batch_results.shape[2:])
+                final_batch_results = final_batch_results[:actual_batch_size]  # Remove padding
+            
+            # Move to CPU to save memory
+            final_batch_results = jax.device_put(final_batch_results, jax.devices("cpu")[0])
+            final_all_results.append(np.asarray(final_batch_results))
+            sparse.save_npz(results_dir / f"Final_batch_Rs_{i}.npz", sparse.COO.from_numpy(final_batch_results))
+            print(f"Final batch {i + 1}/{n_batches} completed")
+            
+            # Clean up memory
+            del final_batch_results
+            gc.collect()
+        
+        # Combine final results
+        results = np.concatenate(final_all_results, axis=0)
+        
+        print(f"Final simulations with adjusted stimulation completed.")
+        
+        # Clean up
+        del final_all_results
+        gc.collect()
+    else:
+        # Combine results from adjustment phase
+        results = jnp.concatenate(all_results, axis=0)
+    
     # Combine results
-    results = jnp.concatenate(all_results, axis=0)
+    # results = jnp.concatenate(all_results, axis=0)
 
     # Reshape to (n_stim_configs, n_param_sets, n_neurons, n_timepoints)
     return results.reshape(
@@ -1474,6 +1540,15 @@ def prepare_neuron_params(cfg: DictConfig, W_table: Any, param_path: Optional[Pa
     if len(cfg.experiment.removeNeurons) > 0:
         W_mask = W_mask.at[:, cfg.experiment.removeNeurons, :].set(False)
         W_mask = W_mask.at[:, :, cfg.experiment.removeNeurons].set(False)
+        print(f"Initial removal of neurons at indices: {cfg.experiment.removeNeurons}")
+    elif len(cfg.experiment.keepOnly) > 0:
+        mn_mask = jnp.isin(jnp.arange(n_neurons), mn_idxs)
+        keep_neurons = jnp.zeros(n_neurons, dtype=jnp.bool)
+        keep_neurons = keep_neurons.at[jnp.asarray(cfg.experiment.keepOnly)].set(True)
+        keep_neurons = jnp.where(keep_neurons | mn_mask, True, False)
+        W_mask = W_mask.at[:, keep_neurons, :].set(True)
+        W_mask = W_mask.at[:, :, keep_neurons].set(True)
+        print(f"Initial keeping of neurons at indices: {cfg.experiment.keepOnly}")
     if (param_path is not None) and param_path.exists():
         import src.io_dict_to_hdf5 as ioh5
         nparams = ioh5.load(param_path, enable_jax=True)
@@ -1597,6 +1672,7 @@ def run_vnc_simulation(cfg: DictConfig) -> Union[jnp.ndarray, Tuple[jnp.ndarray,
     sim_params = prepare_sim_params(cfg, n_stim_configs, neuron_params.W.shape[0])
     sim_config = parse_simulation_config(cfg)
 
+    jax.clear_caches()
     print(f"Running {sim_config.sim_type} simulation with:")
     print(f"  {n_stim_configs} stimulus configurations")
     print(f"  {sim_params.n_param_sets} parameter sets")

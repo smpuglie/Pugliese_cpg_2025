@@ -1,19 +1,18 @@
 # This is the default configuration for the experiment.
-name: DNg100_Stim
+name: DNb08_Stim
 
-wPath: ${paths.data_dir}/manc t1 connectome data/W_20250813_DNtoMN_unsorted.csv
-dfPath: ${paths.data_dir}/manc t1 connectome data/wTable_20250813_DNtoMN_unsorted_withModules.csv
+wPath: ${paths.data_dir}/fanc t1 connectome data/W_BDN2toMN_20250107.npy
+dfPath: ${paths.data_dir}/fanc t1 connectome data/wTable_BDN2toMN_20250107_fullData.csv
 n_replicates: 1024
 batch_size: 
 dn_screen: False
 stimNeurons: 
-  - [31]
-  # - [31,132]
+  - [1211]
+  # - [1164,1211,1337,1404]
 removeNeurons: []
 keepOnly: []
 stimI: 
-  - [250]
-  # - [250]
+  - [65]
 seed: 1
 saveFigs: True
 useTsp: False

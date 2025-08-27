@@ -23,7 +23,7 @@ def save(filename, dic, compression='gzip', compression_opts=9):
         Compression level (0-9 for gzip). Default is 9 (maximum compression)
     """
     with h5py.File(filename, 'w') as h5file:
-        recursively_save_dict_contents_to_group(h5file, '/', dic, compression, compression_opts)
+        recursively_save_dict_contents_to_group(h5file, '/', dic, compression, compression_opts=compression_opts)
 
 def recursively_save_dict_contents_to_group(h5file, path, dic, compression='gzip', compression_opts=9):
     """
@@ -63,7 +63,7 @@ def recursively_save_dict_contents_to_group(h5file, path, dic, compression='gzip
                 # For scalars and single-element arrays, compression may not be beneficial
                 h5file[path + key] = item
         elif isinstance(item, (dict,list,object)): # or isinstance(item,list) or isinstance(item,tuple):
-            recursively_save_dict_contents_to_group(h5file, path + key + '/', item, compression, compression_opts)
+            recursively_save_dict_contents_to_group(h5file, path + key + '/', item, compression, compression_opts=compression_opts)
         else:
             raise ValueError('Cannot save %s type'%type(item))
 
