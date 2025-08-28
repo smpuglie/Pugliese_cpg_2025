@@ -197,3 +197,4 @@ cython_debug/
 
 OutFiles/
 Archive/
+.vscode/
