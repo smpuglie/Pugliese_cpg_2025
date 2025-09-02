@@ -1,8 +1,8 @@
 # This is the default configuration for the experiment.
 name: DNg100_Stim
 
-wPath: ${paths.data_dir}/fanc t1 connectome data/W_BDN2toMN_20250107.npy
-dfPath: ${paths.data_dir}/fanc t1 connectome data/wTable_BDN2toMN_20250107_fullData.csv
+wPath: ${paths.data_dir}/fanc t1 connectome data/W_BDN2toMN_20250107_corrected.npy
+dfPath: ${paths.data_dir}/fanc t1 connectome data/wTable_BDN2toMN_20250107_corrected.csv
 n_replicates: 1024
 batch_size: 
 dn_screen: False
