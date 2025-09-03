@@ -1431,7 +1431,7 @@ def _run_with_pruning(
 
     # Combine results
     results = jnp.concatenate(all_results, axis=0)
-    all_mini_circuits = jnp.concatenate(all_mini_circuits, axis=0)
+    all_mini_circuits = jnp.stack(all_mini_circuits, axis=0)
     
     # Reshape results to (n_stim_configs, n_param_sets, n_neurons, n_timepoints)
     reshaped_results = results.reshape(
