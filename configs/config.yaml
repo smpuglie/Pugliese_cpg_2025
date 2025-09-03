@@ -1,6 +1,6 @@
 ##### Easy Access Variables #####
 # if set to positive integer, overrides the default
-version: 'debug'
+version: 'test'
 num_gpus: ''
 run_id: 'walle'
 load_jobid: ''
