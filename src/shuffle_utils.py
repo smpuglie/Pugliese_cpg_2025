@@ -32,30 +32,60 @@ def full_shuffle(
 def extract_shuffle_indices(
     W_table,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-    exc_dn_idxs = jnp.array(
-        W_table.loc[
-            (W_table["class"] == "descending neuron")
-            & (W_table["predictedNt"] == "acetylcholine")
-        ].index
-    )
-    inh_dn_idxs = jnp.array(
-        W_table.loc[
-            (W_table["class"] == "descending neuron")
-            & ~(W_table["predictedNt"] == "acetylcholine")
-        ].index
-    )
-    exc_in_idxs = jnp.array(
-        W_table.loc[
-            ~(W_table["class"].isin(["descending neuron", "motor neuron"]))
-            & (W_table["predictedNt"] == "acetylcholine")
-        ].index
-    )
-    inh_in_idxs = jnp.array(
-        W_table.loc[
-            ~(W_table["class"].isin(["descending neuron", "motor neuron"]))
-            & ~(W_table["predictedNt"] == "acetylcholine")
-        ].index
-    )
-    mn_idxs = jnp.array(W_table.loc[W_table["class"] == "motor neuron"].index)
-
+    if 'predictedNt' in W_table.columns: 
+        exc_dn_idxs = jnp.array(
+            W_table.loc[
+                (W_table["class"] == "descending neuron")
+                & (W_table["predictedNt"] == "acetylcholine")
+            ].index
+        )
+        inh_dn_idxs = jnp.array(
+            W_table.loc[
+                (W_table["class"] == "descending neuron")
+                & ~(W_table["predictedNt"] == "acetylcholine")
+            ].index
+        )
+        exc_in_idxs = jnp.array(
+            W_table.loc[
+                ~(W_table["class"].isin(["descending neuron", "motor neuron"]))
+                & (W_table["predictedNt"] == "acetylcholine")
+            ].index
+        )
+        inh_in_idxs = jnp.array(
+            W_table.loc[
+                ~(W_table["class"].isin(["descending neuron", "motor neuron"]))
+                & ~(W_table["predictedNt"] == "acetylcholine")
+            ].index
+        )
+        mn_idxs = jnp.array(W_table.loc[W_table["class"] == "motor neuron"].index)
+    elif 'sign' in W_table.columns:
+        exc_dn_idxs = jnp.array(
+            W_table.loc[
+                (W_table["class"] == "descending neuron")
+                & (W_table["sign"] == 1)
+            ].index
+        )
+        inh_dn_idxs = jnp.array(
+            W_table.loc[
+                (W_table["class"] == "descending neuron")
+                & (W_table["sign"] == -1)
+            ].index
+        )
+        exc_in_idxs = jnp.array(
+            W_table.loc[
+                (W_table["class"].isin(["intrinsic neuron"]))
+                & (W_table["sign"] == 1)
+            ].index
+        )
+        inh_in_idxs = jnp.array(
+            W_table.loc[
+                (W_table["class"].isin(["intrinsic neuron"]))
+                & (W_table["sign"] == -1)
+            ].index
+        )
+        mn_idxs = jnp.array(W_table.loc[W_table["class"] == "motor neuron"].index)
+    else:
+        print('No valid indices found')
+        exc_dn_idxs = inh_dn_idxs = exc_in_idxs = inh_in_idxs = mn_idxs = jnp.array([])
+    
     return exc_dn_idxs, inh_dn_idxs, exc_in_idxs, inh_in_idxs, mn_idxs
