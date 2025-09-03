@@ -1417,7 +1417,7 @@ def _run_with_pruning(
         
         # Move results to CPU to save GPU memory
         batch_results = jax.device_put(batch_results, jax.devices("cpu")[0])
-        mini_circuit = jnp.stack([((jnp.sum(batch_results[n],axis=-1)>0) & ~mn_mask) for n in range(batch_results.shape[0])],axis=0)
+        # mini_circuit = jnp.stack([((jnp.sum(batch_results[n],axis=-1)>0) & ~mn_mask) for n in range(batch_results.shape[0])],axis=0)
         mini_circuit = jax.device_put(mini_circuit, jax.devices("cpu")[0])
         
         all_results.append(batch_results)
@@ -1430,8 +1430,8 @@ def _run_with_pruning(
         gc.collect()
 
     # Combine results
-    results = jnp.concatenate(all_results, axis=0)
-    all_mini_circuits = jnp.stack(all_mini_circuits, axis=0)
+    results = jnp.stack(all_results, axis=0)
+    all_mini_circuits = jnp.stack(all_mini_circuits, axis=0).reshape(-1, sim_params.n_neurons)  # (n_batches, batch_size, n_neurons) -> (total_sims, n_neurons)
     
     # Reshape results to (n_stim_configs, n_param_sets, n_neurons, n_timepoints)
     reshaped_results = results.reshape(
