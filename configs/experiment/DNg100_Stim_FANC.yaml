@@ -11,7 +11,7 @@ stimNeurons:
 removeNeurons: []
 keepOnly: []
 stimI: 
-  - [250]
+  - [150]
   # - [250]
 seed: 1
 saveFigs: True

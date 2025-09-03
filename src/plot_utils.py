@@ -144,7 +144,7 @@ def plot_R_traces_stacked_by_module(R,neuronData,colorMapper=None,figsize=(6,4),
     ax.set_facecolor("None")
     ax.legend(loc="upper left",bbox_to_anchor=[1,1],edgecolor="None",facecolor="None")
     xlimits = ax.get_xlim()
-    plt.vlines(xlimits[0],0,space,"k")
+    # plt.vlines(xlimits[0],0,space,"k")
     plt.yticks([0,space])
     plt.xlim(xlimits)
     ax.spines[["left","top","right"]].set_visible(False)
