@@ -187,7 +187,7 @@ def main(cfg: DictConfig):
                             )
                         elif async_mode == "streaming":
                             from src.async_vnc_sim import run_streaming_pruning_simulation
-                            results, final_mini_circuits = run_streaming_pruning_simulation(
+                            results, final_mini_circuits, neuron_params = run_streaming_pruning_simulation(
                                 neuron_params, sim_params, sim_config, max_concurrent=cfg.experiment.batch_size
                             )
                         else:

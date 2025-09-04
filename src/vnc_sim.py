@@ -257,8 +257,8 @@ def update_single_sim_state(state, R, mn_mask, oscillation_threshold=0.5, clip_s
         neurons_put_back, prev_put_back, last_removed, remove_p, min_circuit, key) = state
 
     # Get active MN activity using JAX-compatible approach
-    max_frs = jnp.max(R, axis=-1)
-    active_mask = ((max_frs > 0) & mn_mask)
+    max_frs = jnp.max(R[..., clip_start:], axis=-1)
+    active_mask = ((max_frs > 0.01) & mn_mask)
     # Compute oscillation score
     oscillation_score, _ = compute_oscillation_score(R[..., clip_start:], active_mask, prominence=0.05)
 
