@@ -1,5 +1,5 @@
 import os 
-os.environ["CUDA_VISIBLE_DEVICES"] = "0,1"  # Use GPU 1
+# os.environ["CUDA_VISIBLE_DEVICES"] = "0"  # Use GPU 1
 # os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.95"
 import jax
@@ -18,7 +18,7 @@ from omegaconf import DictConfig, OmegaConf
 from pathlib import Path
 import src.io_dict_to_hdf5 as ioh5
 from src.path_utils import convert_dict_to_path, save_config
-from src.vnc_sim import run_vnc_simulation
+from src.vnc_sim import run_vnc_simulation, prepare_neuron_params, prepare_sim_params, parse_simulation_config, load_wTable
 
 # Set up logging to capture all output
 def setup_logging():
@@ -150,7 +150,56 @@ def main(cfg: DictConfig):
 
             ##### Run the simulation #####
             print("Running VNC simulation with the following configuration:")
-            results, final_mini_circuits, neuron_params = run_vnc_simulation(cfg)
+            
+            # Check for async execution mode
+            async_mode = getattr(cfg.sim, "async_mode", "sync")
+            print(f"Execution mode: {async_mode}")
+            
+            if async_mode == "sync" or not getattr(cfg.sim, "prune_network", False):
+                # Use original synchronous implementation
+                results, final_mini_circuits, neuron_params = run_vnc_simulation(cfg)
+            else:
+                # Use asynchronous implementation for pruning
+                print(f"Using async pruning mode: {async_mode}")
+                
+                # Import async functions
+                try:
+                    from src.async_vnc_sim import run_async_pruning_simulation
+                    from src.vnc_sim import prepare_vnc_simulation_params
+                except ImportError as e:
+                    print(f"Warning: Could not import async modules: {e}")
+                    print("Falling back to synchronous execution")
+                    results, final_mini_circuits, neuron_params = run_vnc_simulation(cfg)
+                else:
+                    # Use the same data preparation as sync version
+                    print("Loading network configuration...")
+                    _, neuron_params, sim_params, sim_config, _ = prepare_vnc_simulation_params(cfg)
+                    
+                    # Initialize variables to handle error cases
+                    results = None
+                    final_mini_circuits = None
+                    
+                    # Run async simulation
+                    try:
+                        if async_mode == "individual":
+                            results, final_mini_circuits = run_async_pruning_simulation(
+                                neuron_params, sim_params, sim_config, batch_size=cfg.experiment.batch_size
+                            )
+                        elif async_mode == "streaming":
+                            from src.async_vnc_sim import run_streaming_pruning_simulation
+                            results, final_mini_circuits = run_streaming_pruning_simulation(
+                                neuron_params, sim_params, sim_config, max_concurrent=cfg.experiment.batch_size
+                            )
+                        else:
+                            raise ValueError(f"Unknown async_mode: {async_mode}. Valid options: 'sync', 'individual', 'streaming'")
+                        
+                        print(f"Async simulation completed successfully")
+                    except Exception as async_error:
+                        print(f"Async simulation failed: {async_error}")
+                        # Fallback to sync if needed
+                        # results, final_mini_circuits, neuron_params = run_vnc_simulation(cfg)
+                        # For now, re-raise the error to prevent undefined variable access
+                        raise
             
             # Ensure all operations are completed before proceeding
             jax.block_until_ready(results)

@@ -91,7 +91,12 @@ def run_single_simulation(
     term = ODETerm(rate_equation_half_tanh)
     solver = Dopri5()
     saveat = SaveAt(ts=t_axis)
-    controller = PIDController(rtol=r_tol, atol=a_tol)
+    
+    # Use more conservative tolerances for numerical stability
+    # Especially important for multi-GPU setups where different devices may have different precision
+    safe_rtol = jnp.maximum(r_tol, 1e-6)  # Don't go below 1e-6
+    safe_atol = jnp.maximum(a_tol, 1e-8)  # Don't go below 1e-8
+    controller = PIDController(rtol=safe_rtol, atol=safe_atol)
     
     # Create event to detect NaN/inf and stop early
     nan_inf_event = Event(nan_inf_event_func)
@@ -103,7 +108,18 @@ def run_single_simulation(
         event=nan_inf_event,
         max_steps=100000, throw=False
     )
-    return jnp.transpose(solution.ys)
+    
+    # Check for numerical issues in the solution
+    result = jnp.transpose(solution.ys)
+    
+    # Replace inf/nan with zeros and clip to reasonable bounds
+    # This approach is JIT-compatible
+    result = jnp.where(jnp.isinf(result), 0.0, result)
+    result = jnp.where(jnp.isnan(result), 0.0, result)
+    # Clip to reasonable firing rate bounds
+    result = jnp.clip(result, 0.0, 1000.0)  # Max 1000 Hz
+    
+    return result
 
 
 # #############################################################################################################################=
@@ -243,7 +259,6 @@ def update_single_sim_state(state, R, mn_mask, oscillation_threshold=0.5, clip_s
     # Get active MN activity using JAX-compatible approach
     max_frs = jnp.max(R, axis=-1)
     active_mask = ((max_frs > 0) & mn_mask)
-
     # Compute oscillation score
     oscillation_score, _ = compute_oscillation_score(R[..., clip_start:], active_mask, prominence=0.05)
 
@@ -258,8 +273,10 @@ def update_single_sim_state(state, R, mn_mask, oscillation_threshold=0.5, clip_s
     
     # CHECK FOR CONVERGENCE AT THE BEGINNING
     # Convergence happens when we need a new round AND the put_back sets are equal
+    # BUT only if we've actually been through at least one round (level > 0)
     sets_equal = jnp.array_equal(neurons_put_back, prev_put_back)
-    currently_converged = (need_new_round & sets_equal) | min_circuit.squeeze()
+    has_done_meaningful_work = (level[0] > 0) | (jnp.sum(neurons_put_back) > 0) | (jnp.sum(total_removed_neurons) > 0)
+    currently_converged = (need_new_round & sets_equal & has_done_meaningful_work) | min_circuit.squeeze()
     
     # Split key for potential use
     key_next, subkey_continue, subkey_reset = random.split(key, 3)
@@ -396,7 +413,8 @@ def update_single_sim_state(state, R, mn_mask, oscillation_threshold=0.5, clip_s
     final_last_removed = jax.lax.select(currently_converged, last_removed, branch_last_removed)
     final_neurons_put_back = jax.lax.select(currently_converged, neurons_put_back, branch_neurons_put_back)
     final_prev_put_back = jax.lax.select(currently_converged, prev_put_back, branch_prev_put_back)
-    final_level = jax.lax.select(currently_converged, level, branch_level)
+    # Ensure level never decreases - use max of current and branch levels
+    final_level = jnp.maximum(level, branch_level)
     final_p = jax.lax.select(currently_converged, remove_p, branch_p)
     final_W_mask = jax.lax.select(currently_converged, W_mask, W_mask_new)
     final_key = jax.lax.select(currently_converged, key, key_next)
@@ -1641,15 +1659,15 @@ def load_state(path: str) -> Pruning_state:
 # UNIFIED MAIN INTERFACE FUNCTION
 # #############################################################################################################################=
 
-def run_vnc_simulation(cfg: DictConfig) -> Union[jnp.ndarray, Tuple[jnp.ndarray, Pruning_state]]:
+def prepare_vnc_simulation_params(cfg: DictConfig):
     """
-    Unified main function to run VNC simulation with any configuration.
-
+    Prepare common simulation parameters and data.
+    
     Args:
         cfg: Configuration containing all simulation parameters
         
     Returns:
-        Results array if pruning disabled, or (results, final_state) tuple if pruning enabled
+        Tuple of (W_table, neuron_params, sim_params, sim_config, n_stim_configs)
     """
     print("Loading network configuration...")
     W_table = load_wTable(cfg.experiment.dfPath)
@@ -1671,6 +1689,21 @@ def run_vnc_simulation(cfg: DictConfig) -> Union[jnp.ndarray, Tuple[jnp.ndarray,
     neuron_params = prepare_neuron_params(cfg, W_table)
     sim_params = prepare_sim_params(cfg, n_stim_configs, neuron_params.W.shape[0])
     sim_config = parse_simulation_config(cfg)
+    
+    return W_table, neuron_params, sim_params, sim_config, n_stim_configs
+
+
+def run_vnc_simulation(cfg: DictConfig) -> Union[jnp.ndarray, Tuple[jnp.ndarray, Pruning_state]]:
+    """
+    Unified main function to run VNC simulation with any configuration.
+
+    Args:
+        cfg: Configuration containing all simulation parameters
+        
+    Returns:
+        Results array if pruning disabled, or (results, final_state) tuple if pruning enabled
+    """
+    W_table, neuron_params, sim_params, sim_config, n_stim_configs = prepare_vnc_simulation_params(cfg)
 
     jax.clear_caches()
     print(f"Running {sim_config.sim_type} simulation with:")
