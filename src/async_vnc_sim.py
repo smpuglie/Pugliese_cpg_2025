@@ -505,7 +505,11 @@ class AsyncPruningManager:
         pending_sims = list(range(total_simulations))
         active_tasks = {}  # task -> sim_index mapping
         task_devices = {}  # task -> device_id mapping
-        device_assignment_counter = 0  # for round-robin device assignment
+        device_load_counts = {i: 0 for i in range(self.n_devices)}  # track sims per device
+        
+        def get_least_loaded_device():
+            """Get the device with the least number of active simulations."""
+            return min(device_load_counts.keys(), key=lambda device_id: device_load_counts[device_id])
         
         # Progress tracking
         completed_count = 0
@@ -539,6 +543,10 @@ class AsyncPruningManager:
                         active_sims_str = ", ".join([f"Sim{sim_idx}" for sim_idx in active_tasks.values()])
                         async_logger.log_batch(f"Active: {active_sims_str}")
                     
+                    # Show device load balancing
+                    load_str = ", ".join([f"GPU{device_id}: {load}" for device_id, load in device_load_counts.items()])
+                    async_logger.log_batch(f"Device loads: {load_str}")
+                    
                     last_report_time = current_time
         
         # Start progress monitoring
@@ -549,13 +557,13 @@ class AsyncPruningManager:
             for _ in range(min(max_concurrent, len(pending_sims))):
                 if pending_sims:
                     sim_idx = pending_sims.pop(0)
-                    # Assign device using round-robin
-                    device_id = device_assignment_counter % self.n_devices
-                    device_assignment_counter += 1
+                    # Assign to least loaded device
+                    device_id = get_least_loaded_device()
+                    device_load_counts[device_id] += 1
                     task = asyncio.create_task(self._process_single_simulation(sim_idx, assigned_device=device_id))
                     active_tasks[task] = sim_idx
                     task_devices[task] = device_id
-                    async_logger.log_batch(f"Started Sim {sim_idx} on device {device_id} ({len(active_tasks)}/{max_concurrent} slots used)")
+                    async_logger.log_batch(f"Started Sim {sim_idx} on device {device_id} (load: {device_load_counts[device_id]}) ({len(active_tasks)}/{max_concurrent} slots used)")
             
             # Main streaming loop
             while active_tasks:
@@ -571,6 +579,7 @@ class AsyncPruningManager:
                     device_id = task_devices[task]  # Get the device this task was using
                     del active_tasks[task]
                     del task_devices[task]
+                    device_load_counts[device_id] -= 1  # Decrease load count for this device
                     completed_count += 1
                     
                     try:
@@ -579,11 +588,11 @@ class AsyncPruningManager:
                         results_dict[sim_idx] = final_results
                         states_dict[sim_idx] = final_state
                         
-                        async_logger.log_batch(f"✅ Completed Sim {sim_idx} on device {device_id} ({completed_count}/{total_simulations})")
+                        async_logger.log_batch(f"✅ Completed Sim {sim_idx} on device {device_id} (load: {device_load_counts[device_id]}) ({completed_count}/{total_simulations})")
                         
                     except Exception as e:
                         failed_sims.add(sim_idx)
-                        async_logger.log_batch(f"❌ Failed Sim {sim_idx} on device {device_id}: {str(e)[:100]}")
+                        async_logger.log_batch(f"❌ Failed Sim {sim_idx} on device {device_id} (load: {device_load_counts[device_id]}): {str(e)[:100]}")
                         
                         # Create empty result for failed simulation
                         empty_result = jnp.zeros((self.sim_params.n_neurons, len(self.sim_params.t_axis)))
@@ -594,13 +603,13 @@ class AsyncPruningManager:
                 # Start new simulations to fill available slots
                 while len(active_tasks) < max_concurrent and pending_sims:
                     sim_idx = pending_sims.pop(0)
-                    # Use round-robin device assignment
-                    device_id = device_assignment_counter % self.n_devices
-                    device_assignment_counter += 1
+                    # Assign to least loaded device
+                    device_id = get_least_loaded_device()
+                    device_load_counts[device_id] += 1
                     task = asyncio.create_task(self._process_single_simulation(sim_idx, assigned_device=device_id))
                     active_tasks[task] = sim_idx
                     task_devices[task] = device_id
-                    async_logger.log_batch(f"🚀 Started Sim {sim_idx} on device {device_id} ({len(active_tasks)}/{max_concurrent} slots used, {len(pending_sims)} pending)")
+                    async_logger.log_batch(f"🚀 Started Sim {sim_idx} on device {device_id} (load: {device_load_counts[device_id]}) ({len(active_tasks)}/{max_concurrent} slots used, {len(pending_sims)} pending)")
             
         finally:
             monitor_task.cancel()
