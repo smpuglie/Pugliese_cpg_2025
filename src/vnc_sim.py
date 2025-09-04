@@ -839,7 +839,7 @@ def calculate_optimal_batch_size(n_neurons: int, n_timepoints: int, n_replicates
     output_size = n_neurons * n_timepoints * 4  # float32
     intermediate_size = output_size * 2  # ODE solver intermediates (reduced)
     weight_ops_size = n_neurons * n_neurons * 4  # Weight matrix operations
-    overhead_factor = 1.5  # JAX compilation and caching overhead (reduced)
+    overhead_factor = 1.75  # JAX compilation and caching overhead (reduced)
     
     bytes_per_sample = (output_size + intermediate_size + weight_ops_size) * overhead_factor
     
@@ -939,15 +939,15 @@ def initialize_pruning_state(
     all_neurons = jnp.arange(neuron_params.W.shape[-1])
     in_idxs = jnp.setdiff1d(all_neurons, mn_idxs)
 
-    W_mask = jnp.full((batch_size, neuron_params.W.shape[0], neuron_params.W.shape[1]), 1, dtype=jnp.bool)
+    W_mask = jnp.full((batch_size, neuron_params.W.shape[0], neuron_params.W.shape[1]), 1, dtype=jnp.bool_)
     interneuron_mask = jnp.full((batch_size, W_mask.shape[-1]), fill_value=False, dtype=jnp.bool_)
     interneuron_mask = interneuron_mask.at[:, in_idxs].set(True)
     level = jnp.zeros((batch_size, 1), dtype=jnp.int32)
-    total_removed_neurons = jnp.full((batch_size, W_mask.shape[-1]), False, dtype=jnp.bool)
-    removed_stim_neurons = jnp.full([batch_size, total_removed_neurons.shape[-1]], False, dtype=jnp.bool)
-    neurons_put_back = jnp.full([batch_size, total_removed_neurons.shape[-1]], False, dtype=jnp.bool)
-    prev_put_back = jnp.full([batch_size, total_removed_neurons.shape[-1]], False, dtype=jnp.bool)
-    last_removed = jnp.full([batch_size, total_removed_neurons.shape[-1]], False, dtype=jnp.bool)
+    total_removed_neurons = jnp.full((batch_size, W_mask.shape[-1]), False, dtype=jnp.bool_)
+    removed_stim_neurons = jnp.full([batch_size, total_removed_neurons.shape[-1]], False, dtype=jnp.bool_)
+    neurons_put_back = jnp.full([batch_size, total_removed_neurons.shape[-1]], False, dtype=jnp.bool_)
+    prev_put_back = jnp.full([batch_size, total_removed_neurons.shape[-1]], False, dtype=jnp.bool_)
+    last_removed = jnp.full([batch_size, total_removed_neurons.shape[-1]], False, dtype=jnp.bool_)
     min_circuit = jnp.full((batch_size, 1), False)
 
     # Initialize probabilities
@@ -1404,10 +1404,10 @@ def _run_with_pruning(
         if n_devices > 1:
             flat_state = reshape_state_from_pmap(state)
             mini_circuit = (~flat_state.total_removed_neurons) | flat_state.last_removed | flat_state.prev_put_back
-            W_mask_init = jnp.ones_like(flat_state.W_mask, dtype=jnp.bool)
+            W_mask_init = jnp.ones_like(flat_state.W_mask, dtype=jnp.bool_)
         else: 
             mini_circuit = (~state.total_removed_neurons) | state.last_removed | state.prev_put_back
-            W_mask_init = jnp.ones_like(state.W_mask, dtype=jnp.bool)
+            W_mask_init = jnp.ones_like(state.W_mask, dtype=jnp.bool_)
             flat_state = state
         
         W_mask_new = (W_mask_init * mini_circuit[:, :, None] * mini_circuit[:, None, :]).astype(jnp.bool_)
@@ -1554,14 +1554,14 @@ def prepare_neuron_params(cfg: DictConfig, W_table: Any, param_path: Optional[Pa
     exc_dn_idxs, inh_dn_idxs, exc_in_idxs, inh_in_idxs, mn_idxs = extract_shuffle_indices(W_table)
     
     # Initialize W_mask for pruning if needed
-    W_mask = jnp.ones((num_sims, W.shape[0], W.shape[1]), dtype=jnp.bool)
+    W_mask = jnp.ones((num_sims, W.shape[0], W.shape[1]), dtype=jnp.bool_)
     if len(cfg.experiment.removeNeurons) > 0:
         W_mask = W_mask.at[:, cfg.experiment.removeNeurons, :].set(False)
         W_mask = W_mask.at[:, :, cfg.experiment.removeNeurons].set(False)
         print(f"Initial removal of neurons at indices: {cfg.experiment.removeNeurons}")
     elif len(cfg.experiment.keepOnly) > 0:
         mn_mask = jnp.isin(jnp.arange(n_neurons), mn_idxs)
-        keep_neurons = jnp.zeros(n_neurons, dtype=jnp.bool)
+        keep_neurons = jnp.zeros(n_neurons, dtype=jnp.bool_)
         keep_neurons = keep_neurons.at[jnp.asarray(cfg.experiment.keepOnly)].set(True)
         keep_neurons = jnp.where(keep_neurons | mn_mask, True, False)
         W_mask = W_mask.at[:, keep_neurons, :].set(True)
