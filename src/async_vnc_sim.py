@@ -257,9 +257,9 @@ def calculate_optimal_concurrent_size(
     # Choose reasonable upper limit based on hardware
     if gpu_memory is not None:
         if n_gpu_devices == 1:
-            reasonable_upper_limit = min(16, max_concurrent)  # Conservative for single GPU
+            reasonable_upper_limit = min(32, max_concurrent)  # Conservative for single GPU
         else:
-            reasonable_upper_limit = min(32, max_concurrent)  # Higher for multi-GPU
+            reasonable_upper_limit = min(32 * n_gpu_devices, max_concurrent)  # Higher for multi-GPU
     else:
         reasonable_upper_limit = min(8, max_concurrent)  # Lower for CPU
     
@@ -285,7 +285,7 @@ def calculate_optimal_concurrent_size(
             print(f"Final concurrent size (single GPU): {optimal_concurrent}")
         else:
             optimal_concurrent = max(4, optimal_concurrent)  # Minimum of 4 for multi-GPU
-            optimal_concurrent = min(optimal_concurrent, 32)  # Max of 32 for multi-GPU
+            optimal_concurrent = min(optimal_concurrent, 128)  # Max of 128 for multi-GPU
             print(f"Final concurrent size (multi-GPU): {optimal_concurrent}")
     else:
         optimal_concurrent = max(1, optimal_concurrent)  # Minimum of 1 for CPU
