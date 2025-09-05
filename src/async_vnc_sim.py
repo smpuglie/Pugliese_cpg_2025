@@ -79,7 +79,7 @@ def calculate_optimal_concurrent_size(
     n_timepoints: int, 
     total_simulations: int,
     n_devices: int = None, 
-    max_concurrent: int = 126,
+    max_concurrent: int = 64,
     is_pruning: bool = False
 ) -> int:
     """
@@ -669,9 +669,9 @@ class AsyncPruningManager:
                 available_neurons = jnp.sum(~sim_state.pruning_state.total_removed_neurons & ~mn_mask)
                 removed_neurons = jnp.sum(sim_state.pruning_state.total_removed_neurons)
                 put_back_neurons = jnp.sum(sim_state.pruning_state.neurons_put_back)
-                
-                # Compact progress logging - only every 5 iterations or significant changes
-                if iteration % 5 == 0 or iteration < 3:
+
+                # Compact progress logging - only every 10 iterations or significant changes
+                if iteration % 10 == 0 or iteration < 3:
                     async_logger.log_sim(sim_index, 
                         f"Iter {iteration:2d}: {available_neurons:4d} avail, {removed_neurons:4d} removed, {put_back_neurons:3d} put back, Level {sim_state.pruning_state.level[0]}", 
                         "PROGRESS")
