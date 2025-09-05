@@ -79,7 +79,7 @@ def calculate_optimal_concurrent_size(
     n_timepoints: int, 
     total_simulations: int,
     n_devices: int = None, 
-    max_concurrent: int = 32,
+    max_concurrent: int = 126,
     is_pruning: bool = False
 ) -> int:
     """
