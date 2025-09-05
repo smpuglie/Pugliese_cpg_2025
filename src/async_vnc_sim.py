@@ -450,7 +450,7 @@ class AsyncPruningManager:
                 put_back_neurons = jnp.sum(sim_state.pruning_state.neurons_put_back)
                 
                 # Compact progress logging - only every 5 iterations or significant changes
-                if iteration % 10 == 0 or iteration < 3:
+                if iteration % 5 == 0 or iteration < 3:
                     async_logger.log_sim(sim_index, 
                         f"Iter {iteration:2d}: {available_neurons:4d} avail, {removed_neurons:4d} removed, {put_back_neurons:3d} put back, Level {sim_state.pruning_state.level[0]}", 
                         "PROGRESS")
@@ -512,14 +512,16 @@ class AsyncPruningManager:
             iteration += 1
             
             # Periodic memory cleanup to prevent accumulation
-            if iteration % 20 == 0:  # Reduce frequency to avoid overhead  
-                # Clear JAX caches every 20 iterations to prevent memory buildup
-                jax.clear_caches()
-                
-                # Force garbage collection only when needed
+            if iteration % 100 == 0:  # Clean up every 10 iterations
+                # Clean up intermediate results
+                del results, updated_state
+                # Force garbage collection periodically
                 import gc
-                if iteration % 40 == 0:  # Less frequent GC
-                    gc.collect()
+                gc.collect()
+
+                # Clear JAX caches every 100 iterations to prevent memory buildup
+                if iteration % 100 == 0:
+                    jax.clear_caches()
             
             # Yield control to allow other simulations to run
             await asyncio.sleep(0)
@@ -707,8 +709,8 @@ class AsyncPruningManager:
             while pending_sims or active_tasks:
                 await asyncio.sleep(10)  # Update every 10 seconds
                 current_time = time.time()
-                
-                if current_time - last_report_time >= 30:  # Detailed report every 30 seconds
+
+                if current_time - last_report_time >= 60:  # Detailed report every 60 seconds
                     elapsed = current_time - start_time
                     rate = completed_count / elapsed if elapsed > 0 else 0
                     eta = (total_simulations - completed_count) / rate if rate > 0 else float('inf')

@@ -1367,8 +1367,8 @@ def _run_with_pruning(
             print(f"Batch {i + 1}/{n_batches}, Iteration {iteration}")
             
             # Clear caches periodically to prevent memory buildup
-            if iteration % 10 == 0:
-                jax.clear_caches()
+            # if iteration % 10 == 0:
+            #     jax.clear_caches()
                 
             # Update neuron parameters W_mask based on the current state
             if n_devices > 1:
