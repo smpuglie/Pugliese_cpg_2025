@@ -18,3 +18,4 @@ high_fr_threshold: 100.0 # Upper limit for high frequency neurons
 
 # Checkpointing configuration
 enable_checkpointing: False # Enable intermediate checkpointing
+async_mode: "sync"  # Options: "sync", "streaming"

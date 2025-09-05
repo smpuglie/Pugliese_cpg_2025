@@ -23,6 +23,11 @@ from src.data_classes import (
 from src.checkpointing import (
     load_checkpoint, save_checkpoint, find_latest_checkpoint, cleanup_old_checkpoints
 )
+from src.adaptive_memory import (
+    aggressive_memory_cleanup, monitor_memory_usage, should_trigger_cleanup,
+    get_conservative_batch_size, log_memory_status, create_memory_manager, 
+    optimize_for_performance_vs_stability
+)
 
 # #############################################################################################################################=
 # CORE SIMULATION FUNCTIONS - ALL JIT COMPILED
@@ -851,9 +856,11 @@ def calculate_optimal_batch_size(n_neurons: int, n_timepoints: int, n_replicates
     
     # Choose memory limit based on available hardware
     if gpu_memory is not None:
-        # With 2x Titan RTX (48GB total), use 80% for computations
-        usable_memory = gpu_memory * 0.8
+        # Use more conservative memory allocation (70% instead of 80%) for better stability
+        # This prevents memory fragmentation issues in large batch simulations
+        usable_memory = gpu_memory * 0.70
         print(f"Using GPU memory constraint: {usable_memory / (1024 ** 3):.2f} GB ({gpu_memory / (1024 ** 3):.0f}GB total)")
+        print("  Using conservative 70% limit to prevent memory fragmentation in large batch simulations")
     else:
         # Use system memory with reasonable safety margin (50% of available, max 32GB)
         usable_memory = min(available_memory * 0.5, 32 * (1024 ** 3))
@@ -1216,8 +1223,32 @@ def _run_stim_neurons(
             
             cleanup_old_checkpoints(checkpoint_dir=checkpoint_dir, keep_last_n=2)
 
+        # Enhanced memory cleanup for large simulations
         del batch_results  # Free memory
         gc.collect()  # Force garbage collection
+        
+        # More aggressive cleanup for large batch simulations to prevent OOM
+        if total_sims >= 1024 or batch_size >= 64:  # Large simulations
+            if (i + 1) % 5 == 0:  # Every 5 batches for large sims
+                jax.clear_caches()
+                gc.collect()
+                print(f"  Aggressive memory cleanup after batch {i + 1}")
+        else:
+            if (i + 1) % 10 == 0:  # Every 10 batches for normal sims
+                jax.clear_caches()
+                print(f"  Memory cleanup after batch {i + 1}")
+                
+        # Memory monitoring for large simulations
+        if total_sims >= 1024 and (i + 1) % 5 == 0:
+            try:
+                import psutil
+                memory_info = psutil.virtual_memory()
+                memory_percent = memory_info.percent
+                available_gb = memory_info.available / (1024**3)
+                if memory_percent > 80:
+                    print(f"  ⚠️ Warning: High memory usage {memory_percent:.1f}% ({available_gb:.1f}GB free)")
+            except:
+                pass
 
     # If adjustStimI was used, run a final set of simulations with the final adjusted stimuli
     if sim_config.adjustStimI:
@@ -1299,6 +1330,12 @@ def _run_with_pruning(
 ) -> Tuple[jnp.ndarray, List[Pruning_state]]:
     """Run simulation with pruning, saving states across all batches."""
     
+    # Initialize adaptive memory manager for optimal performance
+    memory_manager = create_memory_manager(
+        total_simulations=total_sims,
+        simulation_type="pruning"
+    )
+    
     # Pre-compute static values that won't change during the loop
     oscillation_threshold_val = float(sim_config.oscillation_threshold)
     clip_start_val = int(sim_params.pulse_start / sim_params.dt) + 200
@@ -1328,6 +1365,15 @@ def _run_with_pruning(
         start_idx = i * batch_size
         end_idx = min((i + 1) * batch_size, total_sims)
         actual_batch_size = end_idx - start_idx
+        
+        print(f"Processing batch {i + 1}/{n_batches} (sims {start_idx}-{end_idx-1})")
+        
+        # Monitor memory at batch start and apply recommendations
+        memory_info = monitor_memory_usage()
+        if memory_info.get('memory_pressure') in ['high', 'critical']:
+            cleanup_performed = memory_manager.monitor_and_cleanup_if_needed(start_idx, warn_threshold=85.0)
+            if cleanup_performed:
+                print(f"  Applied memory cleanup before batch {i + 1}")
         
         batch_indices = jnp.arange(start_idx, end_idx)
         
@@ -1366,9 +1412,11 @@ def _run_with_pruning(
             start_time = time.time()
             print(f"Batch {i + 1}/{n_batches}, Iteration {iteration}")
             
-            # Clear caches periodically to prevent memory buildup
-            # if iteration % 10 == 0:
-            #     jax.clear_caches()
+            # Use adaptive memory manager for optimized cleanup
+            cleanup_result = memory_manager.should_cleanup(i * batch_size, iteration)
+            if cleanup_result:
+                memory_manager.perform_cleanup(context=f"batch_{i}_iter_{iteration}")
+                print(f"  Memory cleanup at iteration {iteration}")
                 
             # Update neuron parameters W_mask based on the current state
             if n_devices > 1:

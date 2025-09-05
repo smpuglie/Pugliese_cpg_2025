@@ -10,10 +10,9 @@ import psutil
 from typing import NamedTuple, Dict, Any, Optional, Tuple, List, Union
 from pathlib import Path
 import threading
-from queue import Queue, Empty
+from queue import Queue
 from dataclasses import dataclass, field
 from collections import defaultdict
-import logging
 
 # Import existing simulation components
 from src.vnc_sim import (
@@ -22,7 +21,10 @@ from src.vnc_sim import (
 )
 from src.shuffle_utils import full_shuffle
 from src.data_classes import NeuronParams, SimParams, SimulationConfig, Pruning_state
-from src.sim_utils import load_wTable
+from src.adaptive_memory import (
+    monitor_memory_usage, get_conservative_batch_size, log_memory_status, get_gpu_count,
+    create_memory_manager, calculate_optimal_concurrent_size
+)
 
 class AsyncLogger:
     """Thread-safe logger for async simulations with better formatting."""
@@ -72,229 +74,6 @@ class AsyncLogger:
 
 # Global logger instance
 async_logger = AsyncLogger()
-
-
-def calculate_optimal_concurrent_size(
-    n_neurons: int, 
-    n_timepoints: int, 
-    total_simulations: int,
-    n_devices: int = None, 
-    max_concurrent: int = 64,
-    is_pruning: bool = False
-) -> int:
-    """
-    Calculate optimal max_concurrent size for async streaming based on memory and device constraints.
-    
-    Args:
-        n_neurons: Number of neurons in the model
-        n_timepoints: Number of time points per simulation
-        total_simulations: Total number of simulations to run
-        n_devices: Number of devices available (defaults to JAX device count)
-        max_concurrent: Maximum allowed concurrent simulations (default 32)
-        is_pruning: Whether this is for pruning simulations (affects memory calculation)
-    
-    Returns:
-        Optimal max_concurrent size for async streaming execution
-    """
-    print("Calculating optimal concurrent batch size for async streaming...")
-    
-    if n_devices is None:
-        n_devices = jax.device_count()
-    
-    # Handle edge case where we have fewer simulations than devices
-    if total_simulations < n_devices:
-        return total_simulations
-    
-    # Get memory information
-    memory_info = psutil.virtual_memory()
-    available_memory = memory_info.available
-    total_memory = memory_info.total
-    
-    print(f"System memory: {total_memory / (1024 ** 3):.2f} GB total, {available_memory / (1024 ** 3):.2f} GB available")
-    
-    # Try to get GPU memory if available
-    gpu_memory = None
-    n_gpu_devices = 0
-    gpu_memory_per_device = None
-    
-    try:
-        devices = jax.devices()
-        gpu_devices = [d for d in devices if 'gpu' in str(d).lower() or 'cuda' in str(d).lower()]
-        n_gpu_devices = len(gpu_devices)
-        
-        if n_gpu_devices > 0:
-            # Try different methods to get GPU memory
-            try:
-                import pynvml
-                pynvml.nvmlInit()
-                
-                device_memories = []
-                for i in range(n_gpu_devices):
-                    handle = pynvml.nvmlDeviceGetHandleByIndex(i)
-                    info = pynvml.nvmlDeviceGetMemoryInfo(handle)
-                    device_name = pynvml.nvmlDeviceGetName(handle).decode('utf-8')
-                    memory_gb = info.total / (1024 ** 3)
-                    device_memories.append(info.total)
-                    print(f"GPU {i}: {device_name} - {memory_gb:.1f}GB")
-                
-                gpu_memory_per_device = device_memories[0]
-                total_gpu_memory = sum(device_memories)
-                gpu_memory = total_gpu_memory
-                
-                print(f"Detected {n_gpu_devices} GPU device(s) via nvidia-ml")
-                
-            except ImportError:
-                print("pynvml not available, using fallback GPU memory estimation...")
-                
-                # Fallback - estimate based on common GPU types
-                device_str = str(gpu_devices[0]).lower()
-                if 'titan' in device_str and 'rtx' in device_str:
-                    gpu_memory_per_device = 24 * (1024 ** 3)  # Titan RTX: 24GB
-                    print("Detected Titan RTX-like GPU, assuming 24GB per device")
-                elif 'rtx' in device_str:
-                    if '4090' in device_str:
-                        gpu_memory_per_device = 24 * (1024 ** 3)  # RTX 4090: 24GB
-                        print("Detected RTX 4090-like GPU, assuming 24GB per device")
-                    elif '3090' in device_str:
-                        gpu_memory_per_device = 24 * (1024 ** 3)  # RTX 3090: 24GB
-                        print("Detected RTX 3090-like GPU, assuming 24GB per device")
-                    elif '4080' in device_str:
-                        gpu_memory_per_device = 16 * (1024 ** 3)  # RTX 4080: 16GB
-                        print("Detected RTX 4080-like GPU, assuming 16GB per device")
-                    elif '3080' in device_str:
-                        gpu_memory_per_device = 10 * (1024 ** 3)  # RTX 3080: 10GB
-                        print("Detected RTX 3080-like GPU, assuming 10GB per device")
-                    else:
-                        gpu_memory_per_device = 12 * (1024 ** 3)  # Conservative RTX estimate
-                        print("Detected RTX-like GPU, assuming 12GB per device (conservative)")
-                elif 'v100' in device_str:
-                    gpu_memory_per_device = 32 * (1024 ** 3)  # Tesla V100: 32GB
-                    print("Detected V100-like GPU, assuming 32GB per device")
-                elif 'a100' in device_str:
-                    gpu_memory_per_device = 40 * (1024 ** 3)  # A100: 40GB (or 80GB, use conservative)
-                    print("Detected A100-like GPU, assuming 40GB per device")
-                else:
-                    gpu_memory_per_device = 8 * (1024 ** 3)  # Very conservative fallback
-                    print("Unknown GPU type, assuming 8GB per device (conservative)")
-                
-                total_gpu_memory = gpu_memory_per_device * n_gpu_devices
-                gpu_memory = total_gpu_memory
-                
-                if n_gpu_devices == 1:
-                    print(f"Estimated GPU memory: {gpu_memory_per_device / (1024 ** 3):.0f}GB available")
-                else:
-                    print(f"Estimated GPU memory: {gpu_memory_per_device / (1024 ** 3):.0f}GB per device, {total_gpu_memory / (1024 ** 3):.0f}GB total")
-        else:
-            print("No GPU devices detected - using CPU mode")
-            
-    except Exception as e:
-        print(f"GPU detection failed: {e}")
-        pass
-    
-    # Estimate memory usage per concurrent simulation
-    # For async streaming, each concurrent simulation needs:
-    # 1. Output array: n_neurons * n_timepoints * 4 bytes (float32)
-    # 2. Intermediate computations: ~1.5x output for async overhead (less than sync)
-    # 3. Weight matrix operations: n_neurons^2 * 4 bytes (shared across sims)
-    # 4. Pruning overhead: Additional state if pruning enabled
-    
-    output_size = n_neurons * n_timepoints * 4  # float32
-    intermediate_size = output_size * 1.5  # Async has less intermediate storage
-    weight_ops_size = n_neurons * n_neurons * 4  # Weight matrix operations (shared)
-    
-    # Pruning simulations need additional memory for state tracking
-    if is_pruning:
-        pruning_overhead = n_neurons * 20 * 4  # Approximate pruning state overhead
-        overhead_factor = 2.0  # Higher overhead for pruning iterations
-        print("Accounting for pruning simulation overhead")
-    else:
-        pruning_overhead = 0
-        overhead_factor = 1.5  # Lower overhead for regular simulations
-    
-    # Memory per concurrent simulation (weight matrix is shared)
-    bytes_per_concurrent_sim = (output_size + intermediate_size + pruning_overhead) * overhead_factor
-    # Shared memory (weight matrix) - only counted once regardless of concurrent sims
-    shared_memory = weight_ops_size * overhead_factor
-    
-    print(f"Estimated memory per concurrent simulation: {bytes_per_concurrent_sim / (1024 ** 2):.1f} MB")
-    print(f"Shared memory (weight matrix): {shared_memory / (1024 ** 2):.1f} MB")
-    print(f"Overhead factor: {overhead_factor}x")
-    
-    # Choose memory limit based on available hardware
-    if gpu_memory is not None:
-        # Use 75% of GPU memory for concurrent operations (more conservative for streaming)
-        usable_memory = gpu_memory * 0.75
-        print(f"Using GPU memory constraint: {usable_memory / (1024 ** 3):.2f} GB ({gpu_memory / (1024 ** 3):.0f}GB total)")
-    else:
-        # Use system memory with safety margin
-        usable_memory = min(available_memory * 0.4, 16 * (1024 ** 3))
-        print(f"Using system memory constraint: {usable_memory / (1024 ** 3):.2f} GB")
-    
-    # Calculate memory-constrained concurrent size
-    available_for_concurrent = usable_memory - shared_memory
-    if available_for_concurrent <= 0:
-        print("Warning: Shared memory exceeds available memory, using minimal concurrent size")
-        max_memory_concurrent = 1
-    else:
-        max_memory_concurrent = max(1, int(available_for_concurrent / bytes_per_concurrent_sim))
-    
-    print(f"Memory-limited max concurrent: {max_memory_concurrent}")
-    
-    # Start with device-based baseline for async streaming
-    if gpu_memory is not None:
-        if n_gpu_devices == 1:
-            # Single GPU: moderate concurrency for stability
-            baseline_concurrent = max(4, n_devices * 3)
-            print(f"Baseline concurrent (single GPU): {baseline_concurrent}")
-        else:
-            # Multi-GPU: higher concurrency to utilize parallel processing
-            baseline_concurrent = max(8, n_devices * 4)
-            print(f"Baseline concurrent (multi-GPU): {baseline_concurrent}")
-    else:
-        # CPU: lower concurrency
-        baseline_concurrent = max(2, n_devices * 2)
-        print(f"Baseline concurrent (CPU): {baseline_concurrent}")
-    
-    # Choose reasonable upper limit based on hardware
-    if gpu_memory is not None:
-        if n_gpu_devices == 1:
-            reasonable_upper_limit = min(32, max_concurrent)  # Conservative for single GPU
-        else:
-            reasonable_upper_limit = min(32 * n_gpu_devices, max_concurrent)  # Higher for multi-GPU
-    else:
-        reasonable_upper_limit = min(8, max_concurrent)  # Lower for CPU
-    
-    # Balance memory constraint with baseline and upper limits
-    memory_limited_concurrent = min(max_memory_concurrent, reasonable_upper_limit)
-    optimal_concurrent = max(baseline_concurrent, memory_limited_concurrent)
-    
-    print(f"Initial optimal concurrent: {optimal_concurrent}")
-    
-    # Special case: if we have very few simulations, limit concurrency
-    if total_simulations <= optimal_concurrent:
-        optimal_concurrent = total_simulations
-        print(f"Limited by total simulations: {optimal_concurrent}")
-    
-    # Ensure we don't exceed the hard limit
-    optimal_concurrent = min(optimal_concurrent, max_concurrent)
-    
-    # Final safety checks
-    if gpu_memory is not None:
-        if n_gpu_devices == 1:
-            optimal_concurrent = max(2, optimal_concurrent)  # Minimum of 2 for single GPU
-            optimal_concurrent = min(optimal_concurrent, 16)  # Max of 16 for single GPU stability
-            print(f"Final concurrent size (single GPU): {optimal_concurrent}")
-        else:
-            optimal_concurrent = max(4, optimal_concurrent)  # Minimum of 4 for multi-GPU
-            optimal_concurrent = min(optimal_concurrent, 128)  # Max of 128 for multi-GPU
-            print(f"Final concurrent size (multi-GPU): {optimal_concurrent}")
-    else:
-        optimal_concurrent = max(1, optimal_concurrent)  # Minimum of 1 for CPU
-        optimal_concurrent = min(optimal_concurrent, 8)  # Max of 8 for CPU
-        print(f"Final concurrent size (CPU): {optimal_concurrent}")
-    
-    print(f'Final optimal max_concurrent for async streaming: {optimal_concurrent}')
-    return optimal_concurrent
 
 
 @dataclass
@@ -368,6 +147,14 @@ class AsyncPruningManager:
         self.neuron_params = neuron_params
         self.sim_params = sim_params
         self.sim_config = sim_config
+        
+        # Initialize adaptive memory manager
+        total_sims = sim_params.n_stim_configs * sim_params.n_param_sets
+        self.memory_manager = create_memory_manager(
+            total_simulations=total_sims,
+            simulation_type="pruning"
+        )
+    
         
         # Pre-create the motor neuron mask once to ensure consistency
         # Force mn_idxs to CPU to avoid device placement issues
@@ -726,19 +513,23 @@ class AsyncPruningManager:
             sim_state.last_update_time = time.time()
             iteration += 1
             
-            # Periodic memory cleanup to prevent accumulation
-            if iteration % 100 == 0:  # Clean up every 10 iterations
-                # Clean up intermediate results
-                del results, updated_state
-                # Force garbage collection periodically
-                import gc
-                gc.collect()
-
-                # Clear JAX caches every 100 iterations to prevent memory buildup
-                if iteration % 100 == 0:
-                    jax.clear_caches()
+            # Use adaptive memory manager for optimized cleanup
+            cleanup_result = self.memory_manager.should_cleanup(sim_index, iteration)
+            if cleanup_result:
+                self.memory_manager.perform_cleanup(context=f"sim_{sim_index}_iter_{iteration}")
+                async_logger.log_sim(sim_index, f"Memory cleanup at iteration {iteration}", "PROGRESS")
             
-            # Yield control to allow other simulations to run
+            # Monitor memory usage for large simulations
+            if sim_index % 100 == 0 and iteration % 50 == 0:  # Sample monitoring
+                memory_status = monitor_memory_usage(sim_index)
+                if memory_status.get('ram_warning', False) or memory_status.get('gpu_warning', False):
+                    log_memory_status(memory_status, 
+                                    lambda msg: async_logger.log_sim(sim_index, f"Memory: {msg}", "PROGRESS"),
+                                    "")
+                    # Trigger cleanup if memory is high
+                    cleanup_performed = self.memory_manager.monitor_and_cleanup_if_needed(sim_index, warn_threshold=85.0)
+                    if cleanup_performed:
+                        async_logger.log_sim(sim_index, "Emergency memory cleanup triggered", "PROGRESS")            # Yield control to allow other simulations to run
             await asyncio.sleep(0)
         
         # Run final simulation with converged pruned network
@@ -925,7 +716,7 @@ class AsyncPruningManager:
         completed_count = 0
         start_time = time.time()
         
-        # Create simplified progress monitoring task
+        # Create simplified progress monitoring task with memory tracking
         async def monitor_progress():
             nonlocal completed_count
             last_report_time = start_time
@@ -942,11 +733,43 @@ class AsyncPruningManager:
                     active_count = len(active_tasks)
                     pending_count = len(pending_sims)
                     
-                    async_logger.log_batch(
-                        f"Streaming Progress: {completed_count}/{total_simulations} completed, "
-                        f"{active_count} active, {pending_count} pending | "
-                        f"Rate: {rate:.2f} sims/sec, ETA: {eta/60:.1f} min"
-                    )
+                    # Memory monitoring for large simulations
+                    try:
+                        import psutil
+                        memory_info = psutil.virtual_memory()
+                        memory_percent = memory_info.percent
+                        available_gb = memory_info.available / (1024**3)
+                        
+                        # GPU memory monitoring if possible
+                        gpu_memory_status = ""
+                        try:
+                            import pynvml
+                            pynvml.nvmlInit()
+                            handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+                            info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+                            gpu_used_gb = info.used / (1024**3)
+                            gpu_free_gb = info.free / (1024**3)
+                            gpu_memory_status = f" | GPU: {gpu_used_gb:.1f}GB used, {gpu_free_gb:.1f}GB free"
+                        except:
+                            pass
+                            
+                        memory_warning = ""
+                        if memory_percent > 85 or available_gb < 5:
+                            memory_warning = " ⚠️ LOW MEMORY!"
+                        
+                        async_logger.log_batch(
+                            f"Streaming Progress: {completed_count}/{total_simulations} completed, "
+                            f"{active_count} active, {pending_count} pending | "
+                            f"Rate: {rate:.2f} sims/sec, ETA: {eta/60:.1f} min | "
+                            f"RAM: {memory_percent:.1f}% used, {available_gb:.1f}GB free{gpu_memory_status}{memory_warning}"
+                        )
+                    except:
+                        # Fallback without memory monitoring
+                        async_logger.log_batch(
+                            f"Streaming Progress: {completed_count}/{total_simulations} completed, "
+                            f"{active_count} active, {pending_count} pending | "
+                            f"Rate: {rate:.2f} sims/sec, ETA: {eta/60:.1f} min"
+                        )
                     
                     # Show active simulation details
                     if active_tasks:
@@ -1113,12 +936,20 @@ class AsyncPruningManager:
                 
                 # Comprehensive memory cleanup after processing completed simulations
                 if done_tasks:
-                    # Clear JAX caches periodically to prevent memory accumulation
-                    jax.clear_caches()
+                    # Clear JAX caches more aggressively to prevent memory fragmentation
+                    if len(done_tasks) >= 2 or completed_count % 10 == 0:
+                        jax.clear_caches()
                     
-                    # Force garbage collection
+                    # Force garbage collection more frequently for large simulations
                     import gc
                     gc.collect()
+                    
+                    # Aggressive memory cleanup every 50 simulations to prevent OOM
+                    if completed_count > 0 and completed_count % 50 == 0:
+                        # Force more aggressive cleanup for long-running simulations
+                        jax.clear_caches()
+                        gc.collect()
+                        async_logger.log_batch(f"🧹 Aggressive memory cleanup at sim {completed_count}")
                     
                     # Log memory cleanup
                     if len(done_tasks) > 0:
@@ -1200,6 +1031,7 @@ def run_streaming_pruning_simulation(
     - Better GPU utilization (slots filled immediately)
     - Faster overall completion time
     - Real-time progress monitoring
+    - Enhanced memory management for large simulations (n_replicates >= 1024)
     
     Args:
         neuron_params: Neuron parameters
@@ -1212,15 +1044,21 @@ def run_streaming_pruning_simulation(
     """
     total_sims = sim_params.n_stim_configs * sim_params.n_param_sets
     
-    # Calculate optimal max_concurrent if not provided
+# Calculate optimal max_concurrent if not provided, with conservative adjustments for large sims
     if max_concurrent is None:
-        max_concurrent = calculate_optimal_concurrent_size(
+        calculated_max_concurrent = calculate_optimal_concurrent_size(
             n_neurons=sim_params.n_neurons,
             n_timepoints=len(sim_params.t_axis),
             total_simulations=total_sims,
             is_pruning=True
         )
-        print(f"Auto-calculated max_concurrent for pruning: {max_concurrent}")
+        # Apply conservative adjustment for very large simulations
+        # Get GPU count for conservative calculations  
+        n_gpus = get_gpu_count()
+        
+        max_concurrent = get_conservative_batch_size(total_sims, None, calculated_max_concurrent, n_gpus)
+        if max_concurrent != calculated_max_concurrent:
+            print(f"Applied conservative adjustment: {calculated_max_concurrent} -> {max_concurrent}")
     else:
         print(f"Using provided max_concurrent for pruning: {max_concurrent}")
     
@@ -1278,6 +1116,13 @@ class AsyncRegularSimManager:
         self.neuron_params = neuron_params
         self.sim_params = sim_params
         self.sim_config = sim_config
+        
+        # Initialize adaptive memory manager
+        total_sims = sim_params.n_stim_configs * sim_params.n_param_sets
+        self.memory_manager = create_memory_manager(
+            total_simulations=total_sims,
+            simulation_type="regular"
+        )
         
         # Multi-GPU setup
         self.n_devices = jax.device_count()
