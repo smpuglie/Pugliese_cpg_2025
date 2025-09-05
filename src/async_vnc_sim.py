@@ -154,13 +154,28 @@ class AsyncPruningManager:
         n_neurons_cpu = jax.device_put(self.sim_params.n_neurons, jax.devices('cpu')[0])
         self.mn_mask_template = jnp.isin(jnp.arange(n_neurons_cpu), mn_idxs_cpu)
         
-        # Multi-GPU setup
+        # Multi-GPU setup with conservative memory management
         self.n_devices = jax.device_count()
         self.devices = jax.devices()
         gpu_devices = [d for d in self.devices if 'gpu' in str(d).lower() or 'cuda' in str(d).lower()]
         self.n_gpu_devices = len(gpu_devices)
         
         print(f"Async Manager: {self.n_devices} total devices, {self.n_gpu_devices} GPU devices")
+        
+        # Add memory pre-allocation to avoid CUDA initialization issues
+        try:
+            for i, device in enumerate(self.devices[:self.n_gpu_devices]):
+                # Pre-allocate small tensor on each GPU to initialize CUDA context
+                test_tensor = jax.device_put(jnp.ones(10), device)
+                del test_tensor
+                print(f"  Initialized CUDA context on device {i}: {device}")
+        except Exception as e:
+            print(f"Warning: Could not initialize all CUDA contexts: {e}")
+            # Fall back to single GPU if multi-GPU fails
+            if self.n_gpu_devices > 1:
+                print("  Falling back to single GPU mode")
+                self.n_gpu_devices = 1
+                self.devices = self.devices[:1]
         
         # For async individual sims, we use device placement rather than pmap
         # This allows each simulation to run on a different GPU independently
@@ -179,6 +194,8 @@ class AsyncPruningManager:
         # Create device-specific JIT compiled functions
         # Each device gets its own compiled version for better performance
         self.device_functions = {}
+        self._jit_sim_functions = {}  # Cache for JIT-compiled simulation functions
+        self._jit_update_functions = {}  # Cache for JIT-compiled update functions
         
         # Pre-compile functions for each device using direct assignment
         self._setup_device_functions()
@@ -241,6 +258,12 @@ class AsyncPruningManager:
                 'rtol': device_rtol,
                 'atol': device_atol
             }
+            
+            # Pre-create JIT-compiled update function for this device
+            self._jit_update_functions[i] = self._create_jit_update_function(
+                oscillation_threshold_val, 
+                clip_start_val
+            )
         
     def _get_device_for_sim(self, sim_index: int) -> int:
         """Assign a device to a simulation based on its index."""
@@ -249,6 +272,53 @@ class AsyncPruningManager:
     def _get_device_functions(self, device_id: int):
         """Get the device-specific parameters for a device."""
         return self.device_functions[device_id]
+    
+    def _create_jit_simulation_function(self, device_id: int):
+        """Create a JIT-compiled simulation function for a specific device."""
+        target_device = self.devices[device_id]
+        
+        # Create a JIT-compiled function that's bound to this device
+        @jax.jit
+        def jit_simulation(W_device, W_mask_device, tau_param, a_param, threshold_param, 
+                          fr_cap_param, input_currents_param, seeds_param, r_tol, a_tol):
+            """JIT-compiled simulation function for improved performance."""
+            # Apply W_mask to connectivity (memory efficient, same device)
+            W_masked = W_device * W_mask_device
+            W_reweighted = reweight_connectivity(
+                W_masked, 
+                self.shared_exc_multiplier, 
+                self.shared_inh_multiplier
+            )
+            
+            # Run simulation with current mask and specified tolerances
+            return run_single_simulation(
+                W_reweighted,
+                tau_param,
+                a_param,
+                threshold_param,
+                fr_cap_param,
+                input_currents_param,
+                self.shared_noise_stdv,
+                self.shared_t_axis,
+                self.sim_params.T,
+                self.sim_params.dt,
+                self.sim_params.pulse_start,
+                self.sim_params.pulse_end,
+                r_tol,
+                a_tol,
+                seeds_param
+            )
+        
+        return jit_simulation
+    
+    def _create_jit_update_function(self, oscillation_threshold: float, clip_start: int):
+        """Create a JIT-compiled update function with static arguments."""
+        # Create wrapper function with static args baked in
+        def update_state_with_static_args(state, R, mn_mask):
+            return update_single_sim_state(state, R, mn_mask, oscillation_threshold, clip_start)
+        
+        # Apply JIT to the wrapper function 
+        return jax.jit(update_state_with_static_args)
             
     def _run_single_pruning_iteration(
         self,
@@ -286,40 +356,23 @@ class AsyncPruningManager:
         # IMPORTANT: Place W_mask on the same device as W_device to avoid device mismatch
         W_mask_device = jax.device_put(W_mask, target_device)
         
-        # Apply W_mask to connectivity (memory efficient, same device)
-        W_masked = W_device * W_mask_device
-        W_reweighted = reweight_connectivity(
-            W_masked, 
-            self.shared_exc_multiplier, 
-            self.shared_inh_multiplier
-        )
+        # Use JIT-compiled device-specific function for better performance
+        if device_idx not in self._jit_sim_functions:
+            # Create and cache JIT-compiled function for this device
+            self._jit_sim_functions[device_idx] = self._create_jit_simulation_function(device_idx)
         
-        # Get individual parameters for this simulation
-        tau_param = self.neuron_params.tau[param_idx]
-        a_param = self.neuron_params.a[param_idx]
-        threshold_param = self.neuron_params.threshold[param_idx]
-        fr_cap_param = self.neuron_params.fr_cap[param_idx]
-        input_currents_param = self.neuron_params.input_currents[stim_idx, param_idx]
-        seeds_param = self.neuron_params.seeds[param_idx]  # Individual seed shape (2,)
-        
-        # Run simulation with current mask and specified tolerances
-        # Use shared data for memory efficiency
-        return run_single_simulation(
-            W_reweighted,
-            tau_param,
-            a_param,
-            threshold_param,
-            fr_cap_param,
-            input_currents_param,
-            self.shared_noise_stdv,
-            self.shared_t_axis,
-            self.sim_params.T,
-            self.sim_params.dt,
-            self.sim_params.pulse_start,
-            self.sim_params.pulse_end,
-            r_tol,  # Use device-specific tolerance
-            a_tol,  # Use device-specific tolerance
-            seeds_param  # Individual seed, not batched
+        # Use JIT-compiled function
+        return self._jit_sim_functions[device_idx](
+            W_device,
+            W_mask_device,
+            self.neuron_params.tau[param_idx],
+            self.neuron_params.a[param_idx],
+            self.neuron_params.threshold[param_idx],
+            self.neuron_params.fr_cap[param_idx],
+            self.neuron_params.input_currents[stim_idx, param_idx],
+            self.neuron_params.seeds[param_idx],
+            r_tol,
+            a_tol
         )
     
     async def _process_single_simulation(self, sim_index: int, assigned_device: Optional[int] = None) -> Tuple[int, jnp.ndarray, Pruning_state, jnp.ndarray]:
@@ -402,21 +455,31 @@ class AsyncPruningManager:
                         f"Iter {iteration:2d}: {available_neurons:4d} avail, {removed_neurons:4d} removed, {put_back_neurons:3d} put back, Level {sim_state.pruning_state.level[0]}", 
                         "PROGRESS")
                 
-                # Run simulation iteration in thread pool to avoid blocking
-                loop = asyncio.get_event_loop()
-                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                    # Use device-specific function for this simulation
-                    future = loop.run_in_executor(
-                        executor,
-                        lambda: self._run_single_pruning_iteration_with_tolerances(
-                            sim_state.pruning_state.W_mask,
-                            sim_index,
-                            device_params['rtol'],
-                            device_params['atol'],
-                            device_id
-                        )
+                # Run simulation iteration with reduced async overhead
+                # For GPU-bound work, direct execution is often faster than thread pools
+                try:
+                    results = self._run_single_pruning_iteration_with_tolerances(
+                        sim_state.pruning_state.W_mask,
+                        sim_index,
+                        device_params['rtol'],
+                        device_params['atol'],
+                        device_id
                     )
-                    results = await future
+                except Exception as e:
+                    # Fallback to thread pool if direct execution fails
+                    loop = asyncio.get_event_loop()
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                        future = loop.run_in_executor(
+                            executor,
+                            lambda: self._run_single_pruning_iteration_with_tolerances(
+                                sim_state.pruning_state.W_mask,
+                                sim_index,
+                                device_params['rtol'],
+                                device_params['atol'],
+                                device_id
+                            )
+                        )
+                        results = await future
                 
                 # Show activity information (less frequent)
                 # max_activity = jnp.max(results)
@@ -427,13 +490,12 @@ class AsyncPruningManager:
                 #         "PROGRESS")
                 
                 
-                # Update pruning state - call update function directly
-                updated_state = update_single_sim_state(
+                # Update pruning state - use JIT-compiled function with static arguments  
+                jit_update_fn = self._jit_update_functions[device_id]
+                updated_state = jit_update_fn(
                     sim_state.pruning_state,  # Individual state, not batched
                     results,  # Individual results
-                    mn_mask,
-                    device_params['oscillation_threshold'],
-                    device_params['clip_start']
+                    mn_mask
                 )
                 
             except Exception as e:
@@ -450,16 +512,14 @@ class AsyncPruningManager:
             iteration += 1
             
             # Periodic memory cleanup to prevent accumulation
-            if iteration % 10 == 0:  # Clean up every 10 iterations
-                # Clean up intermediate results
-                del results, updated_state
-                # Force garbage collection periodically
-                import gc
-                gc.collect()
-                
+            if iteration % 20 == 0:  # Reduce frequency to avoid overhead  
                 # Clear JAX caches every 20 iterations to prevent memory buildup
-                if iteration % 20 == 0:
-                    jax.clear_caches()
+                jax.clear_caches()
+                
+                # Force garbage collection only when needed
+                import gc
+                if iteration % 40 == 0:  # Less frequent GC
+                    gc.collect()
             
             # Yield control to allow other simulations to run
             await asyncio.sleep(0)
