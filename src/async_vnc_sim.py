@@ -1,4 +1,4 @@
-# Asynchronous VNC Network Simulation - Individual Simulation Processing
+# Asynchronous VNC Network Simulation - Streaming Processing
 import asyncio
 import concurrent.futures
 import time
@@ -6,6 +6,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import traceback
+import psutil
 from typing import NamedTuple, Dict, Any, Optional, Tuple, List, Union
 from pathlib import Path
 import threading
@@ -21,10 +22,6 @@ from src.vnc_sim import (
 )
 from src.data_classes import NeuronParams, SimParams, SimulationConfig, Pruning_state
 from src.sim_utils import load_wTable
-
-# Import pmap for multi-GPU support
-from jax import pmap
-
 
 class AsyncLogger:
     """Thread-safe logger for async simulations with better formatting."""
@@ -76,9 +73,232 @@ class AsyncLogger:
 async_logger = AsyncLogger()
 
 
+def calculate_optimal_concurrent_size(
+    n_neurons: int, 
+    n_timepoints: int, 
+    total_simulations: int,
+    n_devices: int = None, 
+    max_concurrent: int = 32,
+    is_pruning: bool = False
+) -> int:
+    """
+    Calculate optimal max_concurrent size for async streaming based on memory and device constraints.
+    
+    Args:
+        n_neurons: Number of neurons in the model
+        n_timepoints: Number of time points per simulation
+        total_simulations: Total number of simulations to run
+        n_devices: Number of devices available (defaults to JAX device count)
+        max_concurrent: Maximum allowed concurrent simulations (default 32)
+        is_pruning: Whether this is for pruning simulations (affects memory calculation)
+    
+    Returns:
+        Optimal max_concurrent size for async streaming execution
+    """
+    print("Calculating optimal concurrent batch size for async streaming...")
+    
+    if n_devices is None:
+        n_devices = jax.device_count()
+    
+    # Handle edge case where we have fewer simulations than devices
+    if total_simulations < n_devices:
+        return total_simulations
+    
+    # Get memory information
+    memory_info = psutil.virtual_memory()
+    available_memory = memory_info.available
+    total_memory = memory_info.total
+    
+    print(f"System memory: {total_memory / (1024 ** 3):.2f} GB total, {available_memory / (1024 ** 3):.2f} GB available")
+    
+    # Try to get GPU memory if available
+    gpu_memory = None
+    n_gpu_devices = 0
+    gpu_memory_per_device = None
+    
+    try:
+        devices = jax.devices()
+        gpu_devices = [d for d in devices if 'gpu' in str(d).lower() or 'cuda' in str(d).lower()]
+        n_gpu_devices = len(gpu_devices)
+        
+        if n_gpu_devices > 0:
+            # Try different methods to get GPU memory
+            try:
+                import pynvml
+                pynvml.nvmlInit()
+                
+                device_memories = []
+                for i in range(n_gpu_devices):
+                    handle = pynvml.nvmlDeviceGetHandleByIndex(i)
+                    info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+                    device_name = pynvml.nvmlDeviceGetName(handle).decode('utf-8')
+                    memory_gb = info.total / (1024 ** 3)
+                    device_memories.append(info.total)
+                    print(f"GPU {i}: {device_name} - {memory_gb:.1f}GB")
+                
+                gpu_memory_per_device = device_memories[0]
+                total_gpu_memory = sum(device_memories)
+                gpu_memory = total_gpu_memory
+                
+                print(f"Detected {n_gpu_devices} GPU device(s) via nvidia-ml")
+                
+            except ImportError:
+                print("pynvml not available, using fallback GPU memory estimation...")
+                
+                # Fallback - estimate based on common GPU types
+                device_str = str(gpu_devices[0]).lower()
+                if 'titan' in device_str and 'rtx' in device_str:
+                    gpu_memory_per_device = 24 * (1024 ** 3)  # Titan RTX: 24GB
+                    print("Detected Titan RTX-like GPU, assuming 24GB per device")
+                elif 'rtx' in device_str:
+                    if '4090' in device_str:
+                        gpu_memory_per_device = 24 * (1024 ** 3)  # RTX 4090: 24GB
+                        print("Detected RTX 4090-like GPU, assuming 24GB per device")
+                    elif '3090' in device_str:
+                        gpu_memory_per_device = 24 * (1024 ** 3)  # RTX 3090: 24GB
+                        print("Detected RTX 3090-like GPU, assuming 24GB per device")
+                    elif '4080' in device_str:
+                        gpu_memory_per_device = 16 * (1024 ** 3)  # RTX 4080: 16GB
+                        print("Detected RTX 4080-like GPU, assuming 16GB per device")
+                    elif '3080' in device_str:
+                        gpu_memory_per_device = 10 * (1024 ** 3)  # RTX 3080: 10GB
+                        print("Detected RTX 3080-like GPU, assuming 10GB per device")
+                    else:
+                        gpu_memory_per_device = 12 * (1024 ** 3)  # Conservative RTX estimate
+                        print("Detected RTX-like GPU, assuming 12GB per device (conservative)")
+                elif 'v100' in device_str:
+                    gpu_memory_per_device = 32 * (1024 ** 3)  # Tesla V100: 32GB
+                    print("Detected V100-like GPU, assuming 32GB per device")
+                elif 'a100' in device_str:
+                    gpu_memory_per_device = 40 * (1024 ** 3)  # A100: 40GB (or 80GB, use conservative)
+                    print("Detected A100-like GPU, assuming 40GB per device")
+                else:
+                    gpu_memory_per_device = 8 * (1024 ** 3)  # Very conservative fallback
+                    print("Unknown GPU type, assuming 8GB per device (conservative)")
+                
+                total_gpu_memory = gpu_memory_per_device * n_gpu_devices
+                gpu_memory = total_gpu_memory
+                
+                if n_gpu_devices == 1:
+                    print(f"Estimated GPU memory: {gpu_memory_per_device / (1024 ** 3):.0f}GB available")
+                else:
+                    print(f"Estimated GPU memory: {gpu_memory_per_device / (1024 ** 3):.0f}GB per device, {total_gpu_memory / (1024 ** 3):.0f}GB total")
+        else:
+            print("No GPU devices detected - using CPU mode")
+            
+    except Exception as e:
+        print(f"GPU detection failed: {e}")
+        pass
+    
+    # Estimate memory usage per concurrent simulation
+    # For async streaming, each concurrent simulation needs:
+    # 1. Output array: n_neurons * n_timepoints * 4 bytes (float32)
+    # 2. Intermediate computations: ~1.5x output for async overhead (less than sync)
+    # 3. Weight matrix operations: n_neurons^2 * 4 bytes (shared across sims)
+    # 4. Pruning overhead: Additional state if pruning enabled
+    
+    output_size = n_neurons * n_timepoints * 4  # float32
+    intermediate_size = output_size * 1.5  # Async has less intermediate storage
+    weight_ops_size = n_neurons * n_neurons * 4  # Weight matrix operations (shared)
+    
+    # Pruning simulations need additional memory for state tracking
+    if is_pruning:
+        pruning_overhead = n_neurons * 20 * 4  # Approximate pruning state overhead
+        overhead_factor = 2.0  # Higher overhead for pruning iterations
+        print("Accounting for pruning simulation overhead")
+    else:
+        pruning_overhead = 0
+        overhead_factor = 1.5  # Lower overhead for regular simulations
+    
+    # Memory per concurrent simulation (weight matrix is shared)
+    bytes_per_concurrent_sim = (output_size + intermediate_size + pruning_overhead) * overhead_factor
+    # Shared memory (weight matrix) - only counted once regardless of concurrent sims
+    shared_memory = weight_ops_size * overhead_factor
+    
+    print(f"Estimated memory per concurrent simulation: {bytes_per_concurrent_sim / (1024 ** 2):.1f} MB")
+    print(f"Shared memory (weight matrix): {shared_memory / (1024 ** 2):.1f} MB")
+    print(f"Overhead factor: {overhead_factor}x")
+    
+    # Choose memory limit based on available hardware
+    if gpu_memory is not None:
+        # Use 75% of GPU memory for concurrent operations (more conservative for streaming)
+        usable_memory = gpu_memory * 0.75
+        print(f"Using GPU memory constraint: {usable_memory / (1024 ** 3):.2f} GB ({gpu_memory / (1024 ** 3):.0f}GB total)")
+    else:
+        # Use system memory with safety margin
+        usable_memory = min(available_memory * 0.4, 16 * (1024 ** 3))
+        print(f"Using system memory constraint: {usable_memory / (1024 ** 3):.2f} GB")
+    
+    # Calculate memory-constrained concurrent size
+    available_for_concurrent = usable_memory - shared_memory
+    if available_for_concurrent <= 0:
+        print("Warning: Shared memory exceeds available memory, using minimal concurrent size")
+        max_memory_concurrent = 1
+    else:
+        max_memory_concurrent = max(1, int(available_for_concurrent / bytes_per_concurrent_sim))
+    
+    print(f"Memory-limited max concurrent: {max_memory_concurrent}")
+    
+    # Start with device-based baseline for async streaming
+    if gpu_memory is not None:
+        if n_gpu_devices == 1:
+            # Single GPU: moderate concurrency for stability
+            baseline_concurrent = max(4, n_devices * 3)
+            print(f"Baseline concurrent (single GPU): {baseline_concurrent}")
+        else:
+            # Multi-GPU: higher concurrency to utilize parallel processing
+            baseline_concurrent = max(8, n_devices * 4)
+            print(f"Baseline concurrent (multi-GPU): {baseline_concurrent}")
+    else:
+        # CPU: lower concurrency
+        baseline_concurrent = max(2, n_devices * 2)
+        print(f"Baseline concurrent (CPU): {baseline_concurrent}")
+    
+    # Choose reasonable upper limit based on hardware
+    if gpu_memory is not None:
+        if n_gpu_devices == 1:
+            reasonable_upper_limit = min(16, max_concurrent)  # Conservative for single GPU
+        else:
+            reasonable_upper_limit = min(32, max_concurrent)  # Higher for multi-GPU
+    else:
+        reasonable_upper_limit = min(8, max_concurrent)  # Lower for CPU
+    
+    # Balance memory constraint with baseline and upper limits
+    memory_limited_concurrent = min(max_memory_concurrent, reasonable_upper_limit)
+    optimal_concurrent = max(baseline_concurrent, memory_limited_concurrent)
+    
+    print(f"Initial optimal concurrent: {optimal_concurrent}")
+    
+    # Special case: if we have very few simulations, limit concurrency
+    if total_simulations <= optimal_concurrent:
+        optimal_concurrent = total_simulations
+        print(f"Limited by total simulations: {optimal_concurrent}")
+    
+    # Ensure we don't exceed the hard limit
+    optimal_concurrent = min(optimal_concurrent, max_concurrent)
+    
+    # Final safety checks
+    if gpu_memory is not None:
+        if n_gpu_devices == 1:
+            optimal_concurrent = max(2, optimal_concurrent)  # Minimum of 2 for single GPU
+            optimal_concurrent = min(optimal_concurrent, 16)  # Max of 16 for single GPU stability
+            print(f"Final concurrent size (single GPU): {optimal_concurrent}")
+        else:
+            optimal_concurrent = max(4, optimal_concurrent)  # Minimum of 4 for multi-GPU
+            optimal_concurrent = min(optimal_concurrent, 32)  # Max of 32 for multi-GPU
+            print(f"Final concurrent size (multi-GPU): {optimal_concurrent}")
+    else:
+        optimal_concurrent = max(1, optimal_concurrent)  # Minimum of 1 for CPU
+        optimal_concurrent = min(optimal_concurrent, 8)  # Max of 8 for CPU
+        print(f"Final concurrent size (CPU): {optimal_concurrent}")
+    
+    print(f'Final optimal max_concurrent for async streaming: {optimal_concurrent}')
+    return optimal_concurrent
+
+
 @dataclass
 class AsyncSimState:
-    """State for individual asynchronous simulation."""
+    """State for asynchronous simulation."""
     sim_index: int
     pruning_state: Pruning_state
     is_converged: bool = False
@@ -130,12 +350,12 @@ def initialize_single_sim_pruning_state(
         last_removed=last_removed,
         remove_p=p_arrays,
         min_circuit=min_circuit,
-        keys=sim_seed  # Individual seed, shape (2,) not (1, 2)
+        keys=sim_seed  # Simulation seed, shape (2,) not (1, 2)
     )
     
     
 class AsyncPruningManager:
-    """Manages asynchronous execution of individual pruning simulations with shared read-only data."""
+    """Manages asynchronous execution of pruning simulations with shared read-only data."""
     
     def __init__(
         self,
@@ -177,7 +397,7 @@ class AsyncPruningManager:
                 self.n_gpu_devices = 1
                 self.devices = self.devices[:1]
         
-        # For async individual sims, we use device placement rather than pmap
+        # For async sims, we use device placement rather than pmap
         # This allows each simulation to run on a different GPU independently
         self.max_workers = max_workers or min(32, (self.n_devices * 2))
         
@@ -455,18 +675,9 @@ class AsyncPruningManager:
                         f"Iter {iteration:2d}: {available_neurons:4d} avail, {removed_neurons:4d} removed, {put_back_neurons:3d} put back, Level {sim_state.pruning_state.level[0]}", 
                         "PROGRESS")
                 
-                # Run simulation iteration with reduced async overhead
-                # For GPU-bound work, direct execution is often faster than thread pools
+                # Run simulation iteration - ALWAYS use thread pool for true async execution
+                # JAX computations are blocking, so we need to run them in separate threads
                 try:
-                    results = self._run_single_pruning_iteration_with_tolerances(
-                        sim_state.pruning_state.W_mask,
-                        sim_index,
-                        device_params['rtol'],
-                        device_params['atol'],
-                        device_id
-                    )
-                except Exception as e:
-                    # Fallback to thread pool if direct execution fails
                     loop = asyncio.get_event_loop()
                     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
                         future = loop.run_in_executor(
@@ -480,6 +691,9 @@ class AsyncPruningManager:
                             )
                         )
                         results = await future
+                except Exception as e:
+                    async_logger.log_sim(sim_index, f"Pruning iteration failed: {e}", "ERROR")
+                    raise
                 
                 # Show activity information (less frequent)
                 # max_activity = jnp.max(results)
@@ -493,8 +707,8 @@ class AsyncPruningManager:
                 # Update pruning state - use JIT-compiled function with static arguments  
                 jit_update_fn = self._jit_update_functions[device_id]
                 updated_state = jit_update_fn(
-                    sim_state.pruning_state,  # Individual state, not batched
-                    results,  # Individual results
+                    sim_state.pruning_state,  # Simulation state, not batched
+                    results,  # Simulation results
                     mn_mask
                 )
                 
@@ -504,7 +718,7 @@ class AsyncPruningManager:
                 traceback.print_exc()
                 raise e
             
-            # Store updated state directly (already individual, no batch dimension to remove)
+            # Store updated state directly (already simulation-level, no batch dimension to remove)
             sim_state.pruning_state = updated_state
             
             sim_state.iteration_count = iteration
@@ -671,13 +885,22 @@ class AsyncPruningManager:
         
         Args:
             total_simulations: Total number of simulations to run
-            max_concurrent: Maximum number of simulations to run concurrently (default: n_devices * 2)
+            max_concurrent: Maximum number of simulations to run concurrently (default: auto-calculated)
         
         Returns:
-            Tuple of (results_list, states_list) in simulation index order
+            Tuple of (results_list, states_list, mini_circuits_list) in simulation index order
         """
         if max_concurrent is None:
-            max_concurrent = min(self.n_devices * 2, total_simulations)
+            max_concurrent = calculate_optimal_concurrent_size(
+                n_neurons=self.sim_params.n_neurons,
+                n_timepoints=len(self.sim_params.t_axis),
+                total_simulations=total_simulations,
+                n_devices=self.n_devices,
+                is_pruning=True
+            )
+            async_logger.log_batch(f"Auto-calculated max_concurrent for pruning: {max_concurrent}")
+        else:
+            async_logger.log_batch(f"Using provided max_concurrent for pruning: {max_concurrent}")
         
         async_logger.log_batch(f"Starting streaming execution: {total_simulations} total simulations, max {max_concurrent} concurrent")
         
@@ -943,48 +1166,6 @@ class AsyncPruningManager:
         async_logger.log_batch("🧹 Final memory cleanup completed")
         
         return results_list, states_list, mini_circuits_list
-
-    async def run_async_batch(self, sim_indices: List[int]) -> Tuple[List[jnp.ndarray], List[Pruning_state]]:
-        """Run a batch of simulations asynchronously."""
-        async_logger.log_batch(f"Starting batch with {len(sim_indices)} simulations: {sim_indices}")
-        
-        # Create tasks for all simulations
-        tasks = [
-            self._process_single_simulation(sim_idx)
-            for sim_idx in sim_indices
-        ]
-        
-        # Run all simulations concurrently
-        completed_tasks = await asyncio.gather(*tasks, return_exceptions=True)
-        
-        # Collect results
-        results = []
-        states = []
-        failed_sims = []
-        
-        for i, task_result in enumerate(completed_tasks):
-            if isinstance(task_result, Exception):
-                failed_sims.append(sim_indices[i])
-                async_logger.log_sim(sim_indices[i], f"FAILED: {task_result}", "ERROR")
-                # Create empty result for failed simulation
-                empty_result = jnp.zeros((self.sim_params.n_neurons, len(self.sim_params.t_axis)))
-                empty_state = initialize_pruning_state(self.neuron_params, self.sim_params, 1)
-                results.append(empty_result)
-                states.append(empty_state)
-            else:
-                sim_idx, result, state = task_result
-                results.append(result)
-                states.append(state)
-        
-        if failed_sims:
-            async_logger.log_batch(f"Batch completed with {len(failed_sims)} failures: {failed_sims}")
-        else:
-            async_logger.log_batch(f"Batch completed successfully - all {len(sim_indices)} simulations finished")
-            
-        # Print summary for this batch
-        async_logger.print_summary(sim_indices)
-        
-        return results, states
     
     def get_progress_report(self) -> Dict[str, Any]:
         """Get current progress of all active simulations."""
@@ -1009,7 +1190,7 @@ def run_streaming_pruning_simulation(
     sim_params: SimParams,
     sim_config: SimulationConfig,
     max_concurrent: Optional[int] = None
-) -> Tuple[jnp.ndarray, jnp.ndarray]:
+) -> Tuple[jnp.ndarray, jnp.ndarray, NeuronParams]:
     """
     Run pruning simulation with streaming processing - new simulations start as others finish.
     
@@ -1023,12 +1204,24 @@ def run_streaming_pruning_simulation(
         neuron_params: Neuron parameters
         sim_params: Simulation parameters  
         sim_config: Simulation configuration
-        max_concurrent: Maximum concurrent simulations (default: n_devices * 2)
+        max_concurrent: Maximum concurrent simulations (default: auto-calculated)
     
     Returns:
-        Tuple of (results_array, mini_circuits_array)
+        Tuple of (results_array, mini_circuits_array, updated_neuron_params)
     """
     total_sims = sim_params.n_stim_configs * sim_params.n_param_sets
+    
+    # Calculate optimal max_concurrent if not provided
+    if max_concurrent is None:
+        max_concurrent = calculate_optimal_concurrent_size(
+            n_neurons=sim_params.n_neurons,
+            n_timepoints=len(sim_params.t_axis),
+            total_simulations=total_sims,
+            is_pruning=True
+        )
+        print(f"Auto-calculated max_concurrent for pruning: {max_concurrent}")
+    else:
+        print(f"Using provided max_concurrent for pruning: {max_concurrent}")
     
     # Create async manager
     manager = AsyncPruningManager(neuron_params, sim_params, sim_config)
@@ -1067,90 +1260,458 @@ def run_streaming_pruning_simulation(
     return results_reshaped, mini_circuits_array, updated_neuron_params
 
 
-def run_async_pruning_simulation(
+# ==============================================================================
+# ASYNC REGULAR STIMULATION SIMULATION (NON-PRUNING)
+# ==============================================================================
+
+class AsyncRegularSimManager:
+    """Manages asynchronous execution of regular (non-pruning) VNC simulations."""
+    
+    def __init__(
+        self,
+        neuron_params: NeuronParams,
+        sim_params: SimParams,
+        sim_config: SimulationConfig,
+        max_workers: int = None
+    ):
+        self.neuron_params = neuron_params
+        self.sim_params = sim_params
+        self.sim_config = sim_config
+        
+        # Multi-GPU setup
+        self.n_devices = jax.device_count()
+        self.devices = jax.devices()
+        gpu_devices = [d for d in self.devices if 'gpu' in str(d).lower() or 'cuda' in str(d).lower()]
+        self.n_gpu_devices = len(gpu_devices)
+        
+        print(f"Async Regular Sim Manager: {self.n_devices} total devices, {self.n_gpu_devices} GPU devices")
+        
+        # Initialize CUDA contexts
+        try:
+            for i, device in enumerate(self.devices[:self.n_gpu_devices]):
+                test_tensor = jax.device_put(jnp.ones(10), device)
+                del test_tensor
+                print(f"  Initialized CUDA context on device {i}: {device}")
+        except Exception as e:
+            print(f"Warning: Could not initialize all CUDA contexts: {e}")
+            if self.n_gpu_devices > 1:
+                print("  Falling back to single GPU mode")
+                self.n_gpu_devices = 1
+                self.devices = self.devices[:1]
+        
+        self.max_workers = max_workers or min(32, (self.n_devices * 2))
+        
+        # Pre-replicate read-only data across devices
+        print("Pre-replicating read-only data across devices...")
+        self._setup_shared_data()
+        
+        # State management
+        self.active_sims: Dict[int, time.float] = {}
+        self.completed_sims: Dict[int, jnp.ndarray] = {}
+        self.update_lock = threading.Lock()
+        
+        # Pre-compile functions for each device
+        self._jit_sim_functions = {}
+        self._setup_device_functions()
+    
+    def _setup_shared_data(self):
+        """Set up memory-efficient shared data across devices."""
+        try:
+            print("Setting up memory-efficient shared data across devices...")
+            
+            # Pre-place the large W matrix on each device
+            self.device_W = {}
+            for i, device in enumerate(self.devices):
+                self.device_W[i] = jax.device_put(self.neuron_params.W, device)
+                print(f"  Placed W matrix on device {i}: {device}")
+            
+            # Shared parameters that are read-only
+            self.shared_t_axis = self.sim_params.t_axis
+            self.shared_noise_stdv = jnp.array(self.sim_params.noise_stdv)
+            self.shared_exc_multiplier = self.sim_params.exc_multiplier
+            self.shared_inh_multiplier = self.sim_params.inh_multiplier
+            
+            print(f"  Memory-efficient setup completed successfully")
+            
+        except Exception as e:
+            print(f"Warning: Could not set up shared data: {e}")
+            self.device_W = {}
+            self.shared_t_axis = self.sim_params.t_axis
+            self.shared_noise_stdv = jnp.array(self.sim_params.noise_stdv)
+            self.shared_exc_multiplier = self.sim_params.exc_multiplier
+            self.shared_inh_multiplier = self.sim_params.inh_multiplier
+    
+    def _setup_device_functions(self):
+        """Pre-compile functions for each device using shared data."""
+        for i, device in enumerate(self.devices):
+            print(f"Setting up device {i}: {device}")
+            
+            # Use more conservative settings for devices other than 0
+            if i == 0:
+                device_rtol = self.sim_params.r_tol
+                device_atol = self.sim_params.a_tol
+            else:
+                device_rtol = max(self.sim_params.r_tol * 10, 1e-5)
+                device_atol = max(self.sim_params.a_tol * 10, 1e-7)
+                print(f"  Device {i}: Using conservative tolerances rtol={device_rtol:.1e}, atol={device_atol:.1e}")
+            
+            # Pre-create JIT-compiled simulation function for this device
+            self._jit_sim_functions[i] = self._create_jit_simulation_function(i, device_rtol, device_atol)
+    
+    def _get_device_for_sim(self, sim_index: int) -> int:
+        """Assign a device to a simulation based on its index."""
+        return sim_index % self.n_devices
+    
+    def _create_jit_simulation_function(self, device_id: int, r_tol: float, a_tol: float):
+        """Create a JIT-compiled simulation function for a specific device."""
+        target_device = self.devices[device_id]
+        
+        @jax.jit
+        def jit_simulation(W_device, W_mask_device, tau_param, a_param, threshold_param, 
+                          fr_cap_param, input_currents_param, seeds_param):
+            """JIT-compiled simulation function for improved performance."""
+            # Apply W_mask if it exists, otherwise use full W
+            if W_mask_device is not None:
+                W_masked = W_device * W_mask_device
+            else:
+                W_masked = W_device
+                
+            W_reweighted = reweight_connectivity(
+                W_masked, 
+                self.shared_exc_multiplier, 
+                self.shared_inh_multiplier
+            )
+            
+            # Run simulation
+            return run_single_simulation(
+                W_reweighted,
+                tau_param,
+                a_param,
+                threshold_param,
+                fr_cap_param,
+                input_currents_param,
+                self.shared_noise_stdv,
+                self.shared_t_axis,
+                self.sim_params.T,
+                self.sim_params.dt,
+                self.sim_params.pulse_start,
+                self.sim_params.pulse_end,
+                r_tol,
+                a_tol,
+                seeds_param
+            )
+        
+        return jit_simulation
+    
+    def _run_single_regular_simulation(self, sim_index: int, device_idx: int = 0) -> jnp.ndarray:
+        """Run a single regular (non-pruning) simulation."""
+        # Extract parameters for this specific simulation
+        param_idx = sim_index % self.sim_params.n_param_sets
+        stim_idx = sim_index // self.sim_params.n_param_sets
+        
+        # Use pre-placed W matrix on the target device
+        target_device = self.devices[device_idx]
+        
+        if device_idx in self.device_W:
+            W_device = self.device_W[device_idx]
+        else:
+            W_device = jax.device_put(self.neuron_params.W, target_device)
+        
+        # Handle W_mask if it exists in neuron_params
+        W_mask_device = None
+        if hasattr(self.neuron_params, 'W_mask') and self.neuron_params.W_mask is not None:
+            # Extract the mask for this simulation
+            if self.neuron_params.W_mask.ndim > 2:  # Batched W_mask
+                W_mask_single = self.neuron_params.W_mask[sim_index]
+            else:  # Single W_mask for all simulations
+                W_mask_single = self.neuron_params.W_mask
+            W_mask_device = jax.device_put(W_mask_single, target_device)
+        
+        # Use JIT-compiled function for this device
+        jit_sim_fn = self._jit_sim_functions[device_idx]
+        
+        return jit_sim_fn(
+            W_device,
+            W_mask_device,
+            self.neuron_params.tau[param_idx],
+            self.neuron_params.a[param_idx],
+            self.neuron_params.threshold[param_idx],
+            self.neuron_params.fr_cap[param_idx],
+            self.neuron_params.input_currents[stim_idx, param_idx],
+            self.neuron_params.seeds[param_idx]
+        )
+    
+    async def _process_single_regular_simulation(self, sim_index: int, assigned_device: Optional[int] = None) -> Tuple[int, jnp.ndarray]:
+        """Process a single regular simulation asynchronously."""
+        try:
+            # Assign device for this simulation
+            if assigned_device is not None:
+                device_id = assigned_device
+            else:
+                device_id = self._get_device_for_sim(sim_index)
+            
+            target_device = self.devices[device_id]
+            async_logger.log_sim(sim_index, f"Running on device {device_id} ({target_device})", "INIT")
+            
+            # Register this simulation as active
+            with self.update_lock:
+                self.active_sims[sim_index] = time.time()
+            
+            # Run the simulation - ALWAYS use thread pool for true async execution
+            # JAX computations are blocking, so we need to run them in separate threads
+            try:
+                loop = asyncio.get_event_loop()
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                    future = loop.run_in_executor(
+                        executor,
+                        lambda: self._run_single_regular_simulation(sim_index, device_id)
+                    )
+                    results = await future
+            except Exception as e:
+                async_logger.log_sim(sim_index, f"Simulation execution failed: {e}", "ERROR")
+                raise
+            
+            # Log completion
+            max_activity = float(jnp.max(results))
+            active_neurons = int(jnp.sum(jnp.max(results, axis=-1) > 0))
+            async_logger.log_sim(sim_index, 
+                f"Completed - max activity: {max_activity:.3f}, active neurons: {active_neurons}", 
+                "COMPLETE")
+            
+            # Move results to CPU to free GPU memory
+            results = jax.device_put(results, jax.devices("cpu")[0])
+            
+            return sim_index, results
+            
+        except Exception as e:
+            async_logger.log_sim(sim_index, f"Failed: {e}", "ERROR")
+            
+            # Create fallback result
+            fallback_result = jnp.zeros((self.sim_params.n_neurons, len(self.sim_params.t_axis)))
+            fallback_result = jax.device_put(fallback_result, jax.devices("cpu")[0])
+            return sim_index, fallback_result
+        
+        finally:
+            # Remove from active simulations
+            with self.update_lock:
+                self.active_sims.pop(sim_index, None)
+    
+    async def run_streaming_regular_simulations(self, total_simulations: int, max_concurrent: Optional[int] = None) -> List[jnp.ndarray]:
+        """Run regular simulations with continuous streaming."""
+        if max_concurrent is None:
+            max_concurrent = calculate_optimal_concurrent_size(
+                n_neurons=self.sim_params.n_neurons,
+                n_timepoints=len(self.sim_params.t_axis),
+                total_simulations=total_simulations,
+                n_devices=self.n_devices,
+                is_pruning=False
+            )
+            async_logger.log_batch(f"Auto-calculated max_concurrent: {max_concurrent}")
+        else:
+            async_logger.log_batch(f"Using provided max_concurrent: {max_concurrent}")
+        
+        async_logger.log_batch(f"Starting streaming regular simulations: {total_simulations} total, max {max_concurrent} concurrent")
+        
+        # Initialize result storage
+        results_dict = {}
+        failed_sims = set()
+        
+        # Create a queue of simulation indices to process
+        pending_sims = list(range(total_simulations))
+        active_tasks = {}
+        task_devices = {}
+        device_load_counts = {i: 0 for i in range(self.n_devices)}
+        
+        def get_least_loaded_device():
+            """Get the device with the least number of active simulations."""
+            return min(device_load_counts.keys(), key=lambda device_id: device_load_counts[device_id])
+        
+        # Progress tracking
+        completed_count = 0
+        start_time = time.time()
+        
+        # Create progress monitoring task
+        async def monitor_progress():
+            nonlocal completed_count
+            last_report_time = start_time
+            
+            while pending_sims or active_tasks:
+                await asyncio.sleep(10)
+                current_time = time.time()
+
+                if current_time - last_report_time >= 30:  # Report every 30 seconds
+                    elapsed = current_time - start_time
+                    rate = completed_count / elapsed if elapsed > 0 else 0
+                    eta = (total_simulations - completed_count) / rate if rate > 0 else float('inf')
+                    
+                    active_count = len(active_tasks)
+                    pending_count = len(pending_sims)
+                    
+                    async_logger.log_batch(
+                        f"Regular Sim Progress: {completed_count}/{total_simulations} completed, "
+                        f"{active_count} active, {pending_count} pending | "
+                        f"Rate: {rate:.2f} sims/sec, ETA: {eta/60:.1f} min"
+                    )
+                    
+                    # Show device load balancing
+                    load_str = ", ".join([f"GPU{device_id}: {load}" for device_id, load in device_load_counts.items()])
+                    async_logger.log_batch(f"Device loads: {load_str}")
+                    
+                    last_report_time = current_time
+        
+        # Start progress monitoring
+        monitor_task = asyncio.create_task(monitor_progress())
+        
+        try:
+            # Initial batch - start up to max_concurrent simulations
+            for _ in range(min(max_concurrent, len(pending_sims))):
+                if pending_sims:
+                    sim_idx = pending_sims.pop(0)
+                    device_id = get_least_loaded_device()
+                    device_load_counts[device_id] += 1
+                    task = asyncio.create_task(self._process_single_regular_simulation(sim_idx, assigned_device=device_id))
+                    active_tasks[task] = sim_idx
+                    task_devices[task] = device_id
+                    async_logger.log_batch(f"Started Sim {sim_idx} on device {device_id} ({len(active_tasks)}/{max_concurrent} slots used)")
+            
+            # Main streaming loop
+            while active_tasks:
+                # Wait for at least one simulation to complete
+                done_tasks, pending_tasks = await asyncio.wait(
+                    active_tasks.keys(), 
+                    return_when=asyncio.FIRST_COMPLETED
+                )
+                
+                # Process completed simulations
+                for task in done_tasks:
+                    sim_idx = active_tasks[task]
+                    device_id = task_devices[task]
+                    del active_tasks[task]
+                    del task_devices[task]
+                    device_load_counts[device_id] -= 1
+                    completed_count += 1
+                    
+                    try:
+                        result = await task
+                        sim_idx_result, final_results = result
+                        
+                        results_dict[sim_idx] = final_results
+                        
+                        result_max = float(jnp.max(final_results))
+                        async_logger.log_batch(f"✅ Completed Sim {sim_idx} on device {device_id} - max rate: {result_max:.4f} ({completed_count}/{total_simulations})")
+                        
+                        # Clean up memory
+                        del result, final_results
+                        
+                    except Exception as e:
+                        failed_sims.add(sim_idx)
+                        async_logger.log_batch(f"❌ Failed Sim {sim_idx} on device {device_id}: {str(e)}")
+                        
+                        # Create empty result for failed simulation
+                        empty_result = jnp.zeros((self.sim_params.n_neurons, len(self.sim_params.t_axis)))
+                        empty_result = jax.device_put(empty_result, jax.devices("cpu")[0])
+                        results_dict[sim_idx] = empty_result
+                        del empty_result
+                
+                # Memory cleanup after processing completed simulations
+                if done_tasks:
+                    jax.clear_caches()
+                    import gc
+                    gc.collect()
+                
+                # Start new simulations to fill available slots
+                while len(active_tasks) < max_concurrent and pending_sims:
+                    sim_idx = pending_sims.pop(0)
+                    device_id = get_least_loaded_device()
+                    device_load_counts[device_id] += 1
+                    task = asyncio.create_task(self._process_single_regular_simulation(sim_idx, assigned_device=device_id))
+                    active_tasks[task] = sim_idx
+                    task_devices[task] = device_id
+                    async_logger.log_batch(f"🚀 Started Sim {sim_idx} on device {device_id} ({len(active_tasks)}/{max_concurrent} slots used)")
+            
+        finally:
+            monitor_task.cancel()
+        
+        # Final summary
+        total_time = time.time() - start_time
+        avg_rate = completed_count / total_time if total_time > 0 else 0
+        
+        if failed_sims:
+            async_logger.log_batch(
+                f"🏁 Regular simulation streaming completed in {total_time:.1f}s | "
+                f"Rate: {avg_rate:.2f} sims/sec | {len(failed_sims)} failures: {sorted(failed_sims)}"
+            )
+        else:
+            async_logger.log_batch(
+                f"🎉 Regular simulation streaming completed successfully in {total_time:.1f}s | "
+                f"Rate: {avg_rate:.2f} sims/sec"
+            )
+        
+        # Convert to ordered list
+        results_list = [results_dict[i] for i in range(total_simulations)]
+        
+        # Final memory cleanup
+        del results_dict, active_tasks, task_devices, device_load_counts
+        jax.clear_caches()
+        import gc
+        gc.collect()
+        
+        return results_list
+
+
+def run_streaming_regular_simulation(
     neuron_params: NeuronParams,
     sim_params: SimParams,
     sim_config: SimulationConfig,
-    batch_size: Optional[int] = None
-) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    max_concurrent: Optional[int] = None
+) -> jnp.ndarray:
     """
-    Run pruning simulation with asynchronous processing of individual simulations.
+    Run regular (non-pruning) simulations with streaming processing.
+    
+    This provides the async equivalent of _run_stim_neurons with:
+    - Continuous streaming (new simulations start as others finish)
+    - Better GPU utilization
+    - Real-time progress monitoring
+    - Memory-efficient execution
     
     Args:
         neuron_params: Neuron parameters
-        sim_params: Simulation parameters
+        sim_params: Simulation parameters  
         sim_config: Simulation configuration
-        batch_size: Optional batch size for grouping (default: all simulations)
+        max_concurrent: Maximum concurrent simulations (default: auto-calculated)
     
     Returns:
-        Tuple of (results_array, mini_circuits_array)
+        Results array shaped as (n_stim_configs, n_param_sets, n_neurons, n_timepoints)
     """
     total_sims = sim_params.n_stim_configs * sim_params.n_param_sets
     
-    if batch_size is None:
-        batch_size = total_sims  # Process all simulations concurrently
+    # Calculate optimal max_concurrent if not provided
+    if max_concurrent is None:
+        max_concurrent = calculate_optimal_concurrent_size(
+            n_neurons=sim_params.n_neurons,
+            n_timepoints=len(sim_params.t_axis),
+            total_simulations=total_sims,
+            is_pruning=False
+        )
+        print(f"Auto-calculated max_concurrent: {max_concurrent}")
+    else:
+        print(f"Using provided max_concurrent: {max_concurrent}")
     
     # Create async manager
-    manager = AsyncPruningManager(neuron_params, sim_params, sim_config)
+    manager = AsyncRegularSimManager(neuron_params, sim_params, sim_config)
     
-    all_results = []
-    all_states = []
+    async def run_streaming():
+        return await manager.run_streaming_regular_simulations(total_sims, max_concurrent)
     
-    # Process in batches if needed
-    n_batches = (total_sims + batch_size - 1) // batch_size
+    # Run the streaming async execution
+    all_results = asyncio.run(run_streaming())
     
-    async def run_batches():
-        for i in range(n_batches):
-            start_idx = i * batch_size
-            end_idx = min((i + 1) * batch_size, total_sims)
-            batch_indices = list(range(start_idx, end_idx))
-            
-            print(f"Processing batch {i + 1}/{n_batches} with {len(batch_indices)} simulations")
-            
-            # Create simplified progress monitoring task
-            async def monitor_progress():
-                while manager.active_sims:
-                    await asyncio.sleep(15)  # Update every 15 seconds
-                    progress = manager.get_progress_report()
-                    active = progress['active_simulations']
-                    completed = progress['completed_simulations']
-                    total = active + completed
-                    if active > 0:
-                        async_logger.log_batch(f"Progress: {completed}/{total} completed, {active} active, avg iterations: {progress['average_iterations']:.1f}")
-            
-            # Start monitoring and batch processing
-            monitor_task = asyncio.create_task(monitor_progress())
-            batch_results, batch_states = await manager.run_async_batch(batch_indices)
-            monitor_task.cancel()
-            
-            all_results.extend(batch_results)
-            all_states.extend(batch_states)
-            
-            async_logger.log_batch(f"Batch {i + 1}/{n_batches} completed")
-    
-    # Run the async event loop
-    asyncio.run(run_batches())
-    
-    # Convert results to arrays and reshape
+    # Convert results to array and reshape
     results_array = jnp.stack(all_results, axis=0)
     results_reshaped = results_array.reshape(
         sim_params.n_stim_configs, sim_params.n_param_sets,
         sim_params.n_neurons, len(sim_params.t_axis)
     )
     
-    # Convert states to mini_circuits format (compatible with existing save code)
-    mn_mask = jnp.isin(jnp.arange(sim_params.n_neurons), neuron_params.mn_idxs)
-    mini_circuits = []
-    for state in all_states:
-        # Extract the active neurons (minimal circuit) from each state
-        if hasattr(state, 'total_removed_neurons'):
-            mini_circuit = (~state.total_removed_neurons)  
-        else:
-            # Fallback: all neurons active
-            mini_circuit = jnp.ones(sim_params.n_neurons, dtype=bool)
-        mini_circuits.append(mini_circuit)
-    
-    mini_circuits_array = jnp.stack(mini_circuits, axis=0)
-    
-    return results_reshaped, mini_circuits_array
+    return results_reshaped
 

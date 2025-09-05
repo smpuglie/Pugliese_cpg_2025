@@ -20,7 +20,7 @@ high_fr_threshold: 100.0
 enable_checkpointing: False # Enable intermediate checkpointing
 
 # NEW: Async execution parameters
-async_mode: "streaming"  # Options: "sync", "individual", "streaming"
+async_mode: "streaming"  # Options: "sync", "streaming"
 # - "sync": Standard synchronous execution
-# - "individual": Each simulation runs independently on separate GPU devices
+# - "streaming": Streaming async execution (recommended for high throughput)
 # - "streaming": Continuous processing - new simulations start as others finish

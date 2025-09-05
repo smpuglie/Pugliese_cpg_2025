@@ -1,4 +1,5 @@
-import os 
+import os
+
 # os.environ["CUDA_VISIBLE_DEVICES"] = "0"  # Use GPU 1
 # os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.95"
@@ -153,18 +154,22 @@ def main(cfg: DictConfig):
             
             # Check for async execution mode
             async_mode = getattr(cfg.sim, "async_mode", "sync")
-            print(f"Execution mode: {async_mode}")
+            prune_network = getattr(cfg.sim, "prune_network", False)
+            print(f"Execution mode: {async_mode}, Pruning: {prune_network}")
             
-            if async_mode == "sync" or not getattr(cfg.sim, "prune_network", False):
+            if async_mode == "sync":
                 # Use original synchronous implementation
                 results, final_mini_circuits, neuron_params = run_vnc_simulation(cfg)
             else:
-                # Use asynchronous implementation for pruning
-                print(f"Using async pruning mode: {async_mode}")
+                # Use asynchronous implementation
+                print(f"Using async mode: {async_mode}")
                 
                 # Import async functions
                 try:
-                    from src.async_vnc_sim import run_async_pruning_simulation
+                    from src.async_vnc_sim import (
+                        run_streaming_pruning_simulation,
+                        run_streaming_regular_simulation
+                    )
                     from src.vnc_sim import prepare_vnc_simulation_params
                 except ImportError as e:
                     print(f"Warning: Could not import async modules: {e}")
@@ -179,27 +184,34 @@ def main(cfg: DictConfig):
                     results = None
                     final_mini_circuits = None
                     
-                    # Run async simulation
+                    # Run async simulation based on mode and pruning setting
                     try:
-                        if async_mode == "individual":
-                            results, final_mini_circuits = run_async_pruning_simulation(
-                                neuron_params, sim_params, sim_config, batch_size=cfg.experiment.batch_size
-                            )
-                        elif async_mode == "streaming":
-                            from src.async_vnc_sim import run_streaming_pruning_simulation
-                            results, final_mini_circuits, neuron_params = run_streaming_pruning_simulation(
-                                neuron_params, sim_params, sim_config, max_concurrent=cfg.experiment.batch_size
-                            )
+                        if prune_network:
+                            # Async pruning simulations
+                            if async_mode == "streaming":
+                                results, final_mini_circuits, neuron_params = run_streaming_pruning_simulation(
+                                    neuron_params, sim_params, sim_config, max_concurrent=cfg.experiment.batch_size
+                                )
+                            else:
+                                raise ValueError(f"Unknown async_mode for pruning: {async_mode}. Valid options: 'sync', 'streaming'")
                         else:
-                            raise ValueError(f"Unknown async_mode: {async_mode}. Valid options: 'sync', 'individual', 'streaming'")
+                            # Async regular (non-pruning) simulations
+                            if async_mode == "streaming":
+                                results = run_streaming_regular_simulation(
+                                    neuron_params, sim_params, sim_config, max_concurrent=cfg.experiment.batch_size
+                                )
+                                final_mini_circuits = None  # Regular sims don't produce mini circuits
+                            else:
+                                raise ValueError(f"Unknown async_mode for regular simulations: {async_mode}. Valid options: 'sync', 'streaming'")
                         
                         print(f"Async simulation completed successfully")
                     except Exception as async_error:
                         print(f"Async simulation failed: {async_error}")
                         # Fallback to sync if needed
-                        # results, final_mini_circuits, neuron_params = run_vnc_simulation(cfg)
-                        # For now, re-raise the error to prevent undefined variable access
-                        raise
+                        print("Falling back to synchronous execution")
+                        results, final_mini_circuits, neuron_params = run_vnc_simulation(cfg)
+                        # Note: Could also re-raise here if you prefer to fail fast
+                        # raise
             
             # Ensure all operations are completed before proceeding
             jax.block_until_ready(results)
