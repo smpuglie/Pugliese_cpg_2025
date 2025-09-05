@@ -18,8 +18,9 @@ import logging
 # Import existing simulation components
 from src.vnc_sim import (
     run_single_simulation, update_single_sim_state, initialize_pruning_state,
-    get_batch_function, reweight_connectivity, removal_probability
+    get_batch_function, reweight_connectivity, removal_probability, add_noise_to_weights
 )
+from src.shuffle_utils import full_shuffle
 from src.data_classes import NeuronParams, SimParams, SimulationConfig, Pruning_state
 from src.sim_utils import load_wTable
 
@@ -1310,9 +1311,13 @@ class AsyncRegularSimManager:
         self.completed_sims: Dict[int, jnp.ndarray] = {}
         self.update_lock = threading.Lock()
         
-        # Pre-compile functions for each device
+        # Pre-compile functions for each device and simulation type
         self._jit_sim_functions = {}
         self._setup_device_functions()
+        
+        # Stimulation adjustment state
+        self.adjusted_neuron_params = neuron_params
+        self.adjustment_iteration = 0
     
     def _setup_shared_data(self):
         """Set up memory-efficient shared data across devices."""
@@ -1342,7 +1347,7 @@ class AsyncRegularSimManager:
             self.shared_inh_multiplier = self.sim_params.inh_multiplier
     
     def _setup_device_functions(self):
-        """Pre-compile functions for each device using shared data."""
+        """Pre-compile functions for each device and simulation type."""
         for i, device in enumerate(self.devices):
             print(f"Setting up device {i}: {device}")
             
@@ -1355,51 +1360,171 @@ class AsyncRegularSimManager:
                 device_atol = max(self.sim_params.a_tol * 10, 1e-7)
                 print(f"  Device {i}: Using conservative tolerances rtol={device_rtol:.1e}, atol={device_atol:.1e}")
             
-            # Pre-create JIT-compiled simulation function for this device
-            self._jit_sim_functions[i] = self._create_jit_simulation_function(i, device_rtol, device_atol)
+            # Pre-create JIT-compiled simulation function for this device based on sim_type
+            sim_type = getattr(self.sim_config, 'sim_type', 'baseline')
+            self._jit_sim_functions[i] = self._create_jit_simulation_function(i, device_rtol, device_atol, sim_type)
     
     def _get_device_for_sim(self, sim_index: int) -> int:
         """Assign a device to a simulation based on its index."""
         return sim_index % self.n_devices
     
-    def _create_jit_simulation_function(self, device_id: int, r_tol: float, a_tol: float):
-        """Create a JIT-compiled simulation function for a specific device."""
+    def _create_jit_simulation_function(self, device_id: int, r_tol: float, a_tol: float, sim_type: str):
+        """Create a JIT-compiled simulation function for a specific device and simulation type."""
         target_device = self.devices[device_id]
         
-        @jax.jit
-        def jit_simulation(W_device, W_mask_device, tau_param, a_param, threshold_param, 
-                          fr_cap_param, input_currents_param, seeds_param):
-            """JIT-compiled simulation function for improved performance."""
-            # Apply W_mask if it exists, otherwise use full W
-            if W_mask_device is not None:
-                W_masked = W_device * W_mask_device
-            else:
-                W_masked = W_device
+        if sim_type == "baseline":
+            @jax.jit
+            def jit_simulation(W_device, W_mask_device, tau_param, a_param, threshold_param, 
+                              fr_cap_param, input_currents_param, seeds_param):
+                """JIT-compiled baseline simulation function."""
+                # Apply W_mask if it exists, otherwise use full W
+                if W_mask_device is not None:
+                    W_masked = W_device * W_mask_device
+                else:
+                    W_masked = W_device
+                    
+                W_reweighted = reweight_connectivity(
+                    W_masked, 
+                    self.shared_exc_multiplier, 
+                    self.shared_inh_multiplier
+                )
                 
-            W_reweighted = reweight_connectivity(
-                W_masked, 
-                self.shared_exc_multiplier, 
-                self.shared_inh_multiplier
-            )
-            
-            # Run simulation
-            return run_single_simulation(
-                W_reweighted,
-                tau_param,
-                a_param,
-                threshold_param,
-                fr_cap_param,
-                input_currents_param,
-                self.shared_noise_stdv,
-                self.shared_t_axis,
-                self.sim_params.T,
-                self.sim_params.dt,
-                self.sim_params.pulse_start,
-                self.sim_params.pulse_end,
-                r_tol,
-                a_tol,
-                seeds_param
-            )
+                return run_single_simulation(
+                    W_reweighted,
+                    tau_param,
+                    a_param,
+                    threshold_param,
+                    fr_cap_param,
+                    input_currents_param,
+                    self.shared_noise_stdv,
+                    self.shared_t_axis,
+                    self.sim_params.T,
+                    self.sim_params.dt,
+                    self.sim_params.pulse_start,
+                    self.sim_params.pulse_end,
+                    r_tol,
+                    a_tol,
+                    seeds_param
+                )
+                
+        elif sim_type == "shuffle":
+            @jax.jit
+            def jit_simulation(W_device, W_mask_device, tau_param, a_param, threshold_param, 
+                              fr_cap_param, input_currents_param, seeds_param):
+                """JIT-compiled shuffle simulation function."""
+                # Apply W_mask if it exists, otherwise use full W
+                if W_mask_device is not None:
+                    W_masked = W_device * W_mask_device
+                else:
+                    W_masked = W_device
+                
+                # Apply shuffling
+                shuffle_indices = (
+                    self.neuron_params.exc_dn_idxs, 
+                    self.neuron_params.inh_dn_idxs,
+                    self.neuron_params.exc_in_idxs, 
+                    self.neuron_params.inh_in_idxs,
+                    self.neuron_params.mn_idxs
+                )
+                W_shuffled = full_shuffle(W_masked, seeds_param, *shuffle_indices)
+                W_reweighted = reweight_connectivity(
+                    W_shuffled, 
+                    self.shared_exc_multiplier, 
+                    self.shared_inh_multiplier
+                )
+                
+                return run_single_simulation(
+                    W_reweighted,
+                    tau_param,
+                    a_param,
+                    threshold_param,
+                    fr_cap_param,
+                    input_currents_param,
+                    self.shared_noise_stdv,
+                    self.shared_t_axis,
+                    self.sim_params.T,
+                    self.sim_params.dt,
+                    self.sim_params.pulse_start,
+                    self.sim_params.pulse_end,
+                    r_tol,
+                    a_tol,
+                    seeds_param
+                )
+                
+        elif sim_type == "noise":
+            @jax.jit
+            def jit_simulation(W_device, W_mask_device, tau_param, a_param, threshold_param, 
+                              fr_cap_param, input_currents_param, seeds_param):
+                """JIT-compiled noise simulation function."""
+                # Apply W_mask if it exists, otherwise use full W
+                if W_mask_device is not None:
+                    W_masked = W_device * W_mask_device
+                else:
+                    W_masked = W_device
+                
+                # Apply noise
+                noise_stdv_prop = getattr(self.sim_params, 'noise_stdv_prop', 0.1)
+                W_noisy = add_noise_to_weights(W_masked, seeds_param, noise_stdv_prop)
+                W_reweighted = reweight_connectivity(
+                    W_noisy, 
+                    self.shared_exc_multiplier, 
+                    self.shared_inh_multiplier
+                )
+                
+                return run_single_simulation(
+                    W_reweighted,
+                    tau_param,
+                    a_param,
+                    threshold_param,
+                    fr_cap_param,
+                    input_currents_param,
+                    self.shared_noise_stdv,
+                    self.shared_t_axis,
+                    self.sim_params.T,
+                    self.sim_params.dt,
+                    self.sim_params.pulse_start,
+                    self.sim_params.pulse_end,
+                    r_tol,
+                    a_tol,
+                    seeds_param
+                )
+                
+        elif sim_type == "Wmask":
+            @jax.jit
+            def jit_simulation(W_device, W_mask_device, tau_param, a_param, threshold_param, 
+                              fr_cap_param, input_currents_param, seeds_param):
+                """JIT-compiled W_mask simulation function."""
+                # W_mask is required for this simulation type
+                if W_mask_device is not None:
+                    W_masked = W_device * W_mask_device
+                else:
+                    W_masked = W_device  # fallback to full W if no mask
+                    
+                W_reweighted = reweight_connectivity(
+                    W_masked, 
+                    self.shared_exc_multiplier, 
+                    self.shared_inh_multiplier
+                )
+                
+                return run_single_simulation(
+                    W_reweighted,
+                    tau_param,
+                    a_param,
+                    threshold_param,
+                    fr_cap_param,
+                    input_currents_param,
+                    self.shared_noise_stdv,
+                    self.shared_t_axis,
+                    self.sim_params.T,
+                    self.sim_params.dt,
+                    self.sim_params.pulse_start,
+                    self.sim_params.pulse_end,
+                    r_tol,
+                    a_tol,
+                    seeds_param
+                )
+        else:
+            raise ValueError(f"Unknown simulation type: {sim_type}")
         
         return jit_simulation
     
@@ -1419,12 +1544,12 @@ class AsyncRegularSimManager:
         
         # Handle W_mask if it exists in neuron_params
         W_mask_device = None
-        if hasattr(self.neuron_params, 'W_mask') and self.neuron_params.W_mask is not None:
+        if hasattr(self.adjusted_neuron_params, 'W_mask') and self.adjusted_neuron_params.W_mask is not None:
             # Extract the mask for this simulation
-            if self.neuron_params.W_mask.ndim > 2:  # Batched W_mask
-                W_mask_single = self.neuron_params.W_mask[sim_index]
+            if self.adjusted_neuron_params.W_mask.ndim > 2:  # Batched W_mask
+                W_mask_single = self.adjusted_neuron_params.W_mask[sim_index]
             else:  # Single W_mask for all simulations
-                W_mask_single = self.neuron_params.W_mask
+                W_mask_single = self.adjusted_neuron_params.W_mask
             W_mask_device = jax.device_put(W_mask_single, target_device)
         
         # Use JIT-compiled function for this device
@@ -1433,12 +1558,12 @@ class AsyncRegularSimManager:
         return jit_sim_fn(
             W_device,
             W_mask_device,
-            self.neuron_params.tau[param_idx],
-            self.neuron_params.a[param_idx],
-            self.neuron_params.threshold[param_idx],
-            self.neuron_params.fr_cap[param_idx],
-            self.neuron_params.input_currents[stim_idx, param_idx],
-            self.neuron_params.seeds[param_idx]
+            self.adjusted_neuron_params.tau[param_idx],
+            self.adjusted_neuron_params.a[param_idx],
+            self.adjusted_neuron_params.threshold[param_idx],
+            self.adjusted_neuron_params.fr_cap[param_idx],
+            self.adjusted_neuron_params.input_currents[stim_idx, param_idx],
+            self.adjusted_neuron_params.seeds[param_idx]
         )
     
     async def _process_single_regular_simulation(self, sim_index: int, assigned_device: Optional[int] = None) -> Tuple[int, jnp.ndarray]:
@@ -1496,8 +1621,100 @@ class AsyncRegularSimManager:
             with self.update_lock:
                 self.active_sims.pop(sim_index, None)
     
+    async def _adjust_stimulation_for_simulations(self, sim_indices: List[int]) -> bool:
+        """Adjust stimulation for specific simulations. Returns True if adjustment successful."""
+        if not getattr(self.sim_config, 'adjustStimI', False):
+            return True  # No adjustment needed
+            
+        print(f"Adjusting stimulation for {len(sim_indices)} simulations...")
+        
+        for adjust_iter in range(getattr(self.sim_config, 'max_adjustment_iters', 10)):
+            # Run test simulations to check current activity levels
+            test_results = []
+            
+            # Run the simulations asynchronously for adjustment
+            async def run_test_sims():
+                tasks = []
+                for sim_idx in sim_indices:
+                    task = self._process_single_regular_simulation(sim_idx)
+                    tasks.append(task)
+                
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                return results
+            
+            test_results = await run_test_sims()
+            
+            # Extract just the result arrays (ignore sim indices)
+            result_arrays = []
+            for result in test_results:
+                if isinstance(result, Exception):
+                    # Create dummy result for failed simulations
+                    dummy_result = jnp.zeros((self.sim_params.n_neurons, len(self.sim_params.t_axis)))
+                    result_arrays.append(dummy_result)
+                else:
+                    _, result_array = result
+                    result_arrays.append(result_array)
+            
+            # Stack results for analysis
+            test_results_array = jnp.stack(result_arrays, axis=0)
+            
+            # Analyze activity levels
+            max_rates = jnp.max(test_results_array, axis=2)  # (Batch, Neurons)
+            n_active = jnp.sum(jnp.sum(test_results_array, axis=2) > 0, axis=1)  # (Batch,)
+            n_high_fr = jnp.sum(max_rates > getattr(self.sim_config, 'high_fr_threshold', 100.0), axis=1)  # (Batch,)
+            
+            current_inputs = self.adjusted_neuron_params.input_currents.copy()
+            new_inputs = current_inputs.copy()
+            needs_adjustment = jnp.zeros(len(sim_indices), dtype=bool)
+            
+            # Check each simulation and adjust if needed
+            for i, sim_idx in enumerate(sim_indices):
+                sim_active = n_active[i]
+                sim_high_fr = n_high_fr[i]
+                
+                # Calculate stimulus and replicate indices
+                param_idx = sim_idx % self.sim_params.n_param_sets
+                stim_idx = sim_idx // self.sim_params.n_param_sets
+                
+                sim_input = current_inputs[stim_idx, param_idx]
+                
+                n_active_upper = getattr(self.sim_config, 'n_active_upper', 500)
+                n_active_lower = getattr(self.sim_config, 'n_active_lower', 5)
+                n_high_fr_upper = getattr(self.sim_config, 'n_high_fr_upper', 100)
+                
+                if (sim_active > n_active_upper) or (sim_high_fr > n_high_fr_upper):
+                    # Too strong - reduce stimulation
+                    new_inputs = new_inputs.at[stim_idx, param_idx].set(sim_input / 2)
+                    needs_adjustment = needs_adjustment.at[i].set(True)
+                    # Get first element if it's an array
+                    input_val = float(sim_input.flatten()[0]) if hasattr(sim_input, 'flatten') else float(sim_input)
+                    new_val = input_val / 2
+                    print(f"    Reducing stimulation for sim {sim_idx}: {input_val:.6f} -> {new_val:.6f}")
+                elif sim_active < n_active_lower:
+                    # Too weak - increase stimulation
+                    new_inputs = new_inputs.at[stim_idx, param_idx].set(sim_input * 2)
+                    needs_adjustment = needs_adjustment.at[i].set(True)
+                    # Get first element if it's an array
+                    input_val = float(sim_input.flatten()[0]) if hasattr(sim_input, 'flatten') else float(sim_input)
+                    new_val = input_val * 2
+                    print(f"    Increasing stimulation for sim {sim_idx}: {input_val:.6f} -> {new_val:.6f}")
+                
+                print(f"    Adjustment iter {adjust_iter + 1}, Sim {sim_idx}: Active: {sim_active}, High FR: {sim_high_fr}")
+            
+            # Update neuron params with new stimulation
+            self.adjusted_neuron_params = self.adjusted_neuron_params._replace(
+                input_currents=new_inputs
+            )
+            
+            if not jnp.any(needs_adjustment):
+                print(f"    Stimulation appropriate for all simulations - adjustment complete")
+                return True
+                
+        print(f"    Warning: Maximum adjustment iterations reached")
+        return False
+
     async def run_streaming_regular_simulations(self, total_simulations: int, max_concurrent: Optional[int] = None) -> List[jnp.ndarray]:
-        """Run regular simulations with continuous streaming."""
+        """Run regular simulations with continuous streaming and optional stimulation adjustment."""
         if max_concurrent is None:
             max_concurrent = calculate_optimal_concurrent_size(
                 n_neurons=self.sim_params.n_neurons,
@@ -1512,6 +1729,18 @@ class AsyncRegularSimManager:
         
         async_logger.log_batch(f"Starting streaming regular simulations: {total_simulations} total, max {max_concurrent} concurrent")
         
+        # Check if stimulation adjustment is enabled
+        adjust_stimulation = getattr(self.sim_config, 'adjustStimI', False)
+        
+        if adjust_stimulation:
+            async_logger.log_batch("Stimulation adjustment enabled - using batch processing")
+            return await self._run_with_stimulation_adjustment(total_simulations, max_concurrent)
+        else:
+            async_logger.log_batch("Standard streaming mode")
+            return await self._run_standard_streaming(total_simulations, max_concurrent)
+    
+    async def _run_standard_streaming(self, total_simulations: int, max_concurrent: int) -> List[jnp.ndarray]:
+        """Run simulations with standard streaming (no stimulation adjustment)."""
         # Initialize result storage
         results_dict = {}
         failed_sims = set()
@@ -1657,6 +1886,74 @@ class AsyncRegularSimManager:
         gc.collect()
         
         return results_list
+    
+    async def _run_with_stimulation_adjustment(self, total_simulations: int, max_concurrent: int) -> List[jnp.ndarray]:
+        """Run simulations with stimulation adjustment using batch processing."""
+        # For stimulation adjustment, we need to process in batches
+        batch_size = max_concurrent
+        n_batches = (total_simulations + batch_size - 1) // batch_size
+        
+        all_results = []
+        
+        async_logger.log_batch(f"Running with stimulation adjustment: {n_batches} batches of max size {batch_size}")
+        
+        for batch_idx in range(n_batches):
+            start_idx = batch_idx * batch_size
+            end_idx = min((batch_idx + 1) * batch_size, total_simulations)
+            batch_sim_indices = list(range(start_idx, end_idx))
+            
+            async_logger.log_batch(f"Processing batch {batch_idx + 1}/{n_batches} with {len(batch_sim_indices)} simulations")
+            
+            # Apply stimulation adjustment for this batch
+            adjustment_success = await self._adjust_stimulation_for_simulations(batch_sim_indices)
+            if not adjustment_success:
+                async_logger.log_batch(f"Warning: Stimulation adjustment may not be optimal for batch {batch_idx + 1}")
+            
+            # Run this batch of simulations
+            batch_results = await self._run_batch_simulations(batch_sim_indices)
+            all_results.extend(batch_results)
+            
+            async_logger.log_batch(f"Completed batch {batch_idx + 1}/{n_batches}")
+        
+        return all_results
+    
+    async def _run_batch_simulations(self, sim_indices: List[int]) -> List[jnp.ndarray]:
+        """Run a specific batch of simulations concurrently."""
+        tasks = []
+        device_assignments = {}
+        
+        # Create tasks for all simulations in this batch
+        for i, sim_idx in enumerate(sim_indices):
+            device_id = i % self.n_devices  # Round-robin device assignment
+            task = asyncio.create_task(self._process_single_regular_simulation(sim_idx, assigned_device=device_id))
+            tasks.append(task)
+            device_assignments[sim_idx] = device_id
+        
+        # Run all simulations in the batch concurrently
+        completed_tasks = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # Extract results in the correct order
+        batch_results = []
+        failed_sims = []
+        
+        for i, task_result in enumerate(completed_tasks):
+            sim_idx = sim_indices[i]
+            if isinstance(task_result, Exception):
+                failed_sims.append(sim_idx)
+                async_logger.log_batch(f"❌ Batch sim {sim_idx} failed: {task_result}")
+                # Create empty result for failed simulation
+                empty_result = jnp.zeros((self.sim_params.n_neurons, len(self.sim_params.t_axis)))
+                empty_result = jax.device_put(empty_result, jax.devices("cpu")[0])
+                batch_results.append(empty_result)
+            else:
+                result_sim_idx, result_array = task_result
+                batch_results.append(result_array)
+                async_logger.log_batch(f"✅ Batch sim {sim_idx} completed on device {device_assignments[sim_idx]}")
+        
+        if failed_sims:
+            async_logger.log_batch(f"Batch completed with {len(failed_sims)} failures: {failed_sims}")
+        
+        return batch_results
 
 
 def run_streaming_regular_simulation(
@@ -1673,6 +1970,9 @@ def run_streaming_regular_simulation(
     - Better GPU utilization
     - Real-time progress monitoring
     - Memory-efficient execution
+    - Support for all simulation types (baseline, shuffle, noise, Wmask)
+    - Automatic stimulation adjustment (adjustStimI)
+    - DN screen support
     
     Args:
         neuron_params: Neuron parameters
@@ -1684,6 +1984,11 @@ def run_streaming_regular_simulation(
         Results array shaped as (n_stim_configs, n_param_sets, n_neurons, n_timepoints)
     """
     total_sims = sim_params.n_stim_configs * sim_params.n_param_sets
+    
+    # Handle DN screen mode - run individual neuron screening
+    if getattr(sim_config, 'dn_screen', False):
+        print("Running in DN Screen mode - testing individual neurons")
+        return run_dn_screen_simulations(neuron_params, sim_params, sim_config, max_concurrent)
     
     # Calculate optimal max_concurrent if not provided
     if max_concurrent is None:
@@ -1700,14 +2005,23 @@ def run_streaming_regular_simulation(
     # Create async manager
     manager = AsyncRegularSimManager(neuron_params, sim_params, sim_config)
     
-    async def run_streaming():
-        return await manager.run_streaming_regular_simulations(total_sims, max_concurrent)
+    # Apply stimulation adjustment if enabled
+    if getattr(sim_config, 'adjustStimI', False):
+        print("Stimulation adjustment is enabled - will adjust during streaming")
     
-    # Run the streaming async execution
-    all_results = asyncio.run(run_streaming())
+    print(f"Simulation type: {getattr(sim_config, 'sim_type', 'baseline')}")
+    print(f"Starting streaming regular simulation with {total_sims} total simulations")
     
-    # Convert results to array and reshape
-    results_array = jnp.stack(all_results, axis=0)
+    async def run_simulations():
+        # Run the streaming simulations
+        results_list = await manager.run_streaming_regular_simulations(total_sims, max_concurrent)
+        return results_list
+    
+    # Run the async event loop
+    results_list = asyncio.run(run_simulations())
+    
+    # Convert results to the expected output format
+    results_array = jnp.stack(results_list, axis=0)
     results_reshaped = results_array.reshape(
         sim_params.n_stim_configs, sim_params.n_param_sets,
         sim_params.n_neurons, len(sim_params.t_axis)
@@ -1715,3 +2029,94 @@ def run_streaming_regular_simulation(
     
     return results_reshaped
 
+
+def run_dn_screen_simulations(
+    neuron_params: NeuronParams,
+    sim_params: SimParams,
+    sim_config: SimulationConfig,
+    max_concurrent: Optional[int] = None
+) -> jnp.ndarray:
+    """
+    Run DN screen simulations - testing individual descending neurons.
+    
+    In DN screen mode, we test each DN neuron individually to find responsive ones.
+    This is typically used for screening experiments.
+    """
+    print("DN Screen mode: Testing individual descending neurons")
+    
+    # Get DN neuron indices
+    if hasattr(neuron_params, 'dn_idxs') and neuron_params.dn_idxs is not None:
+        dn_indices = neuron_params.dn_idxs
+    elif hasattr(neuron_params, 'exc_dn_idxs') and neuron_params.exc_dn_idxs is not None:
+        # Combine excitatory and inhibitory DN indices if available
+        exc_dn = neuron_params.exc_dn_idxs if neuron_params.exc_dn_idxs is not None else jnp.array([])
+        inh_dn = neuron_params.inh_dn_idxs if neuron_params.inh_dn_idxs is not None else jnp.array([])
+        dn_indices = jnp.concatenate([exc_dn, inh_dn]) if len(exc_dn) > 0 or len(inh_dn) > 0 else None
+    else:
+        print("Warning: No DN indices found, using all neurons")
+        dn_indices = jnp.arange(sim_params.n_neurons)
+    
+    if dn_indices is None or len(dn_indices) == 0:
+        raise ValueError("No DN neurons found for screening")
+    
+    n_dns = len(dn_indices)
+    print(f"Screening {n_dns} DN neurons: {dn_indices}")
+    
+    # Create modified neuron_params for DN screening
+    # Each "simulation" will stimulate a different DN neuron
+    original_input_currents = neuron_params.input_currents.copy()
+    
+    # Create input currents that stimulate each DN individually
+    screen_input_currents = jnp.zeros((n_dns, sim_params.n_param_sets, sim_params.n_neurons))
+    
+    for dn_idx, dn_neuron in enumerate(dn_indices):
+        # Set stimulation for this DN neuron across all parameter sets
+        for param_set in range(sim_params.n_param_sets):
+            # Use the original stimulation intensity but apply to the DN neuron
+            if original_input_currents.ndim == 3:
+                stim_intensity = jnp.max(original_input_currents[0, param_set])  # Use first stim config's intensity
+            else:
+                stim_intensity = jnp.max(original_input_currents[param_set])
+            
+            screen_input_currents = screen_input_currents.at[dn_idx, param_set, dn_neuron].set(stim_intensity)
+    
+    # Update simulation parameters for DN screening
+    screen_neuron_params = neuron_params._replace(input_currents=screen_input_currents)
+    screen_sim_params = sim_params._replace(
+        n_stim_configs=n_dns,  # Each DN is a "stimulus configuration"
+        n_param_sets=sim_params.n_param_sets
+    )
+    
+    total_sims = n_dns * sim_params.n_param_sets
+    
+    # Calculate optimal max_concurrent if not provided
+    if max_concurrent is None:
+        max_concurrent = calculate_optimal_concurrent_size(
+            n_neurons=sim_params.n_neurons,
+            n_timepoints=len(sim_params.t_axis),
+            total_simulations=total_sims,
+            is_pruning=False
+        )
+        print(f"Auto-calculated max_concurrent for DN screen: {max_concurrent}")
+    
+    # Create async manager for DN screening
+    manager = AsyncRegularSimManager(screen_neuron_params, screen_sim_params, sim_config)
+    
+    print(f"Starting DN screen with {total_sims} total simulations ({n_dns} DNs × {sim_params.n_param_sets} param sets)")
+    
+    async def run_screen_simulations():
+        results_list = await manager.run_streaming_regular_simulations(total_sims, max_concurrent)
+        return results_list
+    
+    # Run the async event loop
+    results_list = asyncio.run(run_screen_simulations())
+    
+    # Convert results to expected format
+    results_array = jnp.stack(results_list, axis=0)
+    results_reshaped = results_array.reshape(
+        n_dns, sim_params.n_param_sets,  # DNs × param_sets
+        sim_params.n_neurons, len(sim_params.t_axis)
+    )
+    
+    print(f"DN screen completed: {results_reshaped.shape}")
+    return results_reshaped
