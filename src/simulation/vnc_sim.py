@@ -253,7 +253,16 @@ def jax_choice(key, a, p):
     return random.categorical(key, jnp.log(p_normalized + 1e-10))
 
 def update_single_sim_state(state, R, mn_mask, oscillation_threshold=0.5, clip_start=250):
-    """Update state for a single simulation with proper round-based convergence logic"""
+    """Update state for a single simulation with proper round-based convergence logic
+    
+    Convergence is only declared when:
+    1. We need a new round (no more neurons available to remove)
+    2. The put_back sets are equal (algorithm is cycling)
+    3. We've done meaningful work (level > 0 or neurons were processed)
+    4. The oscillation score meets or exceeds the threshold
+    
+    OR when we're stuck in an infinite reset loop (no neurons left to try).
+    """
     
     # Unpack state
     (W_mask, interneuron_mask, level, total_removed_neurons, removed_stim_neurons,
@@ -276,18 +285,32 @@ def update_single_sim_state(state, R, mn_mask, oscillation_threshold=0.5, clip_s
     
     # CHECK FOR CONVERGENCE AT THE BEGINNING
     # Convergence happens when we need a new round AND the put_back sets are equal
+    # AND the oscillation score meets the threshold requirement
     # BUT only if we've actually been through at least one round (level > 0)
     sets_equal = jnp.array_equal(neurons_put_back, prev_put_back)
     has_done_meaningful_work = (level[0] > 0) | (jnp.sum(neurons_put_back) > 0) | (jnp.sum(total_removed_neurons) > 0)
-    currently_converged = (need_new_round & sets_equal & has_done_meaningful_work) | min_circuit.squeeze()
+    oscillation_meets_threshold = (oscillation_score >= oscillation_threshold) & jnp.isfinite(oscillation_score)
     
+    # Check if we're stuck in an infinite reset loop:
+    # This happens when all available interneurons are either removed or put back,
+    # but oscillation score is still too low - no progress can be made
+    available_interneurons = interneuron_mask & (~total_removed_neurons) & (~neurons_put_back)
+    no_neurons_left_to_try = jnp.sum(available_interneurons) == 0
+    stuck_in_reset_loop = no_neurons_left_to_try & (oscillation_score < oscillation_threshold) & (level[0] > 0)
+    
+    # Convergence occurs ONLY when normal convergence conditions are met
+    # Being stuck with low oscillation is NOT convergence - it's algorithm termination without success
+    normal_convergence = (need_new_round & sets_equal & has_done_meaningful_work & oscillation_meets_threshold)
+    currently_converged_scalar = normal_convergence | min_circuit.squeeze()
+    
+    # Maintain the shape of min_circuit
+    currently_converged = jnp.full_like(min_circuit, currently_converged_scalar, dtype=jnp.bool_)
+
     # Split key for potential use
     key_next, subkey_continue, subkey_reset = random.split(key, 3)
 
     # Check if oscillation is below threshold or NaN
-    reset_condition = (oscillation_score < oscillation_threshold) | jnp.isnan(oscillation_score)
-
-    ##### ALWAYS COMPUTE BOTH BRANCHES (for vmap compatibility) #####
+    reset_condition = (oscillation_score < oscillation_threshold) | jnp.isnan(oscillation_score)    ##### ALWAYS COMPUTE BOTH BRANCHES (for vmap compatibility) #####
     
     ##### CONTINUE BRANCH: Normal pruning (oscillation is good) #####
     # Identify currently silent interneurons - these are permanently removed
@@ -406,21 +429,24 @@ def update_single_sim_state(state, R, mn_mask, oscillation_threshold=0.5, clip_s
 
     # Update W_mask to reflect removed neurons
     W_mask_init = jnp.ones_like(W_mask, dtype=jnp.bool_)
-    active_neurons = ~branch_total_removed
+    # Active neurons are those NOT removed, OR those that have been put back
+    active_neurons = (~branch_total_removed) | branch_neurons_put_back
     W_mask_new = (W_mask_init * active_neurons[:, None] * active_neurons[None, :]).astype(jnp.bool_)
 
     ##### FINAL SELECTION: CURRENT STATE (if converged) vs NEW STATE (if not converged) #####
     # This is the key fix: when converged, select ALL current state values
-    final_total_removed = jax.lax.select(currently_converged, total_removed_neurons, branch_total_removed)
-    final_removed_stim = jax.lax.select(currently_converged, removed_stim_neurons, branch_removed_stim)
-    final_last_removed = jax.lax.select(currently_converged, last_removed, branch_last_removed)
-    final_neurons_put_back = jax.lax.select(currently_converged, neurons_put_back, branch_neurons_put_back)
-    final_prev_put_back = jax.lax.select(currently_converged, prev_put_back, branch_prev_put_back)
+    # Use the scalar version for select operations
+    currently_converged_scalar = currently_converged.squeeze()
+    final_total_removed = jax.lax.select(currently_converged_scalar, total_removed_neurons, branch_total_removed)
+    final_removed_stim = jax.lax.select(currently_converged_scalar, removed_stim_neurons, branch_removed_stim)
+    final_last_removed = jax.lax.select(currently_converged_scalar, last_removed, branch_last_removed)
+    final_neurons_put_back = jax.lax.select(currently_converged_scalar, neurons_put_back, branch_neurons_put_back)
+    final_prev_put_back = jax.lax.select(currently_converged_scalar, prev_put_back, branch_prev_put_back)
     # Ensure level never decreases - use max of current and branch levels
     final_level = jnp.maximum(level, branch_level)
-    final_p = jax.lax.select(currently_converged, remove_p, branch_p)
-    final_W_mask = jax.lax.select(currently_converged, W_mask, W_mask_new)
-    final_key = jax.lax.select(currently_converged, key, key_next)
+    final_p = jax.lax.select(currently_converged_scalar, remove_p, branch_p)
+    final_W_mask = jax.lax.select(currently_converged_scalar, W_mask, W_mask_new)
+    final_key = jax.lax.select(currently_converged_scalar, key, key_next)
 
     # Debug information
     # jax.debug.print("Level: {level}, Converged: {conv}, Osc: {score}, NewRound: {nr}, SetsEq: {eq}", 
