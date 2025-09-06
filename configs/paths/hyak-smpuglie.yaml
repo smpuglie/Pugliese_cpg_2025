@@ -1,0 +1,10 @@
+user: smpuglie
+
+# set the directory where the output files get saved
+cwd_dir:  /gscratch/portia/${paths.user}/github/Pugliese_2025/
+base_dir: /gscratch/portia/${paths.user}/Pugliese_2025/${experiment.name}/${version}
+save_dir: ${multirun_save_dir:${paths.base_dir},${run_id}}
+log_dir:  ${paths.save_dir}/logs/
+ckpt_dir: ${paths.save_dir}/ckpt/
+fig_dir:  ${paths.save_dir}/figures/
+data_dir: ${paths.cwd_dir}/data

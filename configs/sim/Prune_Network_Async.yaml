@@ -1,0 +1,26 @@
+# Enhanced Prune Network configuration with async support
+T: 1.0
+dt: 0.001
+pulseStart: 0.02
+pulseEnd: 0.999
+shuffle: False
+noise: False
+noiseStdvProp: 0.1
+noiseMean: 0.0
+noiseStdv: 0.0
+prune_network: True
+adjustStimI: False
+max_adjustment_iters: 10
+n_active_upper: 500
+n_active_lower: 5
+n_high_fr_upper: 100
+high_fr_threshold: 100.0
+
+# Checkpointing configuration
+enable_checkpointing: False # Enable intermediate checkpointing
+
+# NEW: Async execution parameters
+async_mode: "streaming"  # Options: "sync", "streaming"
+# - "sync": Standard synchronous execution
+# - "streaming": Streaming async execution (recommended for high throughput)
+# - "streaming": Continuous processing - new simulations start as others finish

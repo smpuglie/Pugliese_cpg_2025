@@ -46,7 +46,7 @@ def submit(gpus, partition, job_name, mem, cpus, time, note, experiment, sim, mo
 #SBATCH --open-mode=append
 #SBATCH -o ./OutFiles/slurm-%A_%a.out
 #SBATCH --mail-type=ALL
-#SBATCH --mail-user=eabe@uw.edu
+#SBATCH --mail-user=smpuglie@uw.edu
 #SBATCH --exclude=g[3001-3007,3010-3017,3020-3027,3030-3037,3114],z[3001,3002,3005,3006]
 module load cuda/12.6.3
 set -x
@@ -55,7 +55,7 @@ nvidia-smi
 conda activate bdn2cpg
 unset LD_LIBRARY_PATH
 echo $SLURMD_NODENAME
-python -u ./src/run_hydra.py hydra.mode={mode} paths=hyak note={note} version=hyak experiment={experiment} sim={sim} load_jobid={load_jobid} run_id=$SLURM_JOB_ID {override}
+python -u ./src/run_hydra.py hydra.mode={mode} paths=hyak-smpuglie note={note} version=hyak experiment={experiment} sim={sim} load_jobid={load_jobid} run_id=$SLURM_JOB_ID {override}
             """
     print(f"Submitting job")
     print(script)
