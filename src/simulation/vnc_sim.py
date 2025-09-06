@@ -284,23 +284,20 @@ def update_single_sim_state(state, R, mn_mask, oscillation_threshold=0.5, clip_s
     need_new_round = (current_available <= 0) | (~jnp.isfinite(p_sum_current))
     
     # CHECK FOR CONVERGENCE AT THE BEGINNING
-    # Convergence happens when we need a new round AND the put_back sets are equal
+    # Convergence happens when we need a new round AND we're cycling through restoration patterns
     # AND the oscillation score meets the threshold requirement
     # BUT only if we've actually been through at least one round (level > 0)
     sets_equal = jnp.array_equal(neurons_put_back, prev_put_back)
     has_done_meaningful_work = (level[0] > 0) | (jnp.sum(neurons_put_back) > 0) | (jnp.sum(total_removed_neurons) > 0)
     oscillation_meets_threshold = (oscillation_score >= oscillation_threshold) & jnp.isfinite(oscillation_score)
     
-    # Check if we're stuck in an infinite reset loop:
-    # This happens when all available interneurons are either removed or put back,
-    # but oscillation score is still too low - no progress can be made
-    available_interneurons = interneuron_mask & (~total_removed_neurons) & (~neurons_put_back)
-    no_neurons_left_to_try = jnp.sum(available_interneurons) == 0
-    stuck_in_reset_loop = no_neurons_left_to_try & (oscillation_score < oscillation_threshold) & (level[0] > 0)
+    # Modified convergence: We converge when we have good oscillation AND either:
+    # 1. We're cycling (sets_equal) - indicates we've explored different orders
+    # 2. OR we have an empty restoration set (no neurons needed restoring)
+    empty_restoration = jnp.sum(neurons_put_back) == 0
+    cycling_or_stable = sets_equal | empty_restoration
     
-    # Convergence occurs ONLY when normal convergence conditions are met
-    # Being stuck with low oscillation is NOT convergence - it's algorithm termination without success
-    normal_convergence = (need_new_round & sets_equal & has_done_meaningful_work & oscillation_meets_threshold)
+    normal_convergence = (need_new_round & has_done_meaningful_work & oscillation_meets_threshold & cycling_or_stable)
     currently_converged_scalar = normal_convergence | min_circuit.squeeze()
     
     # Maintain the shape of min_circuit
