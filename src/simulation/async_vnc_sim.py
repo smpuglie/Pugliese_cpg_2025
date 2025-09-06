@@ -604,7 +604,7 @@ class AsyncPruningManager:
                 'min': float(jnp.min(final_results)),
                 'max': float(jnp.max(final_results)), 
                 'mean': float(jnp.mean(final_results)),
-                'nonzero': int(jnp.sum(final_results > 0))
+                'nonzero': int((jnp.sum(final_results, axis=-1) > 0).sum())
             }
             async_logger.log_sim(sim_index, 
                 f"Final simulation completed: {result_stats}", 
