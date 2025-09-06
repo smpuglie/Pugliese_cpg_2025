@@ -284,20 +284,25 @@ def update_single_sim_state(state, R, mn_mask, oscillation_threshold=0.5, clip_s
     need_new_round = (current_available <= 0) | (~jnp.isfinite(p_sum_current))
     
     # CHECK FOR CONVERGENCE AT THE BEGINNING
-    # Convergence happens when we need a new round AND we're cycling through restoration patterns
-    # AND the oscillation score meets the threshold requirement
-    # BUT only if we've actually been through at least one round (level > 0)
+    # Convergence happens when we have sufficient evidence that we've found a minimal circuit:
+    # 1. Good oscillation AND cycling detected (explored different removal orders)
+    # 2. OR need new round (exhausted available neurons) AND other conditions met
+    # 3. AND we've done meaningful work (removed/restored neurons)
     sets_equal = jnp.array_equal(neurons_put_back, prev_put_back)
     has_done_meaningful_work = (level[0] > 0) | (jnp.sum(neurons_put_back) > 0) | (jnp.sum(total_removed_neurons) > 0)
     oscillation_meets_threshold = (oscillation_score >= oscillation_threshold) & jnp.isfinite(oscillation_score)
     
-    # Modified convergence: We converge when we have good oscillation AND either:
-    # 1. We're cycling (sets_equal) - indicates we've explored different orders
-    # 2. OR we have an empty restoration set (no neurons needed restoring)
+    # Empty restoration indicates a stable solution (no neurons need to be put back)
     empty_restoration = jnp.sum(neurons_put_back) == 0
-    cycling_or_stable = sets_equal | empty_restoration
     
-    normal_convergence = (need_new_round & has_done_meaningful_work & oscillation_meets_threshold & cycling_or_stable)
+    # We can converge in two scenarios:
+    # Scenario 1: We have good oscillation AND we're cycling (explored different orders)
+    cycling_convergence = oscillation_meets_threshold & sets_equal & has_done_meaningful_work
+    
+    # Scenario 2: Traditional convergence when we've exhausted neurons to remove
+    exhaustion_convergence = need_new_round & has_done_meaningful_work & oscillation_meets_threshold & (sets_equal | empty_restoration)
+    
+    normal_convergence = cycling_convergence | exhaustion_convergence
     currently_converged_scalar = normal_convergence | min_circuit.squeeze()
     
     # Maintain the shape of min_circuit
