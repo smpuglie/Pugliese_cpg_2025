@@ -22,3 +22,5 @@ dependencies:
     - natsort
     - nvidia-ml-py3
     - tqdm
+    - pynvml
+    - psutil

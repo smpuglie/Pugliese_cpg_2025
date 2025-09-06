@@ -18,8 +18,8 @@ import jax.numpy as jnp
 import sparse
 from omegaconf import OmegaConf
 from natsort import natsorted
-from . import io_dict_to_hdf5 as ioh5
-from .data_classes import NeuronParams, SimParams, SimulationConfig, Pruning_state, CheckpointState
+from src.utils import io_dict_to_hdf5 as ioh5
+from src.data.data_classes import NeuronParams, SimParams, SimulationConfig, Pruning_state, CheckpointState
 
 
 def extract_neuron_params_batch(neuron_params: NeuronParams, start_idx: int, end_idx: int) -> NeuronParams:

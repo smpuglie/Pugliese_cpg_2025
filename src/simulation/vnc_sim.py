@@ -12,18 +12,18 @@ from omegaconf import DictConfig
 from pathlib import Path
 
 # Import utility functions (assumed to exist)
-from src.shuffle_utils import extract_shuffle_indices, full_shuffle
-from src.sim_utils import (
+from src.utils.shuffle_utils import extract_shuffle_indices, full_shuffle
+from src.utils.sim_utils import (
     load_W, load_wTable, sample_trunc_normal, set_sizes, make_input,
     compute_oscillation_score
 )
-from src.data_classes import (
+from src.data.data_classes import (
     NeuronParams, SimParams, SimulationConfig, Pruning_state, CheckpointState
 )
-from src.checkpointing import (
+from src.memory.checkpointing import (
     load_checkpoint, save_checkpoint, find_latest_checkpoint, cleanup_old_checkpoints
 )
-from src.adaptive_memory import (
+from src.memory.adaptive_memory import (
     aggressive_memory_cleanup, monitor_memory_usage, should_trigger_cleanup,
     get_conservative_batch_size, log_memory_status, create_memory_manager, 
     optimize_for_performance_vs_stability
@@ -1616,7 +1616,7 @@ def prepare_neuron_params(cfg: DictConfig, W_table: Any, param_path: Optional[Pa
         W_mask = W_mask.at[:, :, keep_neurons].set(True)
         print(f"Initial keeping of neurons at indices: {cfg.experiment.keepOnly}")
     if (param_path is not None) and param_path.exists():
-        import src.io_dict_to_hdf5 as ioh5
+        import src.utils.io_dict_to_hdf5 as ioh5
         nparams = ioh5.load(param_path, enable_jax=True)
         print('Loaded neuron parameters from', param_path)
         return NeuronParams(**nparams)

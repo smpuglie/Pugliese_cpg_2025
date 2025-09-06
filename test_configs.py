@@ -1,7 +1,7 @@
 import hydra
 from pathlib import Path
 from omegaconf import DictConfig, OmegaConf
-from src.path_utils import save_config, convert_dict_to_path
+from src.utils.path_utils import save_config, convert_dict_to_path
 
 
 @hydra.main(version_base=None, config_path="configs", config_name="config")

@@ -15,13 +15,13 @@ from dataclasses import dataclass, field
 from collections import defaultdict
 
 # Import existing simulation components
-from src.vnc_sim import (
+from src.simulation.vnc_sim import (
     run_single_simulation, update_single_sim_state, initialize_pruning_state,
     get_batch_function, reweight_connectivity, removal_probability, add_noise_to_weights
 )
-from src.shuffle_utils import full_shuffle
-from src.data_classes import NeuronParams, SimParams, SimulationConfig, Pruning_state
-from src.adaptive_memory import (
+from src.utils.shuffle_utils import full_shuffle
+from src.data.data_classes import NeuronParams, SimParams, SimulationConfig, Pruning_state
+from src.memory.adaptive_memory import (
     monitor_memory_usage, get_conservative_batch_size, log_memory_status, get_gpu_count,
     create_memory_manager, calculate_optimal_concurrent_size
 )
@@ -542,10 +542,7 @@ class AsyncPruningManager:
         
         # Update neuron params with final pruned network - single simulation format
         final_neuron_params = self.neuron_params._replace(W_mask=W_mask_final[None, ...])  # Add batch dim
-        
-        # Import the pruning simulation function
-        from src.vnc_sim import run_with_Wmask
-        
+                
         async_logger.log_sim(sim_index, 
             f"Starting final simulation with {jnp.sum(active_neurons_from_pruning)} neurons", 
             "FINAL_SIM")
@@ -907,7 +904,7 @@ class AsyncPruningManager:
                             all_neurons = jnp.arange(self.neuron_params.W.shape[-1])
                             in_idxs = jnp.setdiff1d(all_neurons, mn_idxs)
                             
-                            from src.vnc_sim import Pruning_state
+                            from src.data.data_classes import Pruning_state
                             empty_state = Pruning_state(
                                 W_mask=jnp.ones((self.neuron_params.W.shape[0], self.neuron_params.W.shape[1]), dtype=jnp.bool),
                                 interneuron_mask=jnp.isin(jnp.arange(self.sim_params.n_neurons), in_idxs),

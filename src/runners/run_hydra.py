@@ -17,9 +17,9 @@ import sparse
 import logging
 from omegaconf import DictConfig, OmegaConf
 from pathlib import Path
-from . utils import io_dict_to_hdf5 as ioh5
-from .utils.path_utils import convert_dict_to_path, save_config
-from .simulation.vnc_sim import run_vnc_simulation, prepare_neuron_params, prepare_sim_params, parse_simulation_config, load_wTable
+import src.utils.io_dict_to_hdf5 as ioh5
+from src.utils.path_utils import convert_dict_to_path, save_config
+from src.simulation.vnc_sim import run_vnc_simulation, prepare_neuron_params, prepare_sim_params, parse_simulation_config, load_wTable
 
 # Set up logging to capture all output
 def setup_logging():
@@ -166,11 +166,11 @@ def main(cfg: DictConfig):
                 
                 # Import async functions
                 try:
-                    from .simulation.async_vnc_sim import (
+                    from src.simulation.async_vnc_sim import (
                         run_streaming_pruning_simulation,
                         run_streaming_regular_simulation
                     )
-                    from .simulation.vnc_sim import prepare_vnc_simulation_params
+                    from src.simulation.vnc_sim import prepare_vnc_simulation_params
                 except ImportError as e:
                     print(f"Warning: Could not import async modules: {e}")
                     print("Falling back to synchronous execution")
