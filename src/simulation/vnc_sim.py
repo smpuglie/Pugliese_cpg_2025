@@ -253,16 +253,7 @@ def jax_choice(key, a, p):
     return random.categorical(key, jnp.log(p_normalized + 1e-10))
 
 def update_single_sim_state(state, R, mn_mask, oscillation_threshold=0.5, clip_start=250):
-    """Update state for a single simulation with proper round-based convergence logic
-    
-    Convergence is only declared when:
-    1. We need a new round (no more neurons available to remove)
-    2. The put_back sets are equal (algorithm is cycling)
-    3. We've done meaningful work (level > 0 or neurons were processed)
-    4. The oscillation score meets or exceeds the threshold
-    
-    OR when we're stuck in an infinite reset loop (no neurons left to try).
-    """
+    """Update state for a single simulation with proper round-based convergence logic"""
     
     # Unpack state
     (W_mask, interneuron_mask, level, total_removed_neurons, removed_stim_neurons,
@@ -283,34 +274,20 @@ def update_single_sim_state(state, R, mn_mask, oscillation_threshold=0.5, clip_s
     # If no neurons left to remove or all probabilities are zero, we need a new round
     need_new_round = (current_available <= 0) | (~jnp.isfinite(p_sum_current))
     
-    # CHECK FOR CONVERGENCE AT THE BEGINNING  
-    # Convergence happens when we need a new round AND we're cycling through restoration patterns
-    # AND the oscillation score meets the threshold requirement
+    # CHECK FOR CONVERGENCE AT THE BEGINNING
+    # Convergence happens when we need a new round AND the put_back sets are equal
     # BUT only if we've actually been through at least one round (level > 0)
     sets_equal = jnp.array_equal(neurons_put_back, prev_put_back)
     has_done_meaningful_work = (level[0] > 0) | (jnp.sum(neurons_put_back) > 0) | (jnp.sum(total_removed_neurons) > 0)
-    oscillation_meets_threshold = (oscillation_score >= oscillation_threshold) & jnp.isfinite(oscillation_score)
+    currently_converged = (need_new_round & sets_equal & has_done_meaningful_work) | min_circuit.squeeze()
     
-    # Modified convergence: We converge when we have good oscillation AND either:
-    # 1. We're cycling (sets_equal) AND have completed at least one full round (level > 0) - indicates we've explored different orders
-    # 2. OR we have an empty restoration set AND need a new round (stable solution)
-    empty_restoration = jnp.sum(neurons_put_back) == 0
-    
-    # Real cycling detection: sets equal AND we've done restoration work (level > 0 OR have put back neurons)
-    meaningful_cycling = sets_equal & ((level[0] > 0) | (jnp.sum(neurons_put_back) > 0))
-    cycling_or_stable = meaningful_cycling | (empty_restoration & need_new_round)
-    
-    normal_convergence = (need_new_round & has_done_meaningful_work & oscillation_meets_threshold & cycling_or_stable)
-    currently_converged_scalar = normal_convergence | min_circuit.squeeze()
-    
-    # Maintain the shape of min_circuit
-    currently_converged = jnp.full_like(min_circuit, currently_converged_scalar, dtype=jnp.bool_)
-
     # Split key for potential use
     key_next, subkey_continue, subkey_reset = random.split(key, 3)
 
     # Check if oscillation is below threshold or NaN
-    reset_condition = (oscillation_score < oscillation_threshold) | jnp.isnan(oscillation_score)    ##### ALWAYS COMPUTE BOTH BRANCHES (for vmap compatibility) #####
+    reset_condition = (oscillation_score < oscillation_threshold) | jnp.isnan(oscillation_score)
+
+    ##### ALWAYS COMPUTE BOTH BRANCHES (for vmap compatibility) #####
     
     ##### CONTINUE BRANCH: Normal pruning (oscillation is good) #####
     # Identify currently silent interneurons - these are permanently removed
@@ -447,6 +424,7 @@ def update_single_sim_state(state, R, mn_mask, oscillation_threshold=0.5, clip_s
     final_p = jax.lax.select(currently_converged_scalar, remove_p, branch_p)
     final_W_mask = jax.lax.select(currently_converged_scalar, W_mask, W_mask_new)
     final_key = jax.lax.select(currently_converged_scalar, key, key_next)
+
 
     # Debug information
     # jax.debug.print("Level: {level}, Converged: {conv}, Osc: {score}, NewRound: {nr}, SetsEq: {eq}", 
