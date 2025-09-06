@@ -6,9 +6,10 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import traceback
-import psutil
-from typing import NamedTuple, Dict, Any, Optional, Tuple, List, Union
-from pathlib import Path
+import psutil                    
+import gc
+
+from typing import Dict, Any, Optional, Tuple, List, Union
 import threading
 from queue import Queue
 from dataclasses import dataclass, field
@@ -16,8 +17,8 @@ from collections import defaultdict
 
 # Import existing simulation components
 from src.simulation.vnc_sim import (
-    run_single_simulation, update_single_sim_state, initialize_pruning_state,
-    get_batch_function, reweight_connectivity, removal_probability, add_noise_to_weights
+    run_single_simulation, update_single_sim_state, 
+    reweight_connectivity, removal_probability, add_noise_to_weights
 )
 from src.utils.shuffle_utils import full_shuffle
 from src.data.data_classes import NeuronParams, SimParams, SimulationConfig, Pruning_state
@@ -502,7 +503,6 @@ class AsyncPruningManager:
                 
             except Exception as e:
                 async_logger.log_sim(sim_index, f"Failed at iteration {iteration}: {e}", "ERROR")
-                import traceback
                 traceback.print_exc()
                 raise e
             
@@ -732,7 +732,6 @@ class AsyncPruningManager:
                     
                     # Memory monitoring for large simulations
                     try:
-                        import psutil
                         memory_info = psutil.virtual_memory()
                         memory_percent = memory_info.percent
                         available_gb = memory_info.available / (1024**3)
@@ -938,7 +937,6 @@ class AsyncPruningManager:
                         jax.clear_caches()
                     
                     # Force garbage collection more frequently for large simulations
-                    import gc
                     gc.collect()
                     
                     # Aggressive memory cleanup every 50 simulations to prevent OOM
@@ -989,7 +987,6 @@ class AsyncPruningManager:
         # Final comprehensive memory cleanup
         del results_dict, states_dict, mini_circuits_dict, active_tasks, task_devices, device_load_counts
         jax.clear_caches()
-        import gc
         gc.collect()
         
         async_logger.log_batch("🧹 Final memory cleanup completed")

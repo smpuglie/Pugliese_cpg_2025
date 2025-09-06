@@ -5,7 +5,7 @@ import jax.numpy as jnp
 import numpy as np
 import psutil
 import gc
-from typing import NamedTuple, Dict, Any, Optional, Tuple, List, Union
+from typing import Any, Optional, Tuple, List, Union
 from diffrax import Dopri5, ODETerm, PIDController, SaveAt, diffeqsolve, Event
 from jax import vmap, jit, random, pmap
 from omegaconf import DictConfig
@@ -24,9 +24,7 @@ from src.memory.checkpointing import (
     load_checkpoint, save_checkpoint, find_latest_checkpoint, cleanup_old_checkpoints
 )
 from src.memory.adaptive_memory import (
-    aggressive_memory_cleanup, monitor_memory_usage, should_trigger_cleanup,
-    get_conservative_batch_size, log_memory_status, create_memory_manager, 
-    optimize_for_performance_vs_stability
+    monitor_memory_usage, create_memory_manager
 )
 
 # #############################################################################################################################=
