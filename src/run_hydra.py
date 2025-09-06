@@ -166,11 +166,11 @@ def main(cfg: DictConfig):
                 
                 # Import async functions
                 try:
-                    from .simulation.async_vnc_sim import (
+                    from src.simulation.async_vnc_sim import (
                         run_streaming_pruning_simulation,
                         run_streaming_regular_simulation
                     )
-                    from .simulation.vnc_sim import prepare_vnc_simulation_params
+                    from src.simulation.vnc_sim import prepare_vnc_simulation_params
                 except ImportError as e:
                     print(f"Warning: Could not import async modules: {e}")
                     print("Falling back to synchronous execution")
