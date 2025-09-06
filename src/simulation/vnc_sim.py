@@ -279,7 +279,15 @@ def update_single_sim_state(state, R, mn_mask, oscillation_threshold=0.5, clip_s
     # BUT only if we've actually been through at least one round (level > 0)
     sets_equal = jnp.array_equal(neurons_put_back, prev_put_back)
     has_done_meaningful_work = (level[0] > 0) | (jnp.sum(neurons_put_back) > 0) | (jnp.sum(total_removed_neurons) > 0)
-    currently_converged = (need_new_round & sets_equal & has_done_meaningful_work) | min_circuit.squeeze()
+    oscillation_meets_threshold = (oscillation_score >= oscillation_threshold) & jnp.isfinite(oscillation_score)
+
+    # Convergence occurs ONLY when normal convergence conditions are met
+    # Being stuck with low oscillation is NOT convergence - it's algorithm termination without success
+    normal_convergence = (need_new_round & sets_equal & has_done_meaningful_work & oscillation_meets_threshold)
+    currently_converged_scalar = normal_convergence | min_circuit.squeeze()
+
+    # Maintain the shape of min_circuit
+    currently_converged = jnp.full_like(min_circuit, currently_converged_scalar, dtype=jnp.bool_)
     
     # Split key for potential use
     key_next, subkey_continue, subkey_reset = random.split(key, 3)
