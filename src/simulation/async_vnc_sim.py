@@ -532,6 +532,8 @@ class AsyncPruningManager:
                         async_logger.log_sim(sim_index, "Emergency memory cleanup triggered", "PROGRESS")            # Yield control to allow other simulations to run
             await asyncio.sleep(0)
         
+        if iteration >= self.sim_config.max_pruning_iterations:
+            async_logger.log_sim(sim_index, f"Reached max iterations ({self.sim_config.max_pruning_iterations}) without convergence", "COMPLETE")
         # Run final simulation with converged pruned network
         # First create W_mask from pruning state to define the network structure
         active_neurons_from_pruning = (~sim_state.pruning_state.total_removed_neurons) | sim_state.pruning_state.last_removed | sim_state.pruning_state.prev_put_back
