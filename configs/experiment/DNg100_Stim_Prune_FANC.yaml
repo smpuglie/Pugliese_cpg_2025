@@ -7,11 +7,11 @@ n_replicates: 1024
 batch_size: 64
 dn_screen: False
 stimNeurons: 
-  - [31]
+  - [0]
 removeNeurons: []
 keepOnly: []
 stimI: 
-  - [250]
+  - [150]
 seed: 1
 saveFigs: True
 useTsp: False
