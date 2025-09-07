@@ -2097,8 +2097,15 @@ class AsyncRegularSimManager:
         print(f"    Warning: Maximum adjustment iterations reached")
         return False
 
-    async def run_streaming_regular_simulations(self, total_simulations: int, max_concurrent: Optional[int] = None) -> List[jnp.ndarray]:
+    async def run_streaming_regular_simulations(self, total_simulations: int, max_concurrent: Optional[int] = None, checkpoint_dir: Optional[Path] = None, enable_checkpointing: bool = False) -> List[jnp.ndarray]:
         """Run regular simulations with continuous streaming and optional stimulation adjustment."""
+        # DEBUG: Print checkpoint parameters
+        print(f"🔍 REGULAR CHECKPOINT DEBUG: enable_checkpointing={enable_checkpointing}, checkpoint_dir={checkpoint_dir}")
+        if enable_checkpointing:
+            print(f"🔍 REGULAR CHECKPOINT DEBUG: Checkpoint directory exists: {checkpoint_dir.exists() if checkpoint_dir else 'None'}")
+        else:
+            print(f"🔍 REGULAR CHECKPOINT DEBUG: Checkpointing is disabled")
+            
         if max_concurrent is None:
             max_concurrent = calculate_optimal_concurrent_size(
                 n_neurons=self.sim_params.n_neurons,
@@ -2118,19 +2125,62 @@ class AsyncRegularSimManager:
         
         if adjust_stimulation:
             async_logger.log_batch("Stimulation adjustment enabled - using batch processing")
-            return await self._run_with_stimulation_adjustment(total_simulations, max_concurrent)
+            return await self._run_with_stimulation_adjustment(total_simulations, max_concurrent, checkpoint_dir, enable_checkpointing)
         else:
             async_logger.log_batch("Standard streaming mode")
-            return await self._run_standard_streaming(total_simulations, max_concurrent)
+            return await self._run_standard_streaming(total_simulations, max_concurrent, checkpoint_dir, enable_checkpointing)
     
-    async def _run_standard_streaming(self, total_simulations: int, max_concurrent: int) -> List[jnp.ndarray]:
+    async def _run_standard_streaming(self, total_simulations: int, max_concurrent: int, checkpoint_dir: Optional[Path] = None, enable_checkpointing: bool = False) -> List[jnp.ndarray]:
         """Run simulations with standard streaming (no stimulation adjustment)."""
         # Initialize result storage
         results_dict = {}
         failed_sims = set()
         
-        # Create a queue of simulation indices to process
-        pending_sims = list(range(total_simulations))
+        # Checkpoint recovery
+        completed_count = 0
+        if enable_checkpointing and checkpoint_dir:
+            checkpoint_result = find_latest_checkpoint(checkpoint_dir, pattern="regular_checkpoint_*")
+            if checkpoint_result:
+                try:
+                    latest_checkpoint, base_name = checkpoint_result
+                    checkpoint_state, adjusted_neuron_params, metadata = load_checkpoint(latest_checkpoint, base_name, self.adjusted_neuron_params)
+                    
+                    # Handle different checkpoint types
+                    if checkpoint_state.checkpoint_type == "streaming":
+                        # For streaming: use completed_simulations, keep original neuron_params
+                        completed_sims = set(checkpoint_state.completed_simulations)
+                        completed_count = len(checkpoint_state.completed_simulations)
+                        # Load results from checkpoint
+                        for sim_idx in checkpoint_state.completed_simulations:
+                            if hasattr(checkpoint_state, 'results_dict') and checkpoint_state.results_dict:
+                                results_dict[sim_idx] = checkpoint_state.results_dict[sim_idx]
+                            else:
+                                # Create placeholder result for completed simulations without stored results
+                                placeholder_result = jnp.zeros((self.sim_params.n_neurons, len(self.sim_params.t_axis)))
+                                placeholder_result = jax.device_put(placeholder_result, jax.devices("cpu")[0])
+                                results_dict[sim_idx] = placeholder_result
+                        
+                        # Don't replace neuron_params for streaming (adjusted_neuron_params might be None)
+                        if adjusted_neuron_params is not None:
+                            self.adjusted_neuron_params = adjusted_neuron_params
+                            
+                        async_logger.log_batch(f"📂 Resuming from streaming checkpoint: {completed_count}/{total_simulations} completed")
+                    else:
+                        # For batch: use completed_batches, use adjusted neuron_params
+                        completed_count = checkpoint_state.completed_batches
+                        if adjusted_neuron_params is not None:
+                            self.adjusted_neuron_params = adjusted_neuron_params
+                        async_logger.log_batch(f"📂 Resuming from batch checkpoint: {completed_count} batches completed")
+                        
+                except Exception as e:
+                    async_logger.log_batch(f"⚠️ Could not load checkpoint {latest_checkpoint}: {e}")
+                    async_logger.log_batch("Starting from beginning...")
+                    completed_count = 0
+                    results_dict = {}
+        
+        # Create a queue of simulation indices to process (excluding completed ones)
+        pending_sims = [i for i in range(total_simulations) if i not in results_dict]
+        async_logger.log_batch(f"Regular simulations to process: {len(pending_sims)} pending, {len(results_dict)} already completed")
         active_tasks = {}
         task_devices = {}
         device_load_counts = {i: 0 for i in range(self.n_devices)}
@@ -2139,8 +2189,8 @@ class AsyncRegularSimManager:
             """Get the device with the least number of active simulations."""
             return min(device_load_counts.keys(), key=lambda device_id: device_load_counts[device_id])
         
-        # Progress tracking
-        completed_count = 0
+        # Progress tracking - set completed_count to match already loaded results
+        completed_count = len(results_dict)
         start_time = time.time()
         
         # Create progress monitoring task
@@ -2212,6 +2262,49 @@ class AsyncRegularSimManager:
                         
                         result_max = float(jnp.max(final_results))
                         async_logger.log_batch(f"✅ Completed Sim {sim_idx} on device {device_id} - max rate: {result_max:.4f} ({completed_count}/{total_simulations})")
+                        
+                        # Save checkpoint if enabled and at intervals
+                        checkpoint_interval = getattr(self.sim_config, 'checkpoint_interval', 10)
+                        if enable_checkpointing and checkpoint_dir and (completed_count % checkpoint_interval == 0 or completed_count == total_simulations):
+                            try:
+                                # Create list of completed simulation indices
+                                completed_simulations = list(results_dict.keys())
+                                
+                                # Create checkpoint state for streaming simulations
+                                from src.data.data_classes import CheckpointState
+                                checkpoint_state = CheckpointState(
+                                    batch_index=None,  # Not applicable for streaming
+                                    completed_batches=None,  # Not applicable for streaming  
+                                    total_batches=None,  # Not applicable for streaming
+                                    n_result_batches=None,  # Not applicable for streaming
+                                    accumulated_mini_circuits=None,  # Not applicable for regular sims
+                                    neuron_params=self.adjusted_neuron_params,
+                                    pruning_state=None,  # Not applicable for regular sims
+                                    checkpoint_type="streaming",
+                                    completed_simulations=completed_simulations,
+                                    results_dict=None  # Don't store large results in checkpoint
+                                )
+                                
+                                checkpoint_path = checkpoint_dir / f"regular_checkpoint_{completed_count}.h5"
+                                metadata = {
+                                    "sim_type": getattr(self.sim_config, 'sim_type', 'regular'),
+                                    "enable_pruning": False,
+                                    "total_sims": total_simulations,
+                                    "max_concurrent": max_concurrent,
+                                    "completed_count": completed_count,
+                                    "total_simulations": total_simulations,
+                                    "timestamp": time.time()
+                                }
+                                
+                                from src.memory.checkpointing import save_checkpoint, cleanup_old_checkpoints
+                                save_checkpoint(checkpoint_state, checkpoint_path, metadata)
+                                async_logger.log_batch(f"💾 Regular checkpoint saved: {completed_count}/{total_simulations} completed")
+                                
+                                # Clean up old checkpoints (keep last 3)
+                                cleanup_old_checkpoints(checkpoint_dir, keep_last_n=3)
+                                
+                            except Exception as checkpoint_error:
+                                async_logger.log_batch(f"⚠️ Regular checkpoint save failed: {checkpoint_error}")
                         
                         # Clean up memory
                         del result, final_results
@@ -2296,35 +2389,365 @@ class AsyncRegularSimManager:
         
         return results_list
     
-    async def _run_with_stimulation_adjustment(self, total_simulations: int, max_concurrent: int) -> List[jnp.ndarray]:
-        """Run simulations with stimulation adjustment using batch processing."""
-        # For stimulation adjustment, we need to process in batches
-        batch_size = max_concurrent
-        n_batches = (total_simulations + batch_size - 1) // batch_size
+    async def _run_with_stimulation_adjustment(self, total_simulations: int, max_concurrent: int, checkpoint_dir: Optional[Path] = None, enable_checkpointing: bool = False) -> List[jnp.ndarray]:
+        """Run simulations with stimulation adjustment using streaming processing."""
+        # Initialize result storage
+        results_dict = {}
+        failed_sims = set()
+        adjustment_iterations = {}  # Track iterations per simulation
         
-        all_results = []
+        # Checkpoint recovery for streaming stimulus adjustment
+        completed_count = 0
+        if enable_checkpointing and checkpoint_dir:
+            from src.memory.checkpointing import find_latest_checkpoint, load_checkpoint
+            checkpoint_result = find_latest_checkpoint(checkpoint_dir, pattern="regular_checkpoint_*")
+            if checkpoint_result:
+                try:
+                    latest_checkpoint, base_name = checkpoint_result
+                    checkpoint_state, adjusted_neuron_params, metadata = load_checkpoint(latest_checkpoint, base_name, self.adjusted_neuron_params)
+                    
+                    # Handle different checkpoint types
+                    if checkpoint_state.checkpoint_type == "streaming":
+                        # For streaming: use completed_simulations, keep original neuron_params
+                        completed_sims = set(checkpoint_state.completed_simulations)
+                        completed_count = len(checkpoint_state.completed_simulations)
+                        # Load results from checkpoint
+                        for sim_idx in checkpoint_state.completed_simulations:
+                            if hasattr(checkpoint_state, 'results_dict') and checkpoint_state.results_dict:
+                                results_dict[sim_idx] = checkpoint_state.results_dict[sim_idx]
+                                adjustment_iterations[sim_idx] = 0  # Mark as completed
+                            else:
+                                # Create placeholder result for completed simulations
+                                placeholder_result = jnp.zeros((self.sim_params.n_neurons, len(self.sim_params.t_axis)))
+                                placeholder_result = jax.device_put(placeholder_result, jax.devices("cpu")[0])
+                                results_dict[sim_idx] = placeholder_result
+                                adjustment_iterations[sim_idx] = 0  # Mark as completed
+                        
+                        # Don't replace neuron_params for streaming (adjusted_neuron_params might be None)
+                        if adjusted_neuron_params is not None:
+                            self.adjusted_neuron_params = adjusted_neuron_params
+                            
+                        async_logger.log_batch(f"📂 Resuming from streaming stimulus adjustment checkpoint: {completed_count}/{total_simulations} completed")
+                    else:
+                        # Legacy batch checkpoint support
+                        completed_count = checkpoint_state.completed_batches
+                        if adjusted_neuron_params is not None:
+                            self.adjusted_neuron_params = adjusted_neuron_params
+                        async_logger.log_batch(f"📂 Resuming from batch stimulus adjustment checkpoint: {completed_count} batches completed")
+                        
+                except Exception as e:
+                    async_logger.log_batch(f"⚠️ Could not load checkpoint {latest_checkpoint}: {e}")
+                    async_logger.log_batch("Starting from beginning...")
+                    completed_count = 0
+                    results_dict = {}
+                    adjustment_iterations = {}
         
-        async_logger.log_batch(f"Running with stimulation adjustment: {n_batches} batches of max size {batch_size}")
+        # Create a queue of simulation indices to process (excluding completed ones)
+        pending_sims = [i for i in range(total_simulations) if i not in results_dict]
+        for sim_idx in pending_sims:
+            adjustment_iterations[sim_idx] = 0
+            
+        async_logger.log_batch(f"Stimulus adjustment simulations to process: {len(pending_sims)} pending, {len(results_dict)} already completed")
         
-        for batch_idx in range(n_batches):
-            start_idx = batch_idx * batch_size
-            end_idx = min((batch_idx + 1) * batch_size, total_simulations)
-            batch_sim_indices = list(range(start_idx, end_idx))
-            
-            async_logger.log_batch(f"Processing batch {batch_idx + 1}/{n_batches} with {len(batch_sim_indices)} simulations")
-            
-            # Apply stimulation adjustment for this batch
-            adjustment_success = await self._adjust_stimulation_for_simulations(batch_sim_indices)
-            if not adjustment_success:
-                async_logger.log_batch(f"Warning: Stimulation adjustment may not be optimal for batch {batch_idx + 1}")
-            
-            # Run this batch of simulations
-            batch_results = await self._run_batch_simulations(batch_sim_indices)
-            all_results.extend(batch_results)
-            
-            async_logger.log_batch(f"Completed batch {batch_idx + 1}/{n_batches}")
+        # Get adjustment parameters
+        max_adjustment_iters = getattr(self.sim_config, 'max_adjustment_iters', 10)
+        n_active_upper = getattr(self.sim_config, 'n_active_upper', 500)
+        n_active_lower = getattr(self.sim_config, 'n_active_lower', 5)
+        n_high_fr_upper = getattr(self.sim_config, 'n_high_fr_upper', 100)
+        high_fr_threshold = getattr(self.sim_config, 'high_fr_threshold', 100.0)
         
-        return all_results
+        active_tasks = {}
+        task_devices = {}
+        device_load_counts = {i: 0 for i in range(self.n_devices)}
+        
+        def get_least_loaded_device():
+            """Get the device with the least number of active simulations."""
+            return min(device_load_counts.keys(), key=lambda device_id: device_load_counts[device_id])
+        
+        # Progress tracking
+        completed_count = len(results_dict)
+        start_time = time.time()
+        
+        async def monitor_progress():
+            nonlocal completed_count
+            last_report_time = start_time
+            
+            while pending_sims or active_tasks:
+                await asyncio.sleep(10)
+                current_time = time.time()
+
+                if current_time - last_report_time >= 30:  # Report every 30 seconds
+                    elapsed = current_time - start_time
+                    rate = completed_count / elapsed if elapsed > 0 else 0
+                    eta = (total_simulations - completed_count) / rate if rate > 0 else float('inf')
+                    
+                    active_count = len(active_tasks)
+                    pending_count = len(pending_sims)
+                    
+                    # Count simulations in adjustment
+                    adjusting_sims = sum(1 for sim_idx, iters in adjustment_iterations.items() 
+                                       if iters > 0 and sim_idx not in results_dict)
+                    
+                    async_logger.log_batch(
+                        f"Stimulus Adjustment Progress: {completed_count}/{total_simulations} completed, "
+                        f"{active_count} active, {pending_count} pending, {adjusting_sims} adjusting | "
+                        f"Rate: {rate:.2f} sims/sec, ETA: {eta/60:.1f} min"
+                    )
+                    
+                    last_report_time = current_time
+        
+        # Start progress monitoring
+        monitor_task = asyncio.create_task(monitor_progress())
+        
+        try:
+            # Initial batch - start up to max_concurrent simulations
+            for _ in range(min(max_concurrent, len(pending_sims))):
+                if pending_sims:
+                    sim_idx = pending_sims.pop(0)
+                    device_id = get_least_loaded_device()
+                    device_load_counts[device_id] += 1
+                    task = asyncio.create_task(self._process_single_regular_simulation(sim_idx, assigned_device=device_id))
+                    active_tasks[task] = sim_idx
+                    task_devices[task] = device_id
+                    async_logger.log_batch(f"🔄 Started Sim {sim_idx} (iteration {adjustment_iterations[sim_idx] + 1}) on device {device_id}")
+            
+            # Main streaming loop with stimulus adjustment
+            while active_tasks:
+                # Wait for at least one simulation to complete
+                done_tasks, pending_tasks = await asyncio.wait(
+                    active_tasks.keys(), 
+                    return_when=asyncio.FIRST_COMPLETED
+                )
+                
+                # Process completed simulations
+                for task in done_tasks:
+                    sim_idx = active_tasks[task]
+                    device_id = task_devices[task]
+                    del active_tasks[task]
+                    del task_devices[task]
+                    device_load_counts[device_id] -= 1
+                    
+                    try:
+                        result = await task
+                        sim_idx_result, final_results = result
+                        
+                        # Analyze activity levels for this simulation
+                        max_rates = jnp.max(final_results, axis=-1)  # (n_neurons,)
+                        n_active = int(jnp.sum(jnp.sum(final_results, axis=-1) > 0))
+                        n_high_fr = int(jnp.sum(max_rates > high_fr_threshold))
+                        
+                        adjustment_iterations[sim_idx] += 1
+                        current_iter = adjustment_iterations[sim_idx]
+                        
+                        # Check if stimulus adjustment is needed
+                        needs_adjustment = False
+                        adjustment_reason = ""
+                        
+                        if (n_active > n_active_upper) or (n_high_fr > n_high_fr_upper):
+                            needs_adjustment = True
+                            adjustment_reason = f"too strong (active: {n_active}, high_fr: {n_high_fr})"
+                        elif n_active < n_active_lower:
+                            needs_adjustment = True
+                            adjustment_reason = f"too weak (active: {n_active})"
+                        
+                        if needs_adjustment and current_iter < max_adjustment_iters:
+                            # Adjust stimulus and restart this simulation
+                            param_idx = sim_idx % self.sim_params.n_param_sets
+                            stim_idx = sim_idx // self.sim_params.n_param_sets
+                            
+                            current_inputs = self.adjusted_neuron_params.input_currents
+                            new_inputs = current_inputs.copy()
+                            sim_input = current_inputs[stim_idx, param_idx]
+                            
+                            if (n_active > n_active_upper) or (n_high_fr > n_high_fr_upper):
+                                # Too strong - reduce stimulation
+                                new_input = sim_input / 2
+                                adjustment_action = "reducing"
+                            else:
+                                # Too weak - increase stimulation  
+                                # Find neurons that are being stimulated (non-zero current)
+                                stimulated_mask = jnp.abs(sim_input) > 1e-10
+                                
+                                if jnp.any(stimulated_mask):
+                                    # There are stimulated neurons - double their stimulus
+                                    new_input = jnp.where(stimulated_mask, sim_input * 2, sim_input)
+                                else:
+                                    # No neurons are being stimulated - set baseline stimulus
+                                    # This shouldn't happen in normal DN screen, but handle it gracefully
+                                    baseline_stimulus = 10.0  # Start with 10 pA
+                                    # Apply baseline to first neuron as a fallback
+                                    new_input = sim_input.at[0].set(baseline_stimulus)
+                                    
+                                adjustment_action = "increasing"
+                            
+                            new_inputs = new_inputs.at[stim_idx, param_idx].set(new_input)
+                            self.adjusted_neuron_params = self.adjusted_neuron_params._replace(
+                                input_currents=new_inputs
+                            )
+                            
+                            # Get scalar values for logging (use max absolute value to show actual stimulus level)
+                            if hasattr(sim_input, 'flatten'):
+                                old_val = float(jnp.max(jnp.abs(sim_input)))
+                            else:
+                                old_val = float(jnp.abs(sim_input))
+                                
+                            if hasattr(new_input, 'flatten'):
+                                new_val = float(jnp.max(jnp.abs(new_input)))
+                            else:
+                                new_val = float(jnp.abs(new_input))
+                            
+                            async_logger.log_batch(f"🔄 Stimulus adjustment iteration {current_iter}, Sim {sim_idx}: {adjustment_reason}, {adjustment_action} stimulus: {old_val:.6f} -> {new_val:.6f}")
+                            
+                            # Restart this simulation with adjusted stimulus
+                            device_id = get_least_loaded_device()
+                            device_load_counts[device_id] += 1
+                            task = asyncio.create_task(self._process_single_regular_simulation(sim_idx, assigned_device=device_id))
+                            active_tasks[task] = sim_idx
+                            task_devices[task] = device_id
+                            
+                        else:
+                            # Simulation is complete (either criteria met or max iterations reached)
+                            if current_iter >= max_adjustment_iters and needs_adjustment:
+                                async_logger.log_batch(f"⚠️ Max adjustment iterations reached for Sim {sim_idx} - accepting result (active: {n_active}, high_fr: {n_high_fr})")
+                            else:
+                                async_logger.log_batch(f"🎯 Stimulus adjustment completed for Sim {sim_idx} after {current_iter} iterations (active: {n_active}, high_fr: {n_high_fr})")
+                            
+                            # Store final result
+                            results_dict[sim_idx] = final_results
+                            completed_count += 1
+                            
+                            result_max = float(jnp.max(final_results))
+                            async_logger.log_batch(f"✅ Completed Sim {sim_idx} with stimulus adjustment - max rate: {result_max:.4f} ({completed_count}/{total_simulations})")
+                            
+                            # Save checkpoint if enabled and at intervals
+                            checkpoint_interval = getattr(self.sim_config, 'checkpoint_interval', 10)
+                            if enable_checkpointing and checkpoint_dir and (completed_count % checkpoint_interval == 0 or completed_count == total_simulations):
+                                try:
+                                    # Create list of completed simulation indices
+                                    completed_simulations = list(results_dict.keys())
+                                    
+                                    # Create checkpoint state for streaming simulations
+                                    from src.data.data_classes import CheckpointState
+                                    checkpoint_state = CheckpointState(
+                                        batch_index=None,  # Not applicable for streaming
+                                        completed_batches=None,  # Not applicable for streaming  
+                                        total_batches=None,  # Not applicable for streaming
+                                        n_result_batches=None,  # Not applicable for streaming
+                                        accumulated_mini_circuits=None,  # Not applicable for regular sims
+                                        neuron_params=self.adjusted_neuron_params,
+                                        pruning_state=None,  # Not applicable for regular sims
+                                        checkpoint_type="streaming",
+                                        completed_simulations=completed_simulations,
+                                        results_dict=None  # Don't store large results in checkpoint
+                                    )
+                                    
+                                    checkpoint_path = checkpoint_dir / f"regular_checkpoint_{completed_count}.h5"
+                                    metadata = {
+                                        "sim_type": getattr(self.sim_config, 'sim_type', 'regular'),
+                                        "enable_pruning": False,
+                                        "total_sims": total_simulations,
+                                        "max_concurrent": max_concurrent,
+                                        "completed_count": completed_count,
+                                        "total_simulations": total_simulations,
+                                        "stimulation_adjustment": True,
+                                        "timestamp": time.time()
+                                    }
+                                    
+                                    from src.memory.checkpointing import save_checkpoint, cleanup_old_checkpoints
+                                    save_checkpoint(checkpoint_state, checkpoint_path, metadata)
+                                    async_logger.log_batch(f"💾 Stimulus adjustment checkpoint saved: {completed_count}/{total_simulations} completed")
+                                    
+                                    # Clean up old checkpoints (keep last 3)
+                                    cleanup_old_checkpoints(checkpoint_dir, keep_last_n=3)
+                                    
+                                except Exception as checkpoint_error:
+                                    async_logger.log_batch(f"⚠️ Stimulus adjustment checkpoint save failed: {checkpoint_error}")
+                        
+                        # Clean up memory
+                        del result, final_results
+                        
+                    except Exception as e:
+                        failed_sims.add(sim_idx)
+                        completed_count += 1
+                        async_logger.log_batch(f"❌ Failed Sim {sim_idx} on device {device_id}: {str(e)}")
+                        
+                        # Create empty result for failed simulation
+                        empty_result = jnp.zeros((self.sim_params.n_neurons, len(self.sim_params.t_axis)))
+                        empty_result = jax.device_put(empty_result, jax.devices("cpu")[0])
+                        results_dict[sim_idx] = empty_result
+                        del empty_result
+                
+                # Memory cleanup after processing completed simulations
+                if done_tasks:
+                    jax.clear_caches()
+                    gc.collect()
+                
+                # Start new simulations to fill available slots (only if we have pending ones)
+                while len(active_tasks) < max_concurrent and pending_sims:
+                    sim_idx = pending_sims.pop(0)
+                    device_id = get_least_loaded_device()
+                    device_load_counts[device_id] += 1
+                    task = asyncio.create_task(self._process_single_regular_simulation(sim_idx, assigned_device=device_id))
+                    active_tasks[task] = sim_idx
+                    task_devices[task] = device_id
+                    async_logger.log_batch(f"🚀 Started Sim {sim_idx} (iteration {adjustment_iterations[sim_idx] + 1}) on device {device_id}")
+            
+        finally:
+            monitor_task.cancel()
+        
+        # Final summary
+        total_time = time.time() - start_time
+        avg_rate = completed_count / total_time if total_time > 0 else 0
+        
+        # Calculate adjustment statistics
+        total_adjustments = sum(max(0, iters - 1) for iters in adjustment_iterations.values())
+        adjusted_sims = sum(1 for iters in adjustment_iterations.values() if iters > 1)
+        
+        if failed_sims:
+            async_logger.log_batch(
+                f"🏁 Stimulus adjustment streaming completed in {total_time:.1f}s | "
+                f"Rate: {avg_rate:.2f} sims/sec | {adjusted_sims} sims adjusted ({total_adjustments} total adjustments) | {len(failed_sims)} failures: {sorted(failed_sims)}"
+            )
+        else:
+            async_logger.log_batch(
+                f"🎉 Stimulus adjustment streaming completed successfully in {total_time:.1f}s | "
+                f"Rate: {avg_rate:.2f} sims/sec | {adjusted_sims} sims adjusted ({total_adjustments} total adjustments)"
+            )
+        
+        # Convert to ordered list
+        results_list = [results_dict[i] for i in range(total_simulations)]
+        
+        # Final comprehensive memory cleanup
+        del results_dict, active_tasks, task_devices, device_load_counts, adjustment_iterations
+        
+        # Comprehensive JAX cleanup
+        jax.clear_caches()
+        
+        # Force backend cleanup if available
+        try:
+            if hasattr(jax, 'clear_backends'):
+                jax.clear_backends()
+        except Exception as e:
+            async_logger.log_batch(f"Warning: Could not clear JAX backends: {e}")
+        
+        # GPU memory cleanup  
+        try:
+            # Force GPU synchronization and cleanup
+            for device_id in range(self.n_devices):
+                with jax.default_device(jax.devices()[device_id]):
+                    pass  # This forces device synchronization
+                    
+            # Additional memory cleanup
+            gc.collect()
+            
+            # Memory manager cleanup
+            if hasattr(self, 'memory_manager'):
+                self.memory_manager.perform_cleanup(context="final_stim_adj_cleanup")
+                
+        except Exception as e:
+            async_logger.log_batch(f"Warning: GPU cleanup failed: {e}")
+        
+        return results_list
     
     async def _run_batch_simulations(self, sim_indices: List[int]) -> List[jnp.ndarray]:
         """Run a specific batch of simulations concurrently."""
@@ -2369,7 +2792,9 @@ def run_streaming_regular_simulation(
     neuron_params: NeuronParams,
     sim_params: SimParams,
     sim_config: SimulationConfig,
-    max_concurrent: Optional[int] = None
+    max_concurrent: Optional[int] = None,
+    checkpoint_dir: Optional[Path] = None,
+    enable_checkpointing: bool = False
 ) -> jnp.ndarray:
     """
     Run regular (non-pruning) simulations with streaming processing.
@@ -2382,12 +2807,15 @@ def run_streaming_regular_simulation(
     - Support for all simulation types (baseline, shuffle, noise, Wmask)
     - Automatic stimulation adjustment (adjustStimI)
     - DN screen support
+    - Checkpointing support for recovery from failures
     
     Args:
         neuron_params: Neuron parameters
         sim_params: Simulation parameters  
         sim_config: Simulation configuration
         max_concurrent: Maximum concurrent simulations (default: auto-calculated)
+        checkpoint_dir: Directory for checkpointing (optional)
+        enable_checkpointing: Whether to enable checkpointing
     
     Returns:
         Results array shaped as (n_stim_configs, n_param_sets, n_neurons, n_timepoints)
@@ -2452,7 +2880,7 @@ def run_streaming_regular_simulation(
         
         async def run_simulations():
             # Run the streaming simulations
-            results_list = await manager.run_streaming_regular_simulations(total_sims, max_concurrent)
+            results_list = await manager.run_streaming_regular_simulations(total_sims, max_concurrent, checkpoint_dir, enable_checkpointing)
             return results_list
         
         # Run the async event loop
@@ -2535,6 +2963,13 @@ def run_dn_screen_simulations(
     
     if dn_indices is None or len(dn_indices) == 0:
         raise ValueError("No DN neurons found for screening")
+    
+    # Limit DN testing if max_dn_test is specified
+    max_dn_test = getattr(sim_config, 'max_dn_test', None)
+    if max_dn_test is not None and max_dn_test > 0:
+        original_n_dns = len(dn_indices)
+        dn_indices = dn_indices[:max_dn_test]
+        print(f"Limited DN screening from {original_n_dns} to {max_dn_test} DNs for testing")
     
     n_dns = len(dn_indices)
     print(f"Screening {n_dns} DN neurons: {dn_indices}")

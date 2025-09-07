@@ -1739,6 +1739,8 @@ def prepare_neuron_params(cfg: DictConfig, W_table: Any, param_path: Optional[Pa
         input_currents_list.append(input_current)
     input_currents = jnp.array(input_currents_list)
     
+    print(f"Created {len(input_currents_list)} stimulus configurations")
+    
     # Extract shuffle indices
     exc_dn_idxs, inh_dn_idxs, exc_in_idxs, inh_in_idxs, mn_idxs = extract_shuffle_indices(W_table)
     
@@ -1873,10 +1875,11 @@ def prepare_vnc_simulation_params(cfg: DictConfig):
         cfg.experiment.stimNeurons = stim_neurons
         cfg.experiment.stimI = stim_inputs
     
-    n_stim_configs = len(cfg.experiment.stimNeurons)
-    
-    # Prepare parameters
+    # Prepare parameters first (this handles padding of stimNeurons/stimI lists)
     neuron_params = prepare_neuron_params(cfg, W_table)
+    
+    # Calculate n_stim_configs AFTER padding is done
+    n_stim_configs = neuron_params.input_currents.shape[0]
     sim_params = prepare_sim_params(cfg, n_stim_configs, neuron_params.W.shape[0])
     sim_config = parse_simulation_config(cfg)
     

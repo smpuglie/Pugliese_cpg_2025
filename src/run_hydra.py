@@ -259,16 +259,16 @@ def main(cfg: DictConfig):
                     # Enable checkpointing for long simulations (optional)
                     enable_checkpointing = getattr(cfg.sim, "enable_checkpointing", False)
                     print(f"Checkpointing configuration: enable_checkpointing={enable_checkpointing}")
+                    
+                    # Setup checkpointing directory for both pruning and regular simulations
+                    checkpoint_dir = cfg.paths.ckpt_dir / "checkpoints" if enable_checkpointing else None
+                    if enable_checkpointing:
+                        print(f"Checkpoints will be saved to: {checkpoint_dir}")
 
                     try:
                         if prune_network:
                             # Async pruning simulations
                             if async_mode == "streaming":
-                                # Setup checkpointing for streaming simulations
-                                checkpoint_dir = cfg.paths.ckpt_dir / "checkpoints" if enable_checkpointing else None
-                                if enable_checkpointing:
-                                    print(f"Checkpoints will be saved to: {checkpoint_dir}")
-                                
                                 results, final_mini_circuits, neuron_params = run_streaming_pruning_simulation(
                                     neuron_params, sim_params, sim_config, 
                                     max_concurrent=cfg.experiment.batch_size,
@@ -281,7 +281,10 @@ def main(cfg: DictConfig):
                             # Async regular (non-pruning) simulations
                             if async_mode == "streaming":
                                 results = run_streaming_regular_simulation(
-                                    neuron_params, sim_params, sim_config, max_concurrent=cfg.experiment.batch_size
+                                    neuron_params, sim_params, sim_config, 
+                                    max_concurrent=cfg.experiment.batch_size,
+                                    checkpoint_dir=checkpoint_dir,
+                                    enable_checkpointing=cfg.sim.enable_checkpointing
                                 )
                                 final_mini_circuits = None  # Regular sims don't produce mini circuits
                             else:
