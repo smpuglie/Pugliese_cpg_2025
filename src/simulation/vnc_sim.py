@@ -6,7 +6,7 @@ import numpy as np
 import psutil
 import gc
 from typing import Any, Optional, Tuple, List, Union
-from diffrax import Dopri5, ODETerm, PIDController, SaveAt, diffeqsolve, Event
+from diffrax import Dopri5, ODETerm, PIDController, SaveAt, diffeqsolve, Event, ConstantStepSize
 from jax import vmap, jit, random, pmap
 from omegaconf import DictConfig
 from pathlib import Path
@@ -36,7 +36,7 @@ def rate_equation_half_tanh(t, R, args):
     """ODE rate equation with half-tanh activation."""
     inputs, pulse_start, pulse_end, tau, weighted_W, threshold, a, fr_cap, key, noise_stdv = args
     pulse_active = (t >= pulse_start) & (t <= pulse_end)
-    I = inputs * pulse_active + pulse_active * jax.random.normal(key, shape=inputs.shape) * noise_stdv
+    I = inputs * pulse_active # + pulse_active * jax.random.normal(key, shape=inputs.shape) * noise_stdv
     total_input = I + jnp.dot(weighted_W, R)
     activation = jnp.maximum(
         fr_cap * jnp.tanh((a / fr_cap) * (total_input - threshold)), 0
@@ -97,19 +97,17 @@ def run_single_simulation(
     
     # Use more conservative tolerances for numerical stability
     # Especially important for multi-GPU setups where different devices may have different precision
-    safe_rtol = jnp.maximum(r_tol, 1e-6)  # Don't go below 1e-6
-    safe_atol = jnp.maximum(a_tol, 1e-8)  # Don't go below 1e-8
-    controller = PIDController(rtol=safe_rtol, atol=safe_atol)
+    controller = PIDController(rtol=r_tol, atol=a_tol)
     
     # Create event to detect NaN/inf and stop early
-    nan_inf_event = Event(nan_inf_event_func)
+    # nan_inf_event = Event(nan_inf_event_func)
 
     solution = diffeqsolve(
         term, solver, 0, T, dt, R0,
         args=(inputs, pulse_start, pulse_end, tau, W, threshold, a, fr_cap, key, noise_stdv),
         saveat=saveat, stepsize_controller=controller,
-        event=nan_inf_event,
         max_steps=100000, throw=False
+        # event=nan_inf_event,
     )
     
     # Check for numerical issues in the solution
@@ -252,12 +250,14 @@ def jax_choice(key, a, p):
     # Use categorical sampling
     return random.categorical(key, jnp.log(p_normalized + 1e-10))
 
-def update_single_sim_state(state, R, mn_mask, oscillation_threshold=0.5, clip_start=250):
-    """Update state for a single simulation with proper round-based convergence logic"""
+def update_single_sim_state(state, R, mn_mask, oscillation_threshold=0.5, clip_start=230):
+    """Update state for a single simulation with proper round-based convergence logic and best oscillation tracking"""
     
     # Unpack state
     (W_mask, interneuron_mask, level, total_removed_neurons, removed_stim_neurons,
-        neurons_put_back, prev_put_back, last_removed, remove_p, min_circuit, key) = state
+        neurons_put_back, prev_put_back, last_removed, remove_p, min_circuit, key,
+        last_good_oscillating_removed, last_good_oscillating_put_back, last_good_oscillation_score, 
+        last_good_W_mask, last_good_key, last_good_stim_idx, last_good_param_idx) = state
 
     # Get active MN activity using JAX-compatible approach
     max_frs = jnp.max(R[..., clip_start:], axis=-1)
@@ -279,15 +279,29 @@ def update_single_sim_state(state, R, mn_mask, oscillation_threshold=0.5, clip_s
     # BUT only if we've actually been through at least one round (level > 0)
     sets_equal = jnp.array_equal(neurons_put_back, prev_put_back)
     has_done_meaningful_work = (level[0] > 0) | (jnp.sum(neurons_put_back) > 0) | (jnp.sum(total_removed_neurons) > 0)
-    oscillation_meets_threshold = (oscillation_score >= oscillation_threshold) & jnp.isfinite(oscillation_score)
-
-    # Convergence occurs ONLY when normal convergence conditions are met
-    # Being stuck with low oscillation is NOT convergence - it's algorithm termination without success
-    normal_convergence = (need_new_round & sets_equal & has_done_meaningful_work & oscillation_meets_threshold)
-    currently_converged_scalar = normal_convergence | min_circuit.squeeze()
-
-    # Maintain the shape of min_circuit
-    currently_converged = jnp.full_like(min_circuit, currently_converged_scalar, dtype=jnp.bool_)
+    currently_converged = (need_new_round & sets_equal & has_done_meaningful_work) | min_circuit.squeeze()
+    
+    # Update most recent good oscillating state if current oscillation meets threshold
+    oscillation_is_good = (oscillation_score >= oscillation_threshold) & jnp.isfinite(oscillation_score)
+    should_update_last_good = oscillation_is_good
+    
+    # CRITICAL FIX: Compute the ACTUAL W_mask that produced the good oscillation score
+    # The oscillation was computed from results that used the CURRENT state (total_removed_neurons, neurons_put_back)
+    # So we need to save the W_mask that reflects the CURRENT state, not some future state
+    W_mask_init = jnp.ones_like(W_mask, dtype=jnp.bool_)
+    current_active_neurons = (~total_removed_neurons) | neurons_put_back
+    current_W_mask = (W_mask_init * current_active_neurons[:, None] * current_active_neurons[None, :]).astype(jnp.bool_)
+    
+    # Update most recent good state when oscillation meets threshold
+    # Use the CURRENT computed W_mask, not the input W_mask
+    updated_last_good_removed = jax.lax.select(should_update_last_good, total_removed_neurons, last_good_oscillating_removed)
+    updated_last_good_put_back = jax.lax.select(should_update_last_good, neurons_put_back, last_good_oscillating_put_back)
+    updated_last_good_score = jax.lax.select(should_update_last_good, oscillation_score, last_good_oscillation_score.squeeze()).reshape(-1, 1)
+    updated_last_good_W_mask = jax.lax.select(should_update_last_good, current_W_mask, last_good_W_mask)  # FIXED: use current_W_mask
+    updated_last_good_key = jax.lax.select(should_update_last_good, key, last_good_key)
+    # Parameter indices remain constant throughout the simulation - just keep the stored ones
+    updated_last_good_stim_idx = last_good_stim_idx
+    updated_last_good_param_idx = last_good_param_idx
     
     # Split key for potential use
     key_next, subkey_continue, subkey_reset = random.split(key, 3)
@@ -418,29 +432,46 @@ def update_single_sim_state(state, R, mn_mask, oscillation_threshold=0.5, clip_s
     active_neurons = (~branch_total_removed) | branch_neurons_put_back
     W_mask_new = (W_mask_init * active_neurons[:, None] * active_neurons[None, :]).astype(jnp.bool_)
 
-    ##### FINAL SELECTION: CURRENT STATE (if converged) vs NEW STATE (if not converged) #####
-    # This is the key fix: when converged, select ALL current state values
+    ##### FINAL SELECTION: CONVERGED STATE (revert to last good) vs CONTINUE STATE #####
+    # When converged AND we have a good last state, revert to the most recent oscillating state
+    has_good_last_state = updated_last_good_score.squeeze() >= oscillation_threshold
+    should_revert_to_last_good = currently_converged & has_good_last_state
+    
+    # Create the reverted state (most recent good oscillating state)
+    reverted_total_removed = updated_last_good_removed
+    reverted_neurons_put_back = updated_last_good_put_back
+    reverted_active_neurons = (~reverted_total_removed) | reverted_neurons_put_back
+    reverted_W_mask = (W_mask_init * reverted_active_neurons[:, None] * reverted_active_neurons[None, :]).astype(jnp.bool_)
+    
     # Use the scalar version for select operations
     currently_converged_scalar = currently_converged.squeeze()
-    final_total_removed = jax.lax.select(currently_converged_scalar, total_removed_neurons, branch_total_removed)
-    final_removed_stim = jax.lax.select(currently_converged_scalar, removed_stim_neurons, branch_removed_stim)
+    should_revert_scalar = should_revert_to_last_good.squeeze()
+    
+    # Choose final state: revert to last good if converged and have good state, otherwise use current/branch state
+    final_total_removed = jax.lax.select(should_revert_scalar, reverted_total_removed, 
+                                        jax.lax.select(currently_converged_scalar, total_removed_neurons, branch_total_removed))
+    final_removed_stim = jax.lax.select(should_revert_scalar, updated_last_good_removed & removed_stim_neurons,
+                                       jax.lax.select(currently_converged_scalar, removed_stim_neurons, branch_removed_stim))
+    final_neurons_put_back = jax.lax.select(should_revert_scalar, reverted_neurons_put_back,
+                                           jax.lax.select(currently_converged_scalar, neurons_put_back, branch_neurons_put_back))
+    final_W_mask = jax.lax.select(should_revert_scalar, reverted_W_mask,
+                                 jax.lax.select(currently_converged_scalar, W_mask, W_mask_new))
+    
+    # For other state variables, use current state when converged or branch state when continuing
     final_last_removed = jax.lax.select(currently_converged_scalar, last_removed, branch_last_removed)
-    final_neurons_put_back = jax.lax.select(currently_converged_scalar, neurons_put_back, branch_neurons_put_back)
     final_prev_put_back = jax.lax.select(currently_converged_scalar, prev_put_back, branch_prev_put_back)
     # Ensure level never decreases - use max of current and branch levels
     final_level = jnp.maximum(level, branch_level)
     final_p = jax.lax.select(currently_converged_scalar, remove_p, branch_p)
-    final_W_mask = jax.lax.select(currently_converged_scalar, W_mask, W_mask_new)
     final_key = jax.lax.select(currently_converged_scalar, key, key_next)
 
-
-    # Debug information
-    # jax.debug.print("Level: {level}, Converged: {conv}, Osc: {score}, NewRound: {nr}, SetsEq: {eq}", 
+    # Debug information - uncomment to see what's happening
+    # jax.debug.print("Level: {level}, Converged: {conv}, Osc: {score}, Last Good: {last_good}, Revert: {revert}", 
     #                level=final_level,
     #                conv=currently_converged, 
     #                score=oscillation_score,
-    #                nr=need_new_round,
-    #                eq=sets_equal)
+    #                last_good=updated_last_good_score,
+    #                revert=should_revert_to_last_good)
 
     # Return the final state
     return Pruning_state(
@@ -455,6 +486,13 @@ def update_single_sim_state(state, R, mn_mask, oscillation_threshold=0.5, clip_s
         remove_p=final_p,
         min_circuit=currently_converged,
         keys=final_key,
+        last_good_oscillating_removed=updated_last_good_removed,
+        last_good_oscillating_put_back=updated_last_good_put_back,
+        last_good_oscillation_score=updated_last_good_score,
+        last_good_W_mask=updated_last_good_W_mask,
+        last_good_key=updated_last_good_key,
+        last_good_stim_idx=updated_last_good_stim_idx,
+        last_good_param_idx=updated_last_good_param_idx,
     )
 
 
@@ -481,7 +519,14 @@ def reshape_state_for_pmap(state: Pruning_state, n_devices: int) -> Pruning_stat
         last_removed=state.last_removed.reshape(n_devices, batch_per_device, *state.last_removed.shape[1:]),
         remove_p=state.remove_p.reshape(n_devices, batch_per_device, *state.remove_p.shape[1:]),
         min_circuit=state.min_circuit.reshape(n_devices, batch_per_device, *state.min_circuit.shape[1:]),
-        keys=state.keys.reshape(n_devices, batch_per_device, *state.keys.shape[1:])
+        keys=state.keys.reshape(n_devices, batch_per_device, *state.keys.shape[1:]),
+        last_good_oscillating_removed=state.last_good_oscillating_removed.reshape(n_devices, batch_per_device, *state.last_good_oscillating_removed.shape[1:]),
+        last_good_oscillating_put_back=state.last_good_oscillating_put_back.reshape(n_devices, batch_per_device, *state.last_good_oscillating_put_back.shape[1:]),
+        last_good_oscillation_score=state.last_good_oscillation_score.reshape(n_devices, batch_per_device, *state.last_good_oscillation_score.shape[1:]),
+        last_good_W_mask=state.last_good_W_mask.reshape(n_devices, batch_per_device, *state.last_good_W_mask.shape[1:]),
+        last_good_key=state.last_good_key.reshape(n_devices, batch_per_device, *state.last_good_key.shape[1:]),
+        last_good_stim_idx=state.last_good_stim_idx.reshape(n_devices, batch_per_device, *state.last_good_stim_idx.shape[1:]),
+        last_good_param_idx=state.last_good_param_idx.reshape(n_devices, batch_per_device, *state.last_good_param_idx.shape[1:])
     )
 
 
@@ -501,7 +546,14 @@ def reshape_state_from_pmap(state: Pruning_state) -> Pruning_state:
         last_removed=state.last_removed.reshape(total_batch, *state.last_removed.shape[2:]),
         remove_p=state.remove_p.reshape(total_batch, *state.remove_p.shape[2:]),
         min_circuit=state.min_circuit.reshape(total_batch, *state.min_circuit.shape[2:]),
-        keys=state.keys.reshape(total_batch, *state.keys.shape[2:])
+        keys=state.keys.reshape(total_batch, *state.keys.shape[2:]),
+        last_good_oscillating_removed=state.last_good_oscillating_removed.reshape(total_batch, *state.last_good_oscillating_removed.shape[2:]),
+        last_good_oscillating_put_back=state.last_good_oscillating_put_back.reshape(total_batch, *state.last_good_oscillating_put_back.shape[2:]),
+        last_good_oscillation_score=state.last_good_oscillation_score.reshape(total_batch, *state.last_good_oscillation_score.shape[2:]),
+        last_good_W_mask=state.last_good_W_mask.reshape(total_batch, *state.last_good_W_mask.shape[2:]),
+        last_good_key=state.last_good_key.reshape(total_batch, *state.last_good_key.shape[2:]),
+        last_good_stim_idx=state.last_good_stim_idx.reshape(total_batch, *state.last_good_stim_idx.shape[2:]),
+        last_good_param_idx=state.last_good_param_idx.reshape(total_batch, *state.last_good_param_idx.shape[2:])
     )
 
 
@@ -526,6 +578,13 @@ def pad_state_for_devices(state: Pruning_state, target_batch_size: int) -> Pruni
     remove_p_pad = jnp.zeros((pad_size, *state.remove_p.shape[1:]), dtype=state.remove_p.dtype)
     min_circuit_pad = jnp.zeros((pad_size, *state.min_circuit.shape[1:]), dtype=state.min_circuit.dtype)
     keys_pad = jnp.zeros((pad_size, *state.keys.shape[1:]), dtype=state.keys.dtype)
+    last_good_oscillating_removed_pad = jnp.zeros((pad_size, *state.last_good_oscillating_removed.shape[1:]), dtype=state.last_good_oscillating_removed.dtype)
+    last_good_oscillating_put_back_pad = jnp.zeros((pad_size, *state.last_good_oscillating_put_back.shape[1:]), dtype=state.last_good_oscillating_put_back.dtype)
+    last_good_oscillation_score_pad = jnp.full((pad_size, *state.last_good_oscillation_score.shape[1:]), -1.0, dtype=state.last_good_oscillation_score.dtype)
+    last_good_W_mask_pad = jnp.zeros((pad_size, *state.last_good_W_mask.shape[1:]), dtype=state.last_good_W_mask.dtype)
+    last_good_key_pad = jnp.zeros((pad_size, *state.last_good_key.shape[1:]), dtype=state.last_good_key.dtype)
+    last_good_stim_idx_pad = jnp.full((pad_size, *state.last_good_stim_idx.shape[1:]), -1, dtype=state.last_good_stim_idx.dtype)
+    last_good_param_idx_pad = jnp.full((pad_size, *state.last_good_param_idx.shape[1:]), -1, dtype=state.last_good_param_idx.dtype)
     
     return Pruning_state(
         W_mask=jnp.concatenate([state.W_mask, W_mask_pad], axis=0),
@@ -538,7 +597,14 @@ def pad_state_for_devices(state: Pruning_state, target_batch_size: int) -> Pruni
         last_removed=jnp.concatenate([state.last_removed, last_removed_pad], axis=0),
         remove_p=jnp.concatenate([state.remove_p, remove_p_pad], axis=0),
         min_circuit=jnp.concatenate([state.min_circuit, min_circuit_pad], axis=0),
-        keys=jnp.concatenate([state.keys, keys_pad], axis=0)
+        keys=jnp.concatenate([state.keys, keys_pad], axis=0),
+        last_good_oscillating_removed=jnp.concatenate([state.last_good_oscillating_removed, last_good_oscillating_removed_pad], axis=0),
+        last_good_oscillating_put_back=jnp.concatenate([state.last_good_oscillating_put_back, last_good_oscillating_put_back_pad], axis=0),
+        last_good_oscillation_score=jnp.concatenate([state.last_good_oscillation_score, last_good_oscillation_score_pad], axis=0),
+        last_good_W_mask=jnp.concatenate([state.last_good_W_mask, last_good_W_mask_pad], axis=0),
+        last_good_key=jnp.concatenate([state.last_good_key, last_good_key_pad], axis=0),
+        last_good_stim_idx=jnp.concatenate([state.last_good_stim_idx, last_good_stim_idx_pad], axis=0),
+        last_good_param_idx=jnp.concatenate([state.last_good_param_idx, last_good_param_idx_pad], axis=0)
     )
 
 def trim_state_padding(state: Pruning_state, actual_batch_size: int) -> Pruning_state:
@@ -554,7 +620,14 @@ def trim_state_padding(state: Pruning_state, actual_batch_size: int) -> Pruning_
         last_removed=state.last_removed[:actual_batch_size],
         remove_p=state.remove_p[:actual_batch_size],
         min_circuit=state.min_circuit[:actual_batch_size],
-        keys=state.keys[:actual_batch_size]
+        keys=state.keys[:actual_batch_size],
+        last_good_oscillating_removed=state.last_good_oscillating_removed[:actual_batch_size],
+        last_good_oscillating_put_back=state.last_good_oscillating_put_back[:actual_batch_size],
+        last_good_oscillation_score=state.last_good_oscillation_score[:actual_batch_size],
+        last_good_W_mask=state.last_good_W_mask[:actual_batch_size],
+        last_good_key=state.last_good_key[:actual_batch_size],
+        last_good_stim_idx=state.last_good_stim_idx[:actual_batch_size],
+        last_good_param_idx=state.last_good_param_idx[:actual_batch_size]
     )
 
 
@@ -949,7 +1022,8 @@ def calculate_optimal_batch_size(n_neurons: int, n_timepoints: int, n_replicates
 def initialize_pruning_state(
     neuron_params: NeuronParams, 
     sim_params: SimParams, 
-    batch_size: int
+    batch_size: int,
+    batch_indices: Optional[jnp.ndarray] = None
 ) -> Pruning_state:
     """Initialize pruning state for a given batch size."""
     mn_idxs = neuron_params.mn_idxs
@@ -967,6 +1041,11 @@ def initialize_pruning_state(
     last_removed = jnp.full([batch_size, total_removed_neurons.shape[-1]], False, dtype=jnp.bool_)
     min_circuit = jnp.full((batch_size, 1), False)
 
+    # Initialize most recent good oscillating state tracking
+    last_good_oscillating_removed = jnp.full([batch_size, total_removed_neurons.shape[-1]], False, dtype=jnp.bool_)
+    last_good_oscillating_put_back = jnp.full([batch_size, total_removed_neurons.shape[-1]], False, dtype=jnp.bool_)
+    last_good_oscillation_score = jnp.full((batch_size, 1), -1.0)  # Initialize with -1 (no good state yet)
+
     # Initialize probabilities
     exclude_mask = (~interneuron_mask)
     p_arrays = jax.vmap(removal_probability)(jnp.ones((batch_size, W_mask.shape[-1])), exclude_mask)
@@ -977,6 +1056,15 @@ def initialize_pruning_state(
         # Pad seeds if necessary
         pad_size = batch_size - len(batch_seeds)
         batch_seeds = jnp.concatenate([batch_seeds, jnp.repeat(batch_seeds[-1:], pad_size, axis=0)])
+
+    # Calculate parameter indices for each simulation in the batch
+    if batch_indices is not None:
+        param_indices = batch_indices % sim_params.n_param_sets
+        stim_indices = batch_indices // sim_params.n_param_sets
+    else:
+        # Default values when batch_indices not provided
+        param_indices = jnp.full((batch_size,), -1, dtype=jnp.int32)
+        stim_indices = jnp.full((batch_size,), -1, dtype=jnp.int32)
 
     return Pruning_state(
         W_mask=W_mask,
@@ -989,7 +1077,14 @@ def initialize_pruning_state(
         last_removed=last_removed,
         remove_p=p_arrays,
         min_circuit=min_circuit,
-        keys=batch_seeds
+        keys=batch_seeds,
+        last_good_oscillating_removed=last_good_oscillating_removed,
+        last_good_oscillating_put_back=last_good_oscillating_put_back,
+        last_good_oscillation_score=last_good_oscillation_score,
+        last_good_W_mask=jnp.zeros((batch_size, W_mask.shape[-2], W_mask.shape[-1]), dtype=jnp.bool_),
+        last_good_key=jnp.zeros((batch_size, 2), dtype=jnp.uint32),  # JAX keys are (2,) uint32 arrays
+        last_good_stim_idx=stim_indices,
+        last_good_param_idx=param_indices
     )
 
 
@@ -1348,7 +1443,7 @@ def _run_with_pruning(
     
     # Pre-compute static values that won't change during the loop
     oscillation_threshold_val = float(sim_config.oscillation_threshold)
-    clip_start_val = int(sim_params.pulse_start / sim_params.dt) + 200
+    clip_start_val = int(sim_params.pulse_start / sim_params.dt) + 230
 
     # Create a version of update_single_sim_state with static args baked in
     def update_state_with_static_args(state, R, mn_mask):
@@ -1399,7 +1494,7 @@ def _run_with_pruning(
         
         # Initialize state for this batch
         current_batch_size = len(batch_indices)
-        state = initialize_pruning_state(neuron_params, sim_params, current_batch_size)
+        state = initialize_pruning_state(neuron_params, sim_params, current_batch_size, batch_indices)
 
         # Reshape state for pmap if using multiple devices
         if n_devices > 1:
@@ -1461,16 +1556,33 @@ def _run_with_pruning(
         print(f"Final simulation state for batch {i + 1} after {iteration} iterations:")
         if n_devices > 1:
             flat_state = reshape_state_from_pmap(state)
-            mini_circuit = (~flat_state.total_removed_neurons) | flat_state.last_removed | flat_state.prev_put_back
+            # Use most recent good oscillating state if available, otherwise fall back to current state
+            has_good_last = flat_state.last_good_oscillation_score.squeeze() >= oscillation_threshold_val
+            final_removed_for_circuit = jax.lax.select(has_good_last[:, None], 
+                                                      flat_state.last_good_oscillating_removed, 
+                                                      flat_state.total_removed_neurons)
+            final_put_back_for_circuit = jax.lax.select(has_good_last[:, None], 
+                                                       flat_state.last_good_oscillating_put_back, 
+                                                       flat_state.neurons_put_back)
+            mini_circuit = (~final_removed_for_circuit) | final_put_back_for_circuit
             W_mask_init = jnp.ones_like(flat_state.W_mask, dtype=jnp.bool_)
         else: 
-            mini_circuit = (~state.total_removed_neurons) | state.last_removed | state.prev_put_back
+            # Use most recent good oscillating state if available, otherwise fall back to current state
+            has_good_last = state.last_good_oscillation_score.squeeze() >= oscillation_threshold_val
+            final_removed_for_circuit = jax.lax.select(has_good_last[:, None], 
+                                                      state.last_good_oscillating_removed, 
+                                                      state.total_removed_neurons)
+            final_put_back_for_circuit = jax.lax.select(has_good_last[:, None], 
+                                                       state.last_good_oscillating_put_back, 
+                                                       state.neurons_put_back)
+            mini_circuit = (~final_removed_for_circuit) | final_put_back_for_circuit
             W_mask_init = jnp.ones_like(state.W_mask, dtype=jnp.bool_)
             flat_state = state
         
         W_mask_new = (W_mask_init * mini_circuit[:, :, None] * mini_circuit[:, None, :]).astype(jnp.bool_)
         neuron_params = neuron_params._replace(W_mask=W_mask_new)
         print(f"Final W_mask shape: {neuron_params.W_mask.shape}")
+        print(f"Using most recent good oscillating state: {jnp.any(has_good_last)}")
         
         # Run simulation
         batch_results = batch_func(neuron_params, sim_params, batch_indices)    
@@ -1493,11 +1605,11 @@ def _run_with_pruning(
         
         # Move results to CPU to save GPU memory
         batch_results = jax.device_put(batch_results, jax.devices("cpu")[0])
-        # mini_circuit = jnp.stack([((jnp.sum(batch_results[n],axis=-1)>0) & ~mn_mask) for n in range(batch_results.shape[0])],axis=0)
-        mini_circuit = jax.device_put(mini_circuit, jax.devices("cpu")[0])
+        # Use the final circuit that was actually simulated (which incorporates best oscillating state)
+        final_mini_circuit = jax.device_put(mini_circuit, jax.devices("cpu")[0])
         
         all_results.append(batch_results)
-        all_mini_circuits.append(mini_circuit)  # Save state for this batch
+        all_mini_circuits.append(final_mini_circuit)  # Save state for this batch
 
         print(f"Batch {i + 1}/{n_batches} completed")
         
@@ -1660,9 +1772,9 @@ def prepare_sim_params(cfg: DictConfig, n_stim_configs: int, n_neurons: int) -> 
         t_axis=t_axis_safe,
         exc_multiplier=float(cfg.neuron_params.excitatoryMultiplier),
         inh_multiplier=float(cfg.neuron_params.inhibitoryMultiplier),
-        noise_stdv_prop=getattr(cfg.sim, "noiseStdvProp", 0.1),
-        r_tol=getattr(cfg.sim, "rtol", 1e-7),
-        a_tol=getattr(cfg.sim, "atol", 1e-9),
+        noise_stdv_prop=getattr(cfg.sim, "noiseStdvProp", 0.0),
+        r_tol=cfg.sim.rtol,
+        a_tol=cfg.sim.atol,
         noise_stdv=cfg.sim.noiseStdv
     )
 

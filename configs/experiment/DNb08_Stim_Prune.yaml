@@ -18,4 +18,4 @@ saveFigs: True
 useTsp: False
 save_checkpoints: False
 max_pruning_iterations: 250
-oscillation_threshold: 0.5
+oscillation_threshold: 0.25

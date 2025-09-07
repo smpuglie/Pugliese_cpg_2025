@@ -55,6 +55,14 @@ class Pruning_state(NamedTuple):
     remove_p: jnp.ndarray
     min_circuit: jnp.ndarray
     keys: jnp.ndarray
+    # New fields for tracking most recent good oscillating state
+    last_good_oscillating_removed: jnp.ndarray  # Boolean mask of removed neurons when last good osc found
+    last_good_oscillating_put_back: jnp.ndarray  # Boolean mask of put_back neurons when last good osc found  
+    last_good_oscillation_score: jnp.ndarray     # The oscillation score value when last good osc found
+    last_good_W_mask: jnp.ndarray                # The exact W_mask when last good oscillation found
+    last_good_key: jnp.ndarray                   # The exact RNG key state when last good oscillation found
+    last_good_stim_idx: jnp.ndarray              # The stimulation index that produced the good oscillation
+    last_good_param_idx: jnp.ndarray             # The parameter index that produced the good oscillation
 
 
 class SimulationConfig(NamedTuple):

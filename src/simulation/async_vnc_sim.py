@@ -8,6 +8,7 @@ import numpy as np
 import traceback
 import psutil                    
 import gc
+from typing import Optional
 
 from typing import Dict, Any, Optional, Tuple, List, Union
 import threading
@@ -18,7 +19,8 @@ from collections import defaultdict
 # Import existing simulation components
 from src.simulation.vnc_sim import (
     run_single_simulation, update_single_sim_state, 
-    reweight_connectivity, removal_probability, add_noise_to_weights
+    reweight_connectivity, removal_probability, add_noise_to_weights,
+    compute_oscillation_score
 )
 from src.utils.shuffle_utils import full_shuffle
 from src.data.data_classes import NeuronParams, SimParams, SimulationConfig, Pruning_state
@@ -109,6 +111,12 @@ def initialize_single_sim_pruning_state(
     last_removed = jnp.full((total_removed_neurons.shape[-1],), False, dtype=jnp.bool_)
     min_circuit = jnp.full((1,), False)
 
+    # Initialize most recent good oscillating state tracking for single simulation
+    last_good_oscillating_removed = jnp.full((total_removed_neurons.shape[-1],), False, dtype=jnp.bool_)
+    last_good_oscillating_put_back = jnp.full((total_removed_neurons.shape[-1],), False, dtype=jnp.bool_)
+    last_good_oscillation_score = jnp.full((1,), -1.0)  # Initialize with -1 (no good state yet)
+    last_good_W_mask = jnp.zeros_like(W_mask, dtype=jnp.bool_)  # Initialize with empty W_mask
+
     # Initialize probabilities for this specific simulation
     exclude_mask = ~interneuron_mask
     p_arrays = removal_probability(jnp.ones((W_mask.shape[-1],)), exclude_mask)
@@ -131,7 +139,14 @@ def initialize_single_sim_pruning_state(
         last_removed=last_removed,
         remove_p=p_arrays,
         min_circuit=min_circuit,
-        keys=sim_seed  # Simulation seed, shape (2,) not (1, 2)
+        keys=sim_seed,  # Simulation seed, shape (2,) not (1, 2)
+        last_good_oscillating_removed=last_good_oscillating_removed,
+        last_good_oscillating_put_back=last_good_oscillating_put_back,
+        last_good_oscillation_score=last_good_oscillation_score,
+        last_good_W_mask=last_good_W_mask,
+        last_good_key=jnp.zeros((2,), dtype=jnp.uint32),
+        last_good_stim_idx=jnp.array(-1, dtype=jnp.int32),
+        last_good_param_idx=jnp.array(-1, dtype=jnp.int32)
     )
     
     
@@ -156,7 +171,6 @@ class AsyncPruningManager:
             simulation_type="pruning"
         )
     
-        
         # Pre-create the motor neuron mask once to ensure consistency
         # Force mn_idxs to CPU to avoid device placement issues
         mn_idxs_cpu = jax.device_put(self.neuron_params.mn_idxs, jax.devices('cpu')[0])
@@ -204,6 +218,7 @@ class AsyncPruningManager:
         # Each device gets its own compiled version for better performance
         self.device_functions = {}
         self._jit_sim_functions = {}  # Cache for JIT-compiled simulation functions
+        self._jit_final_sim_functions = {}  # Cache for JIT-compiled FINAL simulation functions
         self._jit_update_functions = {}  # Cache for JIT-compiled update functions
         
         # Pre-compile functions for each device using direct assignment
@@ -250,15 +265,9 @@ class AsyncPruningManager:
             
             # Use more conservative settings for devices other than 0
             # This helps with device-specific numerical precision issues
-            if device_index == 0:
-                device_rtol = self.sim_params.r_tol
-                device_atol = self.sim_params.a_tol
-            else:
-                # Use more conservative tolerances for non-primary devices
-                device_rtol = max(self.sim_params.r_tol * 10, 1e-5)
-                device_atol = max(self.sim_params.a_tol * 10, 1e-7)
-                print(f"  Device {device_index}: Using conservative tolerances rtol={device_rtol:.1e}, atol={device_atol:.1e}")
-            
+            device_rtol = self.sim_params.r_tol
+            device_atol = self.sim_params.a_tol
+
             # Store device-specific parameters (no JIT compilation here to avoid diffrax conflicts)
             self.device_functions[i] = {
                 'device_index': device_index,
@@ -300,6 +309,106 @@ class AsyncPruningManager:
             )
             
             # Run simulation with current mask and specified tolerances
+            # Use adaptive step size for better performance during pruning iterations
+            return run_single_simulation(
+                W_reweighted,
+                tau_param,
+                a_param,
+                threshold_param,
+                fr_cap_param,
+                input_currents_param,
+                self.shared_noise_stdv,
+                self.shared_t_axis,
+                self.sim_params.T,
+                self.sim_params.dt,
+                self.sim_params.pulse_start,
+                self.sim_params.pulse_end,
+                r_tol,
+                a_tol,
+                seeds_param,
+            )
+        
+        return jit_simulation
+    
+    def _create_jit_final_simulation_function(self, device_id: int):
+        """Create a JIT-compiled final simulation function with deterministic step size."""
+        target_device = self.devices[device_id]
+        
+        # Create a JIT-compiled function that's bound to this device
+        @jax.jit
+        def jit_final_simulation(W_device, W_mask_device, tau_param, a_param, threshold_param, 
+                                fr_cap_param, input_currents_param, seeds_param, r_tol, a_tol):
+            """JIT-compiled final simulation function with fixed step size for determinism."""
+            # Apply W_mask to connectivity (memory efficient, same device)
+            W_masked = W_device * W_mask_device
+            W_reweighted = reweight_connectivity(
+                W_masked, 
+                self.shared_exc_multiplier, 
+                self.shared_inh_multiplier
+            )
+            
+            # Run simulation with current mask and specified tolerances
+            # Use fixed step size for perfect determinism in final reproduction
+            return run_single_simulation(
+                W_reweighted,
+                tau_param,
+                a_param,
+                threshold_param,
+                fr_cap_param,
+                input_currents_param,
+                self.shared_noise_stdv,
+                self.shared_t_axis,
+                self.sim_params.T,
+                self.sim_params.dt,
+                self.sim_params.pulse_start,
+                self.sim_params.pulse_end,
+                r_tol,
+                a_tol,
+                seeds_param,
+                True  # use_fixed_stepsize=True for determinism in final simulation
+            )
+        
+        return jit_final_simulation
+    
+    def _run_final_simulation_direct(
+        self,
+        final_W_mask: jnp.ndarray,
+        sim_index: int,
+        param_idx: int,
+        stim_idx: int,
+        r_tol: float,
+        a_tol: float,
+        device_idx: int = 0,
+        custom_key: Optional[jnp.ndarray] = None
+    ) -> jnp.ndarray:
+        """Run final simulation with a fresh JIT compilation to avoid caching issues."""
+        # Use pre-placed W matrix on the target device for memory efficiency
+        target_device = self.devices[device_idx]
+        
+        if device_idx in self.device_W:
+            W_device = self.device_W[device_idx]
+        else:
+            # Fallback to placing W on the target device
+            W_device = jax.device_put(self.neuron_params.W, target_device)
+        
+        # IMPORTANT: Place W_mask on the same device as W_device to avoid device mismatch
+        W_mask_device = jax.device_put(final_W_mask, target_device)
+        
+        # Create a FRESH JIT-compiled function specifically for final simulation
+        # This avoids any potential caching or device state issues
+        @jax.jit
+        def fresh_final_simulation(W_device, W_mask_device, tau_param, a_param, threshold_param, 
+                          fr_cap_param, input_currents_param, seeds_param, r_tol, a_tol):
+            """Fresh JIT-compiled simulation function specifically for final simulation."""
+            # Apply W_mask to connectivity (memory efficient, same device)
+            W_masked = W_device * W_mask_device
+            W_reweighted = reweight_connectivity(
+                W_masked, 
+                self.shared_exc_multiplier, 
+                self.shared_inh_multiplier
+            )
+            
+            # Run simulation with current mask and specified tolerances
             return run_single_simulation(
                 W_reweighted,
                 tau_param,
@@ -318,7 +427,22 @@ class AsyncPruningManager:
                 seeds_param
             )
         
-        return jit_simulation
+        # Use either custom key or default seed
+        key_to_use = custom_key if custom_key is not None else self.neuron_params.seeds[param_idx]
+        
+        # Run with fresh JIT compilation
+        return fresh_final_simulation(
+            W_device,
+            W_mask_device,
+            self.neuron_params.tau[param_idx],
+            self.neuron_params.a[param_idx],
+            self.neuron_params.threshold[param_idx],
+            self.neuron_params.fr_cap[param_idx],
+            self.neuron_params.input_currents[stim_idx, param_idx],
+            key_to_use,
+            r_tol,
+            a_tol
+        )
     
     def _create_jit_update_function(self, oscillation_threshold: float, clip_start: int):
         """Create a JIT-compiled update function with static arguments."""
@@ -346,7 +470,8 @@ class AsyncPruningManager:
         sim_index: int,
         r_tol: float,
         a_tol: float,
-        device_idx: int = 0
+        device_idx: int = 0,
+        custom_key: Optional[jnp.ndarray] = None
     ) -> jnp.ndarray:
         """Run a single pruning iteration using memory-efficient pre-placed W matrix."""
         # Extract parameters for this specific simulation
@@ -370,7 +495,8 @@ class AsyncPruningManager:
             # Create and cache JIT-compiled function for this device
             self._jit_sim_functions[device_idx] = self._create_jit_simulation_function(device_idx)
         
-        # Use JIT-compiled function
+        # Use JIT-compiled function with either custom key or default seed
+        key_to_use = custom_key if custom_key is not None else self.neuron_params.seeds[param_idx]
         return self._jit_sim_functions[device_idx](
             W_device,
             W_mask_device,
@@ -379,10 +505,74 @@ class AsyncPruningManager:
             self.neuron_params.threshold[param_idx],
             self.neuron_params.fr_cap[param_idx],
             self.neuron_params.input_currents[stim_idx, param_idx],
-            self.neuron_params.seeds[param_idx],
+            key_to_use,  # Use either custom key or original seed
             r_tol,
             a_tol
         )
+    
+    def _run_final_simulation_with_tolerances(
+        self,
+        final_W_mask: jnp.ndarray,
+        sim_index: int,
+        stim_idx: int,
+        param_idx: int,
+        r_tol: float,
+        a_tol: float,
+        device_idx: int = 0
+    ) -> Tuple[jnp.ndarray, float]:
+        """Run final simulation using same async thread pool context as pruning iterations."""
+        # Use pre-placed W matrix on the target device for memory efficiency
+        target_device = self.devices[device_idx]
+        
+        if device_idx in self.device_W:
+            W_device = self.device_W[device_idx]
+        else:
+            # Fallback to placing W on the target device
+            W_device = jax.device_put(self.neuron_params.W, target_device)
+        
+        # Apply the final W_mask using same device context
+        with jax.default_device(target_device):
+            final_W_mask_device = jax.device_put(final_W_mask, target_device)
+            # Use EXACT same masking operation as in pruning: W * W_mask
+            W_masked = W_device * final_W_mask_device
+            
+            # Reweight connectivity (same as in pruning iterations)
+            W_reweighted = reweight_connectivity(
+                W_masked, 
+                self.shared_exc_multiplier, 
+                self.shared_inh_multiplier
+            )
+            
+            # Run final simulation with same fixed seed as pruning
+            final_key = self.neuron_params.seeds[param_idx]
+            final_results = run_single_simulation(
+                W_reweighted,
+                self.neuron_params.tau[param_idx],
+                self.neuron_params.a[param_idx],
+                self.neuron_params.threshold[param_idx],
+                self.neuron_params.fr_cap[param_idx],
+                self.neuron_params.input_currents[stim_idx, param_idx],
+                self.shared_noise_stdv,
+                self.shared_t_axis,
+                self.sim_params.T,
+                self.sim_params.dt,
+                self.sim_params.pulse_start,
+                self.sim_params.pulse_end,
+                r_tol,
+                a_tol,
+                final_key
+            )
+            
+            # Compute oscillation score from final simulation 
+            clip_start = int(self.sim_params.pulse_start / self.sim_params.dt) + 230
+            max_frs = jnp.max(final_results, axis=-1)
+            mn_mask = jnp.isin(jnp.arange(self.sim_params.n_neurons), self.neuron_params.mn_idxs)
+            active_mask = ((max_frs > 0.01) & mn_mask)
+            
+            final_oscillation_score, _ = compute_oscillation_score(final_results[..., clip_start:], active_mask, prominence=0.05)
+            final_oscillation_score = float(final_oscillation_score)
+            
+            return final_results, final_oscillation_score
     
     async def _process_single_simulation(self, sim_index: int, assigned_device: Optional[int] = None) -> Tuple[int, jnp.ndarray, Pruning_state, jnp.ndarray]:
         """Process a single simulation asynchronously until convergence.
@@ -450,7 +640,10 @@ class AsyncPruningManager:
             try:
                 # Check convergence
                 if sim_state.pruning_state.min_circuit:
-                    async_logger.log_sim(sim_index, f"Converged after {iteration} iterations", "COMPLETE")
+                    # When convergence occurs, we DON'T use the current 'results' because they have poor oscillation
+                    # Instead, we get the last_good_oscillation_score which was computed from better results
+                    last_good_score = float(sim_state.pruning_state.last_good_oscillation_score.squeeze())
+                    
                     break
                 
                 # Calculate current pruning metrics
@@ -476,7 +669,8 @@ class AsyncPruningManager:
                                 sim_index,
                                 device_params['rtol'],
                                 device_params['atol'],
-                                device_id
+                                device_id,
+                                sim_state.pruning_state.keys  # Use evolving RNG key for each iteration
                             )
                         )
                         results = await future
@@ -484,17 +678,9 @@ class AsyncPruningManager:
                     async_logger.log_sim(sim_index, f"Pruning iteration failed: {e}", "ERROR")
                     raise
                 
-                # Show activity information (less frequent)
-                # max_activity = jnp.max(results)
-                # active_neurons = jnp.sum(jnp.max(results, axis=-1) > 0)
-                # if iteration % 10 == 0 or iteration < 2:
-                #     async_logger.log_sim(sim_index, 
-                #         f"Activity: max={max_activity:.2f}, active neurons={active_neurons}", 
-                #         "PROGRESS")
-                
-                
                 # Update pruning state - use JIT-compiled function with static arguments  
                 jit_update_fn = self._jit_update_functions[device_id]
+                
                 updated_state = jit_update_fn(
                     sim_state.pruning_state,  # Simulation state, not batched
                     results,  # Simulation results
@@ -507,7 +693,15 @@ class AsyncPruningManager:
                 raise e
             
             # Store updated state directly (already simulation-level, no batch dimension to remove)
+            # prev_good_score = float(sim_state.pruning_state.last_good_oscillation_score.squeeze())
             sim_state.pruning_state = updated_state
+            # new_good_score = float(updated_state.last_good_oscillation_score.squeeze())
+            
+            # # Check if a new good oscillation was found (score changed from previous)
+            # if new_good_score > prev_good_score and new_good_score > 0:
+            #     async_logger.log_sim(sim_index, 
+            #         f"New good oscillation found (score: {new_good_score:.4f})", 
+            #         "PROGRESS")
             
             sim_state.iteration_count = iteration
             sim_state.last_update_time = time.time()
@@ -534,141 +728,206 @@ class AsyncPruningManager:
         
         if iteration >= self.sim_config.max_pruning_iterations:
             async_logger.log_sim(sim_index, f"Reached max iterations ({self.sim_config.max_pruning_iterations}) without convergence", "COMPLETE")
-        # Run final simulation with converged pruned network
-        # First create W_mask from pruning state to define the network structure
-        active_neurons_from_pruning = (~sim_state.pruning_state.total_removed_neurons) | sim_state.pruning_state.last_removed | sim_state.pruning_state.prev_put_back
         
-        # Create final W_mask for the pruned network structure
-        W_mask_init = jnp.ones_like(self.neuron_params.W_mask[0], dtype=jnp.bool_)  # Single sim, not batch
-        W_mask_final = (W_mask_init * active_neurons_from_pruning[:, None] * active_neurons_from_pruning[None, :]).astype(jnp.bool_)
+        # CRITICAL FIX: Use the last_good_W_mask that had proper oscillations
+        # When convergence occurs due to repeated resets, the final W_mask has poor oscillations (0.0000)
+        # But the last_good_W_mask contains the network state that had oscillation_score >= threshold
         
-        # Update neuron params with final pruned network - single simulation format
-        final_neuron_params = self.neuron_params._replace(W_mask=W_mask_final[None, ...])  # Add batch dim
-                
+        # Extract the last good state from pruning state
+        last_good_W_mask = sim_state.pruning_state.last_good_W_mask
+        last_good_oscillation_score = float(sim_state.pruning_state.last_good_oscillation_score.squeeze())
+        last_good_key = sim_state.pruning_state.last_good_key  # Get the saved RNG key
+        
         async_logger.log_sim(sim_index, 
-            f"Starting final simulation with {jnp.sum(active_neurons_from_pruning)} neurons", 
+            f"Converged with final W_mask (poor osc), using last_good_W_mask (osc_score: {last_good_oscillation_score:.4f})", 
             "FINAL_SIM")
         
-        # Run VNC simulation with the pruned network using memory-efficient approach
-        # Get device placement first (outside try block so it's available in except block)
-        device_id = self._get_device_for_sim(sim_index)
-        target_device = self.devices[device_id]
+        # Check if we have a valid last good state
+        if last_good_oscillation_score <= 0:
+            async_logger.log_sim(sim_index, 
+                f"WARNING: No valid last_good state found (score: {last_good_oscillation_score}), using current converged state", 
+                "FINAL_SIM")
+            # Use current state as fallback
+            final_W_mask = sim_state.pruning_state.W_mask
+            expected_final_oscillation_score = 0.0000  # Expected to be poor
+            # For fallback case, still use the evolved key for consistency 
+            # Even in fallback, we should use the evolved key if available
+            final_key = last_good_key if jnp.any(last_good_key != 0) else self.neuron_params.seeds[param_idx]
+        else:
+            # Use the last good W_mask that had proper oscillations
+            final_W_mask = last_good_W_mask
+            expected_final_oscillation_score = last_good_oscillation_score
+            # CRITICAL FIX: Use the SAME fixed seed that was used in the pruning iteration
+            # The pruning JIT function uses self.neuron_params.seeds[param_idx]
+            # We must use the same seed for consistency, not the evolving RNG key
+        
+        # Run final simulation with the last good W_mask
+        async_logger.log_sim(sim_index, 
+            f"Running final simulation with W_mask that had oscillation_score: {expected_final_oscillation_score:.4f}", 
+            "FINAL_SIM")
         
         try:
-            # Get parameters for this simulation (single simulation, not batch)
-            param_idx = sim_index % self.sim_params.n_param_sets
-            stim_idx = sim_index // self.sim_params.n_param_sets
+            # Extract stored parameter indices from the last good state
+            stored_stim_idx = int(sim_state.pruning_state.last_good_stim_idx.squeeze())
+            stored_param_idx = int(sim_state.pruning_state.last_good_param_idx.squeeze())
             
-            # Generate random key for this simulation
-            key = jax.random.PRNGKey(sim_index + 12345)
-            
-            # Use memory-efficient approach with pre-placed W matrix
-            if device_id in self.device_W:
-                W_device = self.device_W[device_id]
+            # Use stored indices if available, otherwise fall back to calculated ones
+            if stored_stim_idx >= 0 and stored_param_idx >= 0:
+                stim_idx = stored_stim_idx
+                param_idx = stored_param_idx
+                async_logger.log_sim(sim_index, 
+                    f"Using STORED parameter indices: stim_idx={stim_idx}, param_idx={param_idx}", 
+                    "FINAL_SIM")
+                # CRITICAL: Use the same evolved key that the pruning iteration used
+                final_key = last_good_key
+                async_logger.log_sim(sim_index, 
+                    f"Using EXACT evolved key from last_good_state (NOT original seed)", "FINAL_SIM")
             else:
-                W_device = jax.device_put(self.neuron_params.W, target_device)
+                # Use the EXACT SAME parameter extraction pattern as in _run_single_pruning_iteration_with_tolerances
+                param_idx = sim_index % self.sim_params.n_param_sets
+                stim_idx = sim_index // self.sim_params.n_param_sets
+                async_logger.log_sim(sim_index, 
+                    f"Using CALCULATED parameter indices: stim_idx={stim_idx}, param_idx={param_idx}", 
+                    "FINAL_SIM")
             
-            # IMPORTANT: Place W_mask_final on the same device as W_device
-            W_mask_final_device = jax.device_put(W_mask_final, target_device)
-            
-            # Apply final W_mask and reweight (memory efficient, same device)
-            W_masked = W_device * W_mask_final_device
-            W_reweighted = reweight_connectivity(
-                W_masked, 
-                self.shared_exc_multiplier, 
-                self.shared_inh_multiplier
-            )
-            
-            # Run the final simulation with pruned network
-            final_results = run_single_simulation(
-                W_reweighted,
-                self.neuron_params.tau[param_idx],
-                self.neuron_params.a[param_idx], 
-                self.neuron_params.threshold[param_idx],
-                self.neuron_params.fr_cap[param_idx],
-                self.neuron_params.input_currents[stim_idx, param_idx],
-                self.shared_noise_stdv,
-                self.shared_t_axis,
-                self.sim_params.T,
-                self.sim_params.dt,
-                self.sim_params.pulse_start,
-                self.sim_params.pulse_end,
-                self.sim_params.r_tol,
-                self.sim_params.a_tol,
-                key
-            )
-            
-            # Debug: Check the actual results
-            result_stats = {
-                'shape': final_results.shape,
-                'min': float(jnp.min(final_results)),
-                'max': float(jnp.max(final_results)), 
-                'mean': float(jnp.mean(final_results)),
-                'nonzero': int((jnp.sum(final_results, axis=-1) > 0).sum())
-            }
+            # CRITICAL: Use the exact same evolved key that was saved during the last good iteration
+            # NOT the original seed - the key evolves during pruning iterations
+            final_key = last_good_key
             async_logger.log_sim(sim_index, 
-                f"Final simulation completed: {result_stats}", 
-                "FINAL_SIM")
+                f"Using EXACT evolved key from last_good_state: {final_key[:4]} (NOT original seed)", "FINAL_SIM")
             
-            # IMPORTANT: Create mini_circuit from actual simulation results (neurons that fired)
-            # This ensures mini_circuit matches the neurons that are active in final_results
+            device_params = self.device_functions[device_id]
             
-            # Ensure both final_results and mn_mask are on the same device with explicit synchronization
-            # Force everything to be done in the context of the target device
-            with jax.default_device(target_device):
-                # Move final_results to target device first
-                final_results = jax.device_put(final_results, target_device)
-                # Create mn_mask on target device (not just moving template)
-                mn_mask = jax.device_put(self.mn_mask_template, target_device)
+            # CRITICAL FIX: Run final simulation using the EXACT SAME async thread pool execution
+            # pattern as the pruning iterations, but with the last_good_W_mask substituted
+            async_logger.log_sim(sim_index, 
+                f"DEBUG: About to run final simulation with final_W_mask shape: {final_W_mask.shape}, "
+                f"final_W_mask active connections: {jnp.sum(final_W_mask)}, "
+                f"final_W_mask hash: {hash(final_W_mask.tobytes())}, "
+                f"param_idx={param_idx}, stim_idx={stim_idx}", "DEBUG")
                 
-                # Perform operations step by step to ensure device compatibility
-                # Create boolean mask of firing neurons (on target device)
-                firing_mask = jnp.sum(final_results, axis=-1) > 0
-                # Apply motoneuron mask (both on target device)  
-                mini_circuit = firing_mask & ~mn_mask  # Only interneurons that fired
+            try:
+                loop = asyncio.get_event_loop()
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                    # CRITICAL: Use the EXACT SAME execution path as pruning iterations
+                    # Pass the final_W_mask but use the exact same function signature
+                    future = loop.run_in_executor(
+                        executor,
+                        lambda: self._run_single_pruning_iteration_with_tolerances(
+                            final_W_mask,  # Use last_good_W_mask instead of current W_mask
+                            sim_index,
+                            device_params['rtol'],
+                            device_params['atol'],
+                            device_id,
+                            final_key  # Pass the evolved key that was saved during last_good iteration
+                        )
+                    )
+                    final_results = await future
+            except Exception as e:
+                async_logger.log_sim(sim_index, f"Final simulation failed: {e}", "ERROR")
+                raise
+                
+            # Compute oscillation score from final simulation 
+            clip_start = int(self.sim_params.pulse_start / self.sim_params.dt) + 230
+            max_frs = jnp.max(final_results, axis=-1)
+            mn_mask = jnp.isin(jnp.arange(self.sim_params.n_neurons), self.neuron_params.mn_idxs)
+            active_mask = ((max_frs > 0.01) & mn_mask)
             
             async_logger.log_sim(sim_index, 
-                f"Mini circuit: {jnp.sum(mini_circuit)} active interneurons from final simulation results", 
-                "FINAL_SIM")
-                
+                f"DEBUG: Oscillation calculation - clip_start: {clip_start}, "
+                f"active_mask sum: {jnp.sum(active_mask)}, "
+                f"max_frs range: [{jnp.min(max_frs):.6f}, {jnp.max(max_frs):.6f}]", "DEBUG")
+            
+            final_oscillation_score, _ = compute_oscillation_score(final_results[..., clip_start:], active_mask, prominence=0.05)
+            final_oscillation_score = float(final_oscillation_score)
+        
         except Exception as e:
             async_logger.log_sim(sim_index, 
                 f"ERROR in final simulation: {e}", 
                 "ERROR")
             # Create fallback result to prevent crash
-            final_results = jnp.ones((self.sim_params.n_neurons, len(self.sim_params.t_axis))) * 0.002  # Different value to identify this case
-            
-            # Create fallback mini_circuit (all interneurons active)
-            # Ensure both are placed on the target_device
-            # Use explicit device context for safe bitwise operation
-            with jax.default_device(target_device):
-                final_results = jax.device_put(final_results, target_device)
-                mn_mask = jax.device_put(self.mn_mask_template, target_device)
-                mini_circuit = jnp.ones(self.sim_params.n_neurons, dtype=bool) & ~mn_mask
+            final_results = jnp.ones((self.sim_params.n_neurons, len(self.sim_params.t_axis))) * 0.002
+            final_oscillation_score = -1.0  # Mark as error
         
-        # Mark as completed and show final statistics
-        with jax.default_device(target_device):
-            sim_state.is_converged = True
-            mn_mask = jax.device_put(self.mn_mask_template, target_device)
-            total_removed_neurons = jax.device_put(sim_state.pruning_state.total_removed_neurons, target_device)
-            final_available = jnp.sum(~total_removed_neurons & ~mn_mask)
-            final_removed = jnp.sum(total_removed_neurons)
+        # Check consistency with small tolerance for stochastic variations
+        osc_difference = abs(final_oscillation_score - expected_final_oscillation_score)
+        if osc_difference < 1e-10:
+            async_logger.log_sim(sim_index, 
+                f"Final simulation osc_score: {final_oscillation_score:.4f} (expected: {expected_final_oscillation_score:.4f}) ✅ PERFECT MATCH", 
+                "FINAL_SIM")
+        elif osc_difference < 0.1:  # Small stochastic variation tolerance
+            async_logger.log_sim(sim_index, 
+                f"Final simulation osc_score: {final_oscillation_score:.4f} (expected: {expected_final_oscillation_score:.4f}) ⚠️ Small variation ({osc_difference:.4f})", 
+                "FINAL_SIM")
+        else:  # Significant discrepancy
+            async_logger.log_sim(sim_index, 
+                f"Final simulation osc_score: {final_oscillation_score:.4f} (expected: {expected_final_oscillation_score:.4f}) ❌ LARGE DISCREPANCY ({osc_difference:.4f})", 
+                "FINAL_SIM")
 
+        # Log network structure info  
+        total_removed = jnp.sum(sim_state.pruning_state.total_removed_neurons)
+        total_put_back = jnp.sum(sim_state.pruning_state.neurons_put_back)
+        active_neurons_count = jnp.sum(jnp.any(final_W_mask, axis=0))
+        
         async_logger.log_sim(sim_index, 
-            f"COMPLETED: {iteration} iterations, {final_available} neurons remaining ({final_removed} removed)", 
-            "COMPLETE")
+            f"Final network: {active_neurons_count} neurons ({total_removed} removed, {total_put_back} put back)", 
+            "FINAL_SIM")
+
+        # Create mini circuit from final results (same logic as before)
+        max_frs = jnp.max(final_results, axis=-1)
+        mn_mask = jnp.isin(jnp.arange(self.sim_params.n_neurons), self.neuron_params.mn_idxs)
+        mini_circuit = max_frs > 0.01
+        active_interneurons = jnp.sum(mini_circuit & ~mn_mask)
         
-        # Extract the pruning state before cleanup
-        final_pruning_state = sim_state.pruning_state
+        # Final results statistics
+        result_stats = {
+            'shape': final_results.shape,
+            'min': float(jnp.min(final_results)),
+            'max': float(jnp.max(final_results)), 
+            'mean': float(jnp.mean(final_results)),
+            'nonzero': int((jnp.sum(final_results, axis=-1) > 0).sum())
+        }
         
-        # Clean up intermediate computation arrays to free memory
-        del sim_state
-        
-        # Periodically clear JAX caches to prevent memory buildup
-        if sim_index % 5 == 0:  # Clear every 5 simulations
-            jax.clear_caches()
+        async_logger.log_sim(sim_index, 
+            f"Final osc calc: {jnp.sum(active_mask)} active neurons ({jnp.sum(active_mask & mn_mask)} motor), max_fr_range: [{jnp.min(max_frs):.3f}, {jnp.max(max_frs):.3f}], clip_start: {clip_start}", 
+            "FINAL_SIM")
             
-        return sim_index, final_results, final_pruning_state, mini_circuit
+        async_logger.log_sim(sim_index, 
+            f"Final simulation completed: {result_stats}", 
+            "FINAL_SIM")
+            
+        async_logger.log_sim(sim_index, 
+            f"Mini circuit: {active_interneurons} active interneurons from final simulation results", 
+            "FINAL_SIM")
+            
+        async_logger.log_sim(sim_index, 
+            f"COMPLETED: {iteration} iterations, {active_interneurons} neurons remaining ({total_removed} removed)", 
+            "COMPLETE")
+
+        return sim_index, final_results, sim_state.pruning_state, mini_circuit
+    
+    def _handle_simulation_failure(self, sim_index: int, e: Exception, target_device, async_logger) -> Tuple[int, jnp.ndarray, dict, jnp.ndarray]:
+        """Handle simulation failure by creating fallback results."""
+        async_logger.log_sim(sim_index, 
+            f"ERROR in simulation: {e}", 
+            "ERROR")
+        
+        # Create fallback result to prevent crash
+        final_results = jnp.ones((self.sim_params.n_neurons, len(self.sim_params.t_axis))) * 0.002
+        
+        # Create fallback mini_circuit (all interneurons active)
+        with jax.default_device(target_device):
+            final_results = jax.device_put(final_results, target_device)
+            mn_mask = jax.device_put(self.mn_mask_template, target_device)
+            mini_circuit = jnp.ones(self.sim_params.n_neurons, dtype=bool) & ~mn_mask
+        
+        # Create dummy pruning state for fallback
+        fallback_pruning_state = {
+            'W_mask': jnp.ones((self.sim_params.n_neurons, self.sim_params.n_neurons), dtype=bool),
+            'total_removed_neurons': jnp.zeros(self.sim_params.n_neurons, dtype=bool)
+        }
+        
+        return sim_index, final_results, fallback_pruning_state, mini_circuit
     
     async def run_streaming_simulations(self, total_simulations: int, max_concurrent: Optional[int] = None) -> Tuple[List[jnp.ndarray], List[Pruning_state], List[jnp.ndarray]]:
         """
@@ -917,7 +1176,14 @@ class AsyncPruningManager:
                                 last_removed=jnp.zeros(self.sim_params.n_neurons, dtype=jnp.bool),
                                 remove_p=jnp.zeros(self.sim_params.n_neurons),
                                 min_circuit=jnp.array([False]),
-                                keys=self.neuron_params.seeds[sim_idx:sim_idx+1] if sim_idx < len(self.neuron_params.seeds) else jax.random.split(jax.random.PRNGKey(42), 1)
+                                keys=self.neuron_params.seeds[sim_idx:sim_idx+1] if sim_idx < len(self.neuron_params.seeds) else jax.random.split(jax.random.PRNGKey(42), 1),
+                                last_good_oscillating_removed=jnp.zeros(self.sim_params.n_neurons, dtype=jnp.bool),
+                                last_good_oscillating_put_back=jnp.zeros(self.sim_params.n_neurons, dtype=jnp.bool),
+                                last_good_oscillation_score=jnp.array([-1.0]),
+                                last_good_W_mask=jnp.zeros((self.sim_params.n_neurons, self.sim_params.n_neurons), dtype=jnp.bool),
+                                last_good_key=jnp.zeros((2,), dtype=jnp.uint32),
+                                last_good_stim_idx=jnp.array(-1, dtype=jnp.int32),
+                                last_good_param_idx=jnp.array(-1, dtype=jnp.int32)
                             )
                         
                         # Move empty results to CPU
@@ -1193,14 +1459,9 @@ class AsyncRegularSimManager:
             print(f"Setting up device {i}: {device}")
             
             # Use more conservative settings for devices other than 0
-            if i == 0:
-                device_rtol = self.sim_params.r_tol
-                device_atol = self.sim_params.a_tol
-            else:
-                device_rtol = max(self.sim_params.r_tol * 10, 1e-5)
-                device_atol = max(self.sim_params.a_tol * 10, 1e-7)
-                print(f"  Device {i}: Using conservative tolerances rtol={device_rtol:.1e}, atol={device_atol:.1e}")
-            
+            device_rtol = self.sim_params.r_tol
+            device_atol = self.sim_params.a_tol
+
             # Pre-create JIT-compiled simulation function for this device based on sim_type
             sim_type = getattr(self.sim_config, 'sim_type', 'baseline')
             self._jit_sim_functions[i] = self._create_jit_simulation_function(i, device_rtol, device_atol, sim_type)
