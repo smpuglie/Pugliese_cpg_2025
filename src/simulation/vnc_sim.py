@@ -11,6 +11,9 @@ from jax import vmap, jit, random, pmap
 from omegaconf import DictConfig
 from pathlib import Path
 
+# Import RNN-based alternative to diffeqsolve
+from src.simulation.rnn_sim import run_single_simulation_rnn_optimized as run_single_simulation_rnn_alt
+
 # Import utility functions (assumed to exist)
 from src.utils.shuffle_utils import extract_shuffle_indices, full_shuffle
 from src.utils.sim_utils import (
@@ -121,6 +124,25 @@ def run_single_simulation(
     result = jnp.clip(result, 0.0, 1000.0)  # Max 1000 Hz
     
     return result
+
+
+# ============================================================================
+# SIMULATION IMPLEMENTATION SELECTOR
+# ============================================================================
+# Set USE_RNN_IMPLEMENTATION = True to use the RNN-based implementation
+# Set USE_RNN_IMPLEMENTATION = False to use the original diffeqsolve implementation
+USE_RNN_IMPLEMENTATION = False
+
+# Keep the original function as backup
+run_single_simulation_diffeqsolve = run_single_simulation
+
+if USE_RNN_IMPLEMENTATION:
+    # Replace with RNN implementation
+    print("Using RNN-based neural simulation (no diffeqsolve)")
+    run_single_simulation = run_single_simulation_rnn_alt
+else:
+    print("Using diffeqsolve-based neural simulation (original)")
+# ============================================================================
 
 
 # #############################################################################################################################=
