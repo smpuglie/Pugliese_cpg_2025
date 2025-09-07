@@ -307,19 +307,17 @@ def update_single_sim_state(state, R, mn_mask, oscillation_threshold=0.5, clip_s
     oscillation_is_good = (oscillation_score >= oscillation_threshold) & jnp.isfinite(oscillation_score)
     should_update_last_good = oscillation_is_good
     
-    # CRITICAL FIX: Compute the ACTUAL W_mask that produced the good oscillation score
-    # The oscillation was computed from results that used the CURRENT state (total_removed_neurons, neurons_put_back)
-    # So we need to save the W_mask that reflects the CURRENT state, not some future state
-    W_mask_init = jnp.ones_like(W_mask, dtype=jnp.bool_)
-    current_active_neurons = (~total_removed_neurons) | neurons_put_back
-    current_W_mask = (W_mask_init * current_active_neurons[:, None] * current_active_neurons[None, :]).astype(jnp.bool_)
+    # CRITICAL FIX: Use the ACTUAL W_mask that was used in the simulation that produced this result
+    # The oscillation score was computed from results that used the INPUT W_mask parameter
+    # So we should save that exact W_mask, not reconstruct a new one
+    # This ensures perfect reproducibility between pruning iteration and final simulation
     
     # Update most recent good state when oscillation meets threshold
-    # Use the CURRENT computed W_mask, not the input W_mask
+    # Use the ACTUAL input W_mask that produced the good oscillation score
     updated_last_good_removed = jax.lax.select(should_update_last_good, total_removed_neurons, last_good_oscillating_removed)
     updated_last_good_put_back = jax.lax.select(should_update_last_good, neurons_put_back, last_good_oscillating_put_back)
     updated_last_good_score = jax.lax.select(should_update_last_good, oscillation_score, last_good_oscillation_score.squeeze()).reshape(-1, 1)
-    updated_last_good_W_mask = jax.lax.select(should_update_last_good, current_W_mask, last_good_W_mask)  # FIXED: use current_W_mask
+    updated_last_good_W_mask = jax.lax.select(should_update_last_good, W_mask, last_good_W_mask)  # FIXED: use actual input W_mask
     updated_last_good_key = jax.lax.select(should_update_last_good, key, last_good_key)
     # Parameter indices remain constant throughout the simulation - just keep the stored ones
     updated_last_good_stim_idx = last_good_stim_idx

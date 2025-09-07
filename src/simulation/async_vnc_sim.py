@@ -164,6 +164,9 @@ class AsyncPruningManager:
         self.sim_params = sim_params
         self.sim_config = sim_config
         
+        # Initialize clip_start_val for consistent oscillation calculation
+        self.clip_start_val = int(self.sim_params.pulse_start / self.sim_params.dt) + 230
+        
         # Initialize adaptive memory manager
         total_sims = sim_params.n_stim_configs * sim_params.n_param_sets
         self.memory_manager = create_memory_manager(
@@ -348,7 +351,7 @@ class AsyncPruningManager:
             )
             
             # Run simulation with current mask and specified tolerances
-            # Use fixed step size for perfect determinism in final reproduction
+            # RNN implementation is already deterministic with fixed random seed
             return run_single_simulation(
                 W_reweighted,
                 tau_param,
@@ -364,8 +367,7 @@ class AsyncPruningManager:
                 self.sim_params.pulse_end,
                 r_tol,
                 a_tol,
-                seeds_param,
-                True  # use_fixed_stepsize=True for determinism in final simulation
+                seeds_param
             )
         
         return jit_final_simulation
@@ -564,7 +566,8 @@ class AsyncPruningManager:
             )
             
             # Compute oscillation score from final simulation 
-            clip_start = int(self.sim_params.pulse_start / self.sim_params.dt) + 230
+            # Use consistent clip_start calculation with pruning iterations
+            clip_start = self.clip_start_val  # Use pre-calculated value from device setup
             max_frs = jnp.max(final_results, axis=-1)
             mn_mask = jnp.isin(jnp.arange(self.sim_params.n_neurons), self.neuron_params.mn_idxs)
             active_mask = ((max_frs > 0.01) & mn_mask)
@@ -574,7 +577,7 @@ class AsyncPruningManager:
             
             return final_results, final_oscillation_score
     
-    async def _process_single_simulation(self, sim_index: int, assigned_device: Optional[int] = None) -> Tuple[int, jnp.ndarray, Pruning_state, jnp.ndarray]:
+    async def _process_single_simulation(self, sim_index: int, assigned_device: Optional[int] = None) -> Tuple[int, jnp.ndarray, Pruning_state, jnp.ndarray, jnp.ndarray]:
         """Process a single simulation asynchronously until convergence.
         
         Args:
@@ -828,7 +831,8 @@ class AsyncPruningManager:
                 raise
                 
             # Compute oscillation score from final simulation 
-            clip_start = int(self.sim_params.pulse_start / self.sim_params.dt) + 230
+            # Use consistent clip_start calculation with pruning iterations
+            clip_start = self.clip_start_val  # Use pre-calculated value from device setup
             max_frs = jnp.max(final_results, axis=-1)
             mn_mask = jnp.isin(jnp.arange(self.sim_params.n_neurons), self.neuron_params.mn_idxs)
             active_mask = ((max_frs > 0.01) & mn_mask)
@@ -904,7 +908,7 @@ class AsyncPruningManager:
             f"COMPLETED: {iteration} iterations, {active_interneurons} neurons remaining ({total_removed} removed)", 
             "COMPLETE")
 
-        return sim_index, final_results, sim_state.pruning_state, mini_circuit
+        return sim_index, final_results, sim_state.pruning_state, mini_circuit, final_W_mask
     
     def _handle_simulation_failure(self, sim_index: int, e: Exception, target_device, async_logger) -> Tuple[int, jnp.ndarray, dict, jnp.ndarray]:
         """Handle simulation failure by creating fallback results."""
@@ -927,9 +931,13 @@ class AsyncPruningManager:
             'total_removed_neurons': jnp.zeros(self.sim_params.n_neurons, dtype=bool)
         }
         
-        return sim_index, final_results, fallback_pruning_state, mini_circuit
+        # Create fallback W_mask (full connectivity)
+        fallback_W_mask = jnp.ones((self.sim_params.n_neurons, self.sim_params.n_neurons), dtype=jnp.bool_)
+        
+        return sim_index, final_results, fallback_pruning_state, mini_circuit, fallback_W_mask
     
-    async def run_streaming_simulations(self, total_simulations: int, max_concurrent: Optional[int] = None) -> Tuple[List[jnp.ndarray], List[Pruning_state], List[jnp.ndarray]]:
+    async def run_streaming_simulations(self, total_simulations: int, max_concurrent: Optional[int] = None) -> Tuple[List[jnp.ndarray], List[Pruning_state], List[jnp.ndarray], List[jnp.ndarray]]:
+        """Run all simulations with streaming execution - returns results, states, mini_circuits, AND final_W_masks"""
         """
         Run simulations with continuous streaming - start new simulations as soon as others finish.
         
@@ -958,6 +966,7 @@ class AsyncPruningManager:
         results_dict = {}
         states_dict = {}
         mini_circuits_dict = {}
+        w_masks_dict = {}
         failed_sims = set()
         
         # Create a queue of simulation indices to process
@@ -1074,16 +1083,18 @@ class AsyncPruningManager:
                     
                     try:
                         result = await task
-                        sim_idx_result, final_results, final_state, mini_circuit = result
+                        sim_idx_result, final_results, final_state, mini_circuit, final_W_mask = result
                         
                         # Move results to CPU immediately to free GPU memory
                         final_results = jax.device_put(final_results, jax.devices("cpu")[0])
                         final_state = jax.device_put(final_state, jax.devices("cpu")[0])
                         mini_circuit = jax.device_put(mini_circuit, jax.devices("cpu")[0])
+                        final_W_mask = jax.device_put(final_W_mask, jax.devices("cpu")[0])
                         
                         results_dict[sim_idx] = final_results
                         states_dict[sim_idx] = final_state
                         mini_circuits_dict[sim_idx] = mini_circuit
+                        w_masks_dict[sim_idx] = final_W_mask
                         
                         # Verify we got real results, not fallback values
                         result_max = float(jnp.max(final_results))
@@ -1251,15 +1262,16 @@ class AsyncPruningManager:
         results_list = [results_dict[i] for i in range(total_simulations)]
         states_list = [states_dict[i] for i in range(total_simulations)]
         mini_circuits_list = [mini_circuits_dict[i] for i in range(total_simulations)]
+        w_masks_list = [w_masks_dict[i] for i in range(total_simulations)]
         
         # Final comprehensive memory cleanup
-        del results_dict, states_dict, mini_circuits_dict, active_tasks, task_devices, device_load_counts
+        del results_dict, states_dict, mini_circuits_dict, w_masks_dict, active_tasks, task_devices, device_load_counts
         jax.clear_caches()
         gc.collect()
         
         async_logger.log_batch("🧹 Final memory cleanup completed")
         
-        return results_list, states_list, mini_circuits_list
+        return results_list, states_list, mini_circuits_list, w_masks_list
     
     def get_progress_report(self) -> Dict[str, Any]:
         """Get current progress of all active simulations."""
@@ -1331,7 +1343,7 @@ def run_streaming_pruning_simulation(
         return await manager.run_streaming_simulations(total_sims, max_concurrent)
     
     # Run the streaming async execution
-    all_results, all_states, all_mini_circuits = asyncio.run(run_streaming())
+    all_results, all_states, all_mini_circuits, all_final_w_masks = asyncio.run(run_streaming())
     
     # Convert results to arrays and reshape
     results_array = jnp.stack(all_results, axis=0)
@@ -1344,16 +1356,9 @@ def run_streaming_pruning_simulation(
     # These mini_circuits are based on which neurons actually fired in the final simulations
     mini_circuits_array = jnp.stack(all_mini_circuits, axis=0)
     
-    # Create final W_masks from the correct mini_circuits
-    final_w_masks = []
-    for i, mini_circuit in enumerate(all_mini_circuits):
-        # Create the final W_mask: neurons that fired can connect to neurons that fired
-        # Add motor neurons back for connectivity (they're not in mini_circuit but need connections)
-        mn_mask = jnp.isin(jnp.arange(sim_params.n_neurons), neuron_params.mn_idxs)
-        active_neurons = mini_circuit | mn_mask  # Include both active interneurons and motor neurons
-        final_w_mask = (active_neurons[:, None] * active_neurons[None, :]).astype(jnp.bool_)
-        final_w_masks.append(final_w_mask)
-    final_w_masks_array = jnp.stack(final_w_masks, axis=0)
+    # Use the ACTUAL final W_masks that were used in the simulations (not reconstructed!)
+    # This fixes the critical bug where W_masks were incorrectly reconstructed from firing patterns
+    final_w_masks_array = jnp.stack(all_final_w_masks, axis=0)
     
     # Update the original neuron_params with all the final W_masks
     updated_neuron_params = neuron_params._replace(W_mask=final_w_masks_array)

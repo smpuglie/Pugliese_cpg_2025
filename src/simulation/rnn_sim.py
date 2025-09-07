@@ -10,85 +10,87 @@ from jax import jit, random
 from typing import Tuple, Optional
 
 
-@jit 
-def run_single_simulation_rnn_simple(
-    W: jnp.ndarray,
-    tau: jnp.ndarray,
-    a: jnp.ndarray,
-    threshold: jnp.ndarray,
-    fr_cap: jnp.ndarray,
-    inputs: jnp.ndarray,
-    noise_stdv: jnp.ndarray,
-    t_axis: jnp.ndarray,
-    T: float,
-    dt: float,
-    pulse_start: float,
-    pulse_end: float,
-    r_tol: float,  # Not used in RNN version, kept for compatibility
-    a_tol: float,  # Not used in RNN version, kept for compatibility  
-    key: jnp.ndarray,
-) -> jnp.ndarray:
-    """
-    Simplified RNN implementation without Flax - just pure JAX.
-    This is more efficient and easier to integrate as a drop-in replacement.
+# @jit 
+# def run_single_simulation_rnn_simple(
+#     W: jnp.ndarray,
+#     tau: jnp.ndarray,
+#     a: jnp.ndarray,
+#     threshold: jnp.ndarray,
+#     fr_cap: jnp.ndarray,
+#     inputs: jnp.ndarray,
+#     noise_stdv: jnp.ndarray,
+#     t_axis: jnp.ndarray,
+#     T: float,
+#     dt: float,
+#     pulse_start: float,
+#     pulse_end: float,
+#     r_tol: float,  # Not used in RNN version, kept for compatibility
+#     a_tol: float,  # Not used in RNN version, kept for compatibility  
+#     key: jnp.ndarray,
+# ) -> jnp.ndarray:
+#     """
+#     Simplified RNN implementation without Flax - just pure JAX.
+#     This is more efficient and easier to integrate as a drop-in replacement.
     
-    Same signature as the original run_single_simulation function.
-    """
-    n_neurons = W.shape[0]
-    n_steps = len(t_axis)
+#     Same signature as the original run_single_simulation function.
+#     """
+#     n_neurons = W.shape[0]
+#     n_steps = len(t_axis)
     
-    # Initialize firing rates
-    current_rates = jnp.zeros(n_neurons)
+#         # Initialize outputs with the correct shape using float32 for memory efficiency
+#     n_neurons = W.shape[0]
+#     firing_rates = jnp.zeros((n_steps, n_neurons), dtype=jnp.float32)
     
-    # Pre-generate all noise for efficiency
-    all_noise = random.normal(key, shape=(n_steps, n_neurons))
+#     # Pregenerate all noise for efficiency
+#     # noise_key, rng_key = jax.random.split(rng_key)
+#     # all_noise = jax.random.normal(noise_key, shape=(n_steps, W.shape[0]), dtype=jnp.float32)
     
-    # Storage for results
-    rates_history = []
+#     # Storage for results
+#     rates_history = []
     
-    for step in range(n_steps):
-        t = t_axis[step]
+#     for step in range(n_steps):
+#         t = t_axis[step]
         
-        # Check if pulse is active
-        pulse_active = (t >= pulse_start) & (t <= pulse_end)
+#         # Check if pulse is active
+#         pulse_active = (t >= pulse_start) & (t <= pulse_end)
         
-        # Apply external input and noise during pulse
-        external_input = jnp.where(
-            pulse_active,
-            inputs + all_noise[step] * noise_stdv,
-            jnp.zeros_like(inputs)
-        )
+#         # Apply external input and noise during pulse
+#         external_input = jnp.where(
+#             pulse_active,
+#             inputs, #+ all_noise[step] * noise_stdv,
+#             jnp.zeros_like(inputs)
+#         )
         
-        # Compute recurrent input
-        recurrent_input = jnp.dot(W, current_rates)
-        total_input = external_input + recurrent_input
+#         # Compute recurrent input
+#         recurrent_input = jnp.dot(W, current_rates)
+#         total_input = external_input + recurrent_input
         
-        # Apply half-tanh activation function
-        normalized_input = (a / fr_cap) * (total_input - threshold)
-        activation = jnp.maximum(
-            fr_cap * jnp.tanh(normalized_input),
-            0.0
-        )
+#         # Apply half-tanh activation function
+#         normalized_input = (a / fr_cap) * (total_input - threshold)
+#         activation = jnp.maximum(
+#             fr_cap * jnp.tanh(normalized_input),
+#             0.0
+#         )
         
-        # Update rates using Euler integration
-        dR_dt = (activation - current_rates) / tau
-        current_rates = current_rates + dt * dR_dt
+#         # Update rates using Euler integration
+#         dR_dt = (activation - current_rates) / tau
+#         current_rates = current_rates + dt * dR_dt
         
-        # Clip for numerical stability
-        current_rates = jnp.clip(current_rates, 0.0, 1000.0)
+#         # Clip for numerical stability
+#         current_rates = jnp.clip(current_rates, 0.0, 1000.0)
         
-        # Store current rates
-        rates_history.append(current_rates)
+#         # Store current rates
+#         rates_history.append(current_rates)
     
-    # Convert to array and transpose to match original format [n_neurons, n_timepoints]
-    result = jnp.transpose(jnp.stack(rates_history))
+#     # Convert to array and transpose to match original format [n_neurons, n_timepoints]
+#     result = jnp.transpose(jnp.stack(rates_history))
     
-    # Handle potential numerical issues (same as original)
-    result = jnp.where(jnp.isinf(result), 0.0, result)
-    result = jnp.where(jnp.isnan(result), 0.0, result) 
-    result = jnp.clip(result, 0.0, 1000.0)
+#     # Handle potential numerical issues (same as original)
+#     result = jnp.where(jnp.isinf(result), 0.0, result)
+#     result = jnp.where(jnp.isnan(result), 0.0, result) 
+#     result = jnp.clip(result, 0.0, 1000.0)
     
-    return result
+#     return result
 
 
 @jit
@@ -118,12 +120,16 @@ def run_single_simulation_rnn_scan(
     Strategy: Use a fixed number of sub-steps (10) for each t_axis interval to improve accuracy.
     """
     n_steps = len(t_axis)
+
+    # Use 25 sub-steps for each t_axis step - this gives us ~25x finer temporal resolution
+    n_substeps = 25  # Fixed for JIT compatibility
     
-    # Use 10 sub-steps for each t_axis step - this gives us ~10x finer temporal resolution
-    n_substeps = 20  # Fixed for JIT compatibility
+    # Pre-generate all noise in a more memory-efficient way
+    # Use float32 instead of float64 to halve memory usage
+    all_noise = random.normal(key, shape=(n_steps, W.shape[0]), dtype=jnp.float32)
     
-    # Pre-generate all noise
-    all_noise = random.normal(key, shape=(n_steps, W.shape[0]))
+    # Ensure W matrix is float32 for consistent precision and memory efficiency
+    W = jnp.asarray(W, dtype=jnp.float32)
     
     def step_fn(carry, inputs_at_t):
         current_rates = carry
@@ -136,19 +142,19 @@ def run_single_simulation_rnn_scan(
             # Check if pulse is active at current time
             pulse_active = (t >= pulse_start) & (t <= pulse_end)
             
-            # Apply external input and noise during pulse
-            # Scale noise appropriately for sub-steps
-            external_input = jnp.where(
+            # More memory-efficient computation - avoid intermediate arrays
+            # Scale noise appropriately for sub-steps (precompute scaling factor)
+            noise_scale = 1.0 / jnp.sqrt(n_substeps)
+            
+            # Compute total input in one step to reduce memory allocations
+            recurrent_input = jnp.dot(W, rates)
+            total_input = jnp.where(
                 pulse_active,
-                inputs + noise_at_t * noise_stdv / jnp.sqrt(n_substeps),
-                jnp.zeros_like(inputs)
+                recurrent_input + inputs + noise_at_t * noise_stdv * noise_scale,
+                recurrent_input
             )
             
-            # Compute recurrent input
-            recurrent_input = jnp.dot(W, rates)
-            total_input = external_input + recurrent_input
-            
-            # Apply half-tanh activation
+            # Apply half-tanh activation with optimized memory usage
             normalized_input = (a / fr_cap) * (total_input - threshold)
             activation = jnp.maximum(
                 fr_cap * jnp.tanh(normalized_input),
@@ -156,11 +162,11 @@ def run_single_simulation_rnn_scan(
             )
             
             # Update rates using Euler integration with smaller sub_dt
-            dR_dt = (activation - rates) / tau
-            new_rates = rates + sub_dt * dR_dt
-            
-            # Clip for numerical stability
-            new_rates = jnp.clip(new_rates, 0.0, 1000.0)
+            # Combine operations to reduce intermediate arrays
+            new_rates = jnp.clip(
+                rates + (sub_dt / tau) * (activation - rates),
+                0.0, 1000.0
+            )
             
             return new_rates, None
         
@@ -169,8 +175,8 @@ def run_single_simulation_rnn_scan(
         
         return final_rates, final_rates
     
-    # Initialize with zeros
-    initial_rates = jnp.zeros(W.shape[0])
+    # Initialize with zeros using float32 for memory efficiency
+    initial_rates = jnp.zeros(W.shape[0], dtype=jnp.float32)
     
     # Run simulation using scan
     _, rates_history = jax.lax.scan(
@@ -311,7 +317,7 @@ def run_single_simulation_rnn_dual_dt(
     r_tol: float,  # Not used, kept for compatibility
     a_tol: float,  # Not used, kept for compatibility
     key: jnp.ndarray,
-    n_substeps: int = 20  # Number of sub-steps per t_axis step
+    n_substeps: int = 25  # Number of sub-steps per t_axis step
 ) -> jnp.ndarray:
     """
     RNN implementation with improved accuracy using configurable sub-steps.
@@ -320,7 +326,7 @@ def run_single_simulation_rnn_dual_dt(
     while allowing flexible configuration from the user interface.
     
     Parameters:
-    - n_substeps: Number of sub-steps per t_axis step for accuracy (default 20)
+    - n_substeps: Number of sub-steps per t_axis step for accuracy (default 25)
                  Higher values = better accuracy but slower computation
     """
     # Call the static JIT-compiled helper function
@@ -334,42 +340,5 @@ def run_single_simulation_rnn_dual_dt(
 # Export the recommended implementations
 run_single_simulation_rnn_optimized = run_single_simulation_rnn_scan  # Fast, fixed 20 substeps - RECOMMENDED
 run_single_simulation_rnn_flexible = run_single_simulation_rnn_dual_dt  # Slower due to MAX_SUBSTEPS=50 overhead
-run_single_simulation_rnn = run_single_simulation_rnn_simple  # Simple version for debugging
+# run_single_simulation_rnn = run_single_simulation_rnn_simple  # Simple version for debugging
 
-
-def demo_usage():
-    """
-    Example of how to replace the original diffeqsolve-based function.
-    
-    NEW: Dual time step approach for optimal accuracy!
-    
-    The RNN now computes internally with a fine time step (dt_internal) for accuracy,
-    but outputs results at your requested t_axis time points. This gives you:
-    - High accuracy (matches diffeqsolve within 97%+ correlation)
-    - Flexible output timing (matches your t_axis exactly)  
-    - ~1.6x speed improvement over diffeqsolve
-    
-    # For automatic high accuracy (recommended):
-    from src.simulation.rnn_sim import run_single_simulation_rnn_optimized as run_single_simulation
-    # Uses dt_internal=0.0001 automatically, outputs at your t_axis points
-    
-    # For configurable internal time step:
-    from src.simulation.rnn_sim import run_single_simulation_rnn_flexible
-    # Then use with custom dt_internal:
-    # result = run_single_simulation_rnn_flexible(..., dt_internal=0.00005)  # Ultra accuracy
-    # result = run_single_simulation_rnn_flexible(..., dt_internal=0.0002)   # Balanced
-    
-    # For accuracy-level based selection:
-    from src.simulation.rnn_sim import run_single_simulation_rnn_high_accuracy
-    # result = run_single_simulation_rnn_high_accuracy(..., accuracy_level="high")
-    
-    # Available accuracy levels:
-    # - "fast": dt_internal=0.0005, ~89% correlation, fastest
-    # - "balanced": dt_internal=0.0002, ~93% correlation, good speed/accuracy
-    # - "high": dt_internal=0.0001, ~97% correlation, recommended default
-    # - "ultra": dt_internal=0.00005, ~99% correlation, highest accuracy
-    
-    IMPORTANT: Your output will always match the t_axis you provide, regardless of 
-    the internal time step used for computation!
-    """
-    pass
