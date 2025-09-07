@@ -3,7 +3,7 @@ name: DNb08_Stim_Prune
 
 wPath: ${paths.data_dir}/manc t1 connectome data/W_20250813_DNtoMN_unsorted.csv
 dfPath: ${paths.data_dir}/manc t1 connectome data/wTable_20250813_DNtoMN_unsorted_withModules.csv
-n_replicates: 512
+n_replicates: 1024
 batch_size: 64
 dn_screen: False
 stimNeurons: 

@@ -1,7 +1,7 @@
 import os
 
 # os.environ["CUDA_VISIBLE_DEVICES"] = "0"  # Use GPU 1
-# os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
+os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.95"
 import jax
 import signal
@@ -288,77 +288,10 @@ def main(cfg: DictConfig):
                                 raise ValueError(f"Unknown async_mode for regular simulations: {async_mode}. Valid options: 'sync', 'streaming'")
                         
                         print(f"Async simulation completed successfully")
-                    except Exception as async_error:
-                        print(f"❌ Async simulation failed: {async_error}")
-                        
-                        # Try retry mechanism with memory cleanup
-                        max_retries = 2  # Allow 2 retry attempts
-                        retry_count = 0
-                        success = False
-                        
-                        while retry_count < max_retries and not success:
-                            retry_count += 1
-                            print(f"🔄 Attempting retry {retry_count}/{max_retries} after memory cleanup...")
-                            
-                            # Comprehensive memory cleanup
-                            emergency_memory_cleanup()
-                            
-                            # Wait a moment for cleanup to take effect
-                            import time
-                            time.sleep(3)
-                            
-                            # Check memory status after cleanup
-                            try:
-                                import psutil
-                                memory_info = psutil.virtual_memory()
-                                memory_percent = memory_info.percent
-                                available_gb = memory_info.available / (1024**3)
-                                print(f"Memory status after cleanup: {memory_percent:.1f}% used, {available_gb:.1f}GB available")
-                                
-                                if memory_percent > 90:
-                                    print("⚠️  Still high memory usage - reducing concurrent simulations")
-                                    # Reduce concurrency for retry
-                                    retry_batch_size = max(1, cfg.experiment.batch_size // 2)
-                                else:
-                                    retry_batch_size = cfg.experiment.batch_size
-                            except:
-                                print("Could not check memory status, using reduced batch size")
-                                retry_batch_size = max(1, cfg.experiment.batch_size // 2)
-                            
-                            # Retry the simulation with potentially reduced concurrency
-                            try:
-                                if prune_network:
-                                    if async_mode == "streaming":
-                                        results, final_mini_circuits, neuron_params = run_streaming_pruning_simulation(
-                                            neuron_params, sim_params, sim_config, 
-                                            max_concurrent=retry_batch_size,
-                                            checkpoint_dir=checkpoint_dir,
-                                            enable_checkpointing=enable_checkpointing
-                                        )
-                                    else:
-                                        raise ValueError(f"Unknown async_mode for pruning: {async_mode}")
-                                else:
-                                    if async_mode == "streaming":
-                                        results = run_streaming_regular_simulation(
-                                            neuron_params, sim_params, sim_config, max_concurrent=retry_batch_size
-                                        )
-                                        final_mini_circuits = None
-                                    else:
-                                        raise ValueError(f"Unknown async_mode for regular simulations: {async_mode}")
-                                
-                                print(f"✅ Retry {retry_count} succeeded!")
-                                success = True
-                                
-                            except Exception as retry_error:
-                                print(f"❌ Retry {retry_count} failed: {retry_error}")
-                                if retry_count >= max_retries:
-                                    print("🚨 All retries exhausted - simulation failed")
-                                    print("   To resolve this issue:")
-                                    print("   1. Restart the job to clear persistent memory issues")
-                                    print("   2. Reduce batch_size significantly")
-                                    print("   3. Consider using sync mode instead of streaming") 
-                                    print("   4. Review error logs for specific failure causes")
-                                    raise retry_error
+                    except Exception as e:
+                        print(f"Error during async simulation: {e}")
+                        emergency_memory_cleanup()
+                        raise
             
             # Ensure all operations are completed before proceeding
             jax.block_until_ready(results)

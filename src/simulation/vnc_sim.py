@@ -447,10 +447,9 @@ def update_single_sim_state(state, R, mn_mask, oscillation_threshold=0.5, clip_s
     branch_p = jax.lax.select(reset_condition, p_reset, p_continue)
 
     # Update W_mask to reflect removed neurons
-    W_mask_init = jnp.ones_like(W_mask, dtype=jnp.bool_)
     # Active neurons are those NOT removed, OR those that have been put back
     active_neurons = (~branch_total_removed) | branch_neurons_put_back
-    W_mask_new = (W_mask_init * active_neurons[:, None] * active_neurons[None, :]).astype(jnp.bool_)
+    W_mask_new = (active_neurons[:, None] & active_neurons[None, :]).astype(jnp.bool_)
 
     ##### FINAL SELECTION: CONVERGED STATE (revert to last good) vs CONTINUE STATE #####
     # When converged AND we have a good last state, revert to the most recent oscillating state
@@ -461,7 +460,7 @@ def update_single_sim_state(state, R, mn_mask, oscillation_threshold=0.5, clip_s
     reverted_total_removed = updated_last_good_removed
     reverted_neurons_put_back = updated_last_good_put_back
     reverted_active_neurons = (~reverted_total_removed) | reverted_neurons_put_back
-    reverted_W_mask = (W_mask_init * reverted_active_neurons[:, None] * reverted_active_neurons[None, :]).astype(jnp.bool_)
+    reverted_W_mask = (reverted_active_neurons[:, None] & reverted_active_neurons[None, :]).astype(jnp.bool_)
     
     # Use the scalar version for select operations
     currently_converged_scalar = currently_converged.squeeze()

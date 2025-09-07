@@ -200,7 +200,7 @@ def get_conservative_batch_size(total_sims: int, proposed_batch_size: int, max_c
     elif max_concurrent is not None:
         return min(max_concurrent, gpu_aware_max)
     else:
-        return min(32, gpu_aware_max)  # Default fallback, GPU-aware
+        return min(64, gpu_aware_max)  # Default fallback, GPU-aware
 
 
 def configure_jax_for_large_simulations():
@@ -407,7 +407,7 @@ class AdaptiveMemoryManager:
     def get_optimal_batch_size(self, base_batch_size: int) -> int:
         """Get optimal batch size based on simulation characteristics."""
         if self.is_very_large_simulation:
-            return min(base_batch_size, 32)
+            return min(base_batch_size, 64)
         elif self.is_large_simulation:
             return min(base_batch_size, 64)
         else:
@@ -467,7 +467,7 @@ def optimize_for_performance_vs_stability(total_simulations: int, n_gpus: Option
     
     return {
         "memory_fraction": manager.get_memory_fraction(),
-        "max_concurrent": manager.get_optimal_concurrent_size(32, n_gpus),  # Base of 32, GPU-aware cap
+        "max_concurrent": manager.get_optimal_concurrent_size(64, n_gpus),  # Base of 64, GPU-aware cap
         "batch_size": manager.get_optimal_batch_size(64),  # Base of 64
         "cleanup_frequency": "adaptive",  # Use adaptive strategy
         "enable_monitoring": True,  # Always enable (minimal overhead)
@@ -495,7 +495,7 @@ PERFORMANCE_RECOMMENDATIONS = {
     },
     "large_simulations": {
         "max_concurrent_per_gpu": 16,   # Multiply by n_gpus, cap at 16*n_gpus total
-        "batch_size": 32,
+        "batch_size": 64,
         "cleanup_every_n": "adaptive",
         "memory_fraction": 0.65,
         "expected_overhead": "5-10%"
@@ -515,7 +515,7 @@ def calculate_optimal_concurrent_size(
     n_timepoints: int, 
     total_simulations: int,
     n_devices: int = None, 
-    max_concurrent: int = 32,
+    max_concurrent: int = 64,
     is_pruning: bool = False
 ) -> int:
     """
@@ -526,7 +526,7 @@ def calculate_optimal_concurrent_size(
         n_timepoints: Number of time points per simulation
         total_simulations: Total number of simulations to run
         n_devices: Number of devices available (defaults to JAX device count)
-        max_concurrent: Maximum allowed concurrent simulations (default 32)
+        max_concurrent: Maximum allowed concurrent simulations (default 64)
         is_pruning: Whether this is for pruning simulations (affects memory calculation)
     
     Returns:
