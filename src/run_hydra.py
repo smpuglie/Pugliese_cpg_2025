@@ -17,7 +17,7 @@ import sparse
 import logging
 from omegaconf import DictConfig, OmegaConf
 from pathlib import Path
-from src.utils import io_dict_to_hdf5 as ioh5
+import src.utils.io_dict_to_hdf5 as ioh5
 from src.utils.path_utils import convert_dict_to_path, save_config
 from src.simulation.vnc_sim import run_vnc_simulation, prepare_neuron_params, prepare_sim_params, parse_simulation_config, load_wTable
 
@@ -60,7 +60,7 @@ class CleanLoggingRedirect:
         sys.stdout = self.terminal
 
 def cleanup_jax():
-    """Clean up JAX resources properly."""
+    """Clean up JAX resources properly with enhanced memory management."""
     print("\nCleaning up JAX resources...")
     try:
         # Force synchronization of all pending operations
@@ -69,12 +69,67 @@ def cleanup_jax():
         # Clear JAX caches
         jax.clear_caches()
         
-        # Force garbage collection
-        gc.collect()
+        # Force backend cleanup if available
+        try:
+            if hasattr(jax, 'clear_backends'):
+                jax.clear_backends()
+            print("  JAX backends cleared")
+        except Exception as e:
+            print(f"  Warning: Could not clear JAX backends: {e}")
+        
+        # GPU memory cleanup and synchronization
+        try:
+            # Force GPU synchronization on all devices
+            devices = jax.devices()
+            for device in devices:
+                with jax.default_device(device):
+                    # Force a small operation to synchronize and clear
+                    _ = jax.device_put(jax.numpy.array([1.0]), device)
+            print(f"  Synchronized {len(devices)} devices")
+        except Exception as e:
+            print(f"  Warning: GPU synchronization failed: {e}")
+        
+        # Force garbage collection multiple times
+        for _ in range(3):
+            gc.collect()
         
         print("JAX cleanup completed.")
     except Exception as e:
         print(f"Error during JAX cleanup: {e}")
+
+def emergency_memory_cleanup():
+    """Emergency memory cleanup function for when simulations fail."""
+    print("🚨 Performing emergency memory cleanup...")
+    
+    try:
+        # Clear JAX resources
+        jax.clear_caches()
+        
+        # Force backend cleanup if available
+        if hasattr(jax, 'clear_backends'):
+            jax.clear_backends()
+        
+        # GPU memory cleanup
+        devices = jax.devices()
+        for device in devices:
+            try:
+                with jax.default_device(device):
+                    pass  # Force device sync
+            except:
+                pass
+        
+        # Aggressive garbage collection
+        for _ in range(5):
+            gc.collect()
+            
+        print("🧹 Emergency memory cleanup completed")
+        
+    except Exception as e:
+        print(f"⚠️  Emergency cleanup failed: {e}")
+        
+    # Wait a moment for cleanup to take effect
+    import time
+    time.sleep(2)
 
 def cleanup_logging(logger):
     """Clean up logging handlers properly."""
@@ -180,17 +235,45 @@ def main(cfg: DictConfig):
                     print("Loading network configuration...")
                     _, neuron_params, sim_params, sim_config, _ = prepare_vnc_simulation_params(cfg)
                     
+                    # Check memory status before starting async simulation
+                    try:
+                        import psutil
+                        memory_info = psutil.virtual_memory()
+                        memory_percent = memory_info.percent
+                        available_gb = memory_info.available / (1024**3)
+                        print(f"Pre-simulation memory status: {memory_percent:.1f}% used, {available_gb:.1f}GB available")
+                        
+                        if memory_percent > 85:
+                            print("⚠️  WARNING: High memory usage before simulation start!")
+                            if memory_percent > 95:
+                                print("❌ CRITICAL: Memory usage too high to safely start simulation")
+                                print("   Please restart the job or reduce simulation parameters")
+                    except:
+                        print("Could not check pre-simulation memory status")
+                    
                     # Initialize variables to handle error cases
                     results = None
                     final_mini_circuits = None
                     
                     # Run async simulation based on mode and pruning setting
+                    # Enable checkpointing for long simulations (optional)
+                    enable_checkpointing = getattr(cfg.sim, "enable_checkpointing", False)
+                    print(f"Checkpointing configuration: enable_checkpointing={enable_checkpointing}")
+
                     try:
                         if prune_network:
                             # Async pruning simulations
                             if async_mode == "streaming":
+                                # Setup checkpointing for streaming simulations
+                                checkpoint_dir = cfg.paths.ckpt_dir / "checkpoints" if enable_checkpointing else None
+                                if enable_checkpointing:
+                                    print(f"Checkpoints will be saved to: {checkpoint_dir}")
+                                
                                 results, final_mini_circuits, neuron_params = run_streaming_pruning_simulation(
-                                    neuron_params, sim_params, sim_config, max_concurrent=cfg.experiment.batch_size
+                                    neuron_params, sim_params, sim_config, 
+                                    max_concurrent=cfg.experiment.batch_size,
+                                    checkpoint_dir=checkpoint_dir,
+                                    enable_checkpointing=enable_checkpointing
                                 )
                             else:
                                 raise ValueError(f"Unknown async_mode for pruning: {async_mode}. Valid options: 'sync', 'streaming'")
@@ -206,12 +289,76 @@ def main(cfg: DictConfig):
                         
                         print(f"Async simulation completed successfully")
                     except Exception as async_error:
-                        print(f"Async simulation failed: {async_error}")
-                        # Fallback to sync if needed
-                        print("Falling back to synchronous execution")
-                        results, final_mini_circuits, neuron_params = run_vnc_simulation(cfg)
-                        # Note: Could also re-raise here if you prefer to fail fast
-                        # raise
+                        print(f"❌ Async simulation failed: {async_error}")
+                        
+                        # Try retry mechanism with memory cleanup
+                        max_retries = 2  # Allow 2 retry attempts
+                        retry_count = 0
+                        success = False
+                        
+                        while retry_count < max_retries and not success:
+                            retry_count += 1
+                            print(f"🔄 Attempting retry {retry_count}/{max_retries} after memory cleanup...")
+                            
+                            # Comprehensive memory cleanup
+                            emergency_memory_cleanup()
+                            
+                            # Wait a moment for cleanup to take effect
+                            import time
+                            time.sleep(3)
+                            
+                            # Check memory status after cleanup
+                            try:
+                                import psutil
+                                memory_info = psutil.virtual_memory()
+                                memory_percent = memory_info.percent
+                                available_gb = memory_info.available / (1024**3)
+                                print(f"Memory status after cleanup: {memory_percent:.1f}% used, {available_gb:.1f}GB available")
+                                
+                                if memory_percent > 90:
+                                    print("⚠️  Still high memory usage - reducing concurrent simulations")
+                                    # Reduce concurrency for retry
+                                    retry_batch_size = max(1, cfg.experiment.batch_size // 2)
+                                else:
+                                    retry_batch_size = cfg.experiment.batch_size
+                            except:
+                                print("Could not check memory status, using reduced batch size")
+                                retry_batch_size = max(1, cfg.experiment.batch_size // 2)
+                            
+                            # Retry the simulation with potentially reduced concurrency
+                            try:
+                                if prune_network:
+                                    if async_mode == "streaming":
+                                        results, final_mini_circuits, neuron_params = run_streaming_pruning_simulation(
+                                            neuron_params, sim_params, sim_config, 
+                                            max_concurrent=retry_batch_size,
+                                            checkpoint_dir=checkpoint_dir,
+                                            enable_checkpointing=enable_checkpointing
+                                        )
+                                    else:
+                                        raise ValueError(f"Unknown async_mode for pruning: {async_mode}")
+                                else:
+                                    if async_mode == "streaming":
+                                        results = run_streaming_regular_simulation(
+                                            neuron_params, sim_params, sim_config, max_concurrent=retry_batch_size
+                                        )
+                                        final_mini_circuits = None
+                                    else:
+                                        raise ValueError(f"Unknown async_mode for regular simulations: {async_mode}")
+                                
+                                print(f"✅ Retry {retry_count} succeeded!")
+                                success = True
+                                
+                            except Exception as retry_error:
+                                print(f"❌ Retry {retry_count} failed: {retry_error}")
+                                if retry_count >= max_retries:
+                                    print("🚨 All retries exhausted - simulation failed")
+                                    print("   To resolve this issue:")
+                                    print("   1. Restart the job to clear persistent memory issues")
+                                    print("   2. Reduce batch_size significantly")
+                                    print("   3. Consider using sync mode instead of streaming") 
+                                    print("   4. Review error logs for specific failure causes")
+                                    raise retry_error
             
             # Ensure all operations are completed before proceeding
             jax.block_until_ready(results)

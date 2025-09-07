@@ -107,23 +107,40 @@ def save_checkpoint(checkpoint_state: CheckpointState, checkpoint_path: Path,
                    metadata: Dict[str, Any] = None, results: List[jnp.ndarray] = None,
                    batch_start_idx: Optional[int] = None, batch_end_idx: Optional[int] = None,
                    compression_opts: int = 5):
-    """Save simulation checkpoint to disk using HDF5, YAML, and sparse NPZ files."""
+    """Save simulation checkpoint to disk using HDF5, YAML, and sparse NPZ files.
+    
+    Unified function that handles both batch and streaming checkpoint modes.
+    """
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
     
+    # Determine checkpoint type
+    is_streaming = checkpoint_state.checkpoint_type == "streaming"
+    
     # Save metadata as YAML for easy inspection
-    metadata_dict = {
-        "batch_index": int(checkpoint_state.batch_index),
-        "completed_batches": int(checkpoint_state.completed_batches),
-        "total_batches": int(checkpoint_state.total_batches),
-        "timestamp": float(time.time()),
-        "has_mini_circuits": checkpoint_state.accumulated_mini_circuits is not None,
-        "has_pruning_state": checkpoint_state.pruning_state is not None,
-        "n_result_batches": checkpoint_state.n_result_batches,
-    }
+    if is_streaming:
+        metadata_dict = {
+            "checkpoint_type": "streaming",
+            "total_simulations": len(checkpoint_state.completed_simulations or set()) + len(checkpoint_state.failed_sims or set()),
+            "completed_simulations": list(checkpoint_state.completed_simulations or set()),
+            "failed_simulations": list(checkpoint_state.failed_sims or set()),
+            "timestamp": float(time.time()),
+            "progress_info": dict(checkpoint_state.progress_info or {}),
+        }
+    else:
+        metadata_dict = {
+            "checkpoint_type": "batch",
+            "batch_index": int(checkpoint_state.batch_index),
+            "completed_batches": int(checkpoint_state.completed_batches),
+            "total_batches": int(checkpoint_state.total_batches),
+            "timestamp": float(time.time()),
+            "has_mini_circuits": checkpoint_state.accumulated_mini_circuits is not None,
+            "has_pruning_state": checkpoint_state.pruning_state is not None,
+            "n_result_batches": checkpoint_state.n_result_batches,
+        }
+    
     if metadata:
         metadata_dict.update(metadata)
     
-
     # Save accumulated results as separate sparse NPZ files
     results_dir = checkpoint_path.parent / f"results_{checkpoint_path.stem}"
     results_dir.mkdir(parents=True, exist_ok=True)
@@ -134,40 +151,86 @@ def save_checkpoint(checkpoint_state: CheckpointState, checkpoint_path: Path,
         yaml.dump(metadata_dict, f, default_flow_style=False, indent=2)
     
 
-    if results is not None:
+    # Handle batch mode results (legacy compatibility)
+    if results is not None and not is_streaming:
         result_path = results_dir / f"batch_{batch_start_idx}.npz"
         sparse.save_npz(result_path, sparse.COO.from_numpy(jnp.asarray(results)))
 
-        # Create dictionary structure for checkpoint data (only large arrays go in HDF5)
-    checkpoint_dict = {
-        "batch_index": checkpoint_state.batch_index,
-        "completed_batches": checkpoint_state.completed_batches,
-        "total_batches": checkpoint_state.total_batches,
-        "n_result_batches": checkpoint_state.n_result_batches,
-    }
-    checkpoint_dict["neuron_params"] = checkpoint_state.neuron_params._asdict()
+    # Create dictionary structure for checkpoint data (only JAX arrays go in HDF5)
+    checkpoint_dict = {}
+    
+    if is_streaming:
+        # Convert streaming results to saveable format
+        if checkpoint_state.results_dict:
+            results_data = {}
+            for sim_idx, result_array in checkpoint_state.results_dict.items():
+                results_data[f"sim_{sim_idx}"] = result_array
+            checkpoint_dict["results"] = results_data
+        
+        # Convert states_dict to saveable format
+        if checkpoint_state.states_dict:
+            states_data = {}
+            for sim_idx, state in checkpoint_state.states_dict.items():
+                # Convert Pruning_state to dict
+                state_dict = state._asdict() if hasattr(state, '_asdict') else state
+                states_data[f"sim_{sim_idx}"] = state_dict
+            checkpoint_dict["states"] = states_data
+        
+        # Convert mini_circuits_dict to saveable format
+        if checkpoint_state.mini_circuits_dict:
+            mini_circuits_data = {}
+            for sim_idx, mini_circuit in checkpoint_state.mini_circuits_dict.items():
+                mini_circuits_data[f"sim_{sim_idx}"] = mini_circuit
+            checkpoint_dict["mini_circuits"] = mini_circuits_data
+        
+        # Convert w_masks_dict to saveable format
+        if checkpoint_state.w_masks_dict:
+            w_masks_data = {}
+            for sim_idx, w_mask in checkpoint_state.w_masks_dict.items():
+                w_masks_data[f"sim_{sim_idx}"] = w_mask
+            checkpoint_dict["w_masks"] = w_masks_data
+            
+    else:
+        # Batch mode fields
+        checkpoint_dict.update({
+            "batch_index": checkpoint_state.batch_index,
+            "completed_batches": checkpoint_state.completed_batches,
+            "total_batches": checkpoint_state.total_batches,
+            "n_result_batches": checkpoint_state.n_result_batches,
+        })
+        
+        if checkpoint_state.neuron_params:
+            checkpoint_dict["neuron_params"] = checkpoint_state.neuron_params._asdict()
+    
     # Save checkpoint data using HDF5 (in the same directory as results)
     checkpoint_h5_path = results_dir / f"{checkpoint_path.stem}.h5"
     ioh5.save(checkpoint_h5_path, checkpoint_dict, compression_opts=compression_opts)
 
-    print(f"Checkpoint saved: {checkpoint_h5_path}")
+    if is_streaming:
+        print(f"Streaming checkpoint saved: {checkpoint_h5_path}")
+        print(f"Completed {len(checkpoint_state.completed_simulations or set())} simulations")
+    else:
+        print(f"Batch checkpoint saved: {checkpoint_h5_path}")
+        print(f"Completed {checkpoint_state.completed_batches}/{checkpoint_state.total_batches} batches")
     print(f"Metadata saved: {metadata_path}")
-    print(f"Completed {checkpoint_state.completed_batches}/{checkpoint_state.total_batches} batches")
     
 
 
-def load_checkpoint(checkpoint_path: Path, base_name: str, full_neuron_params: Optional[NeuronParams] = None) -> Tuple[CheckpointState, List[jnp.ndarray], Dict[str, Any]]:
+def load_checkpoint(checkpoint_path: Path, base_name: str, full_neuron_params: Optional[NeuronParams] = None) -> Tuple[CheckpointState, Optional[NeuronParams], Dict[str, Any]]:
     """
     Load simulation checkpoint from disk using HDF5, YAML, and sparse NPZ files.
     
+    Unified function that handles both batch and streaming checkpoint modes.
+    
     Args:
         checkpoint_path: Path to the checkpoint file
+        base_name: Base name of the checkpoint
         full_neuron_params: Complete neuron parameters to merge batch data into.
                           If provided, the loaded batch neuron_params will be merged into this.
                           If None, the loaded neuron_params will be returned as-is.
     
     Returns:
-        Tuple of (CheckpointState, accumulated_results, metadata)
+        Tuple of (CheckpointState, neuron_params, metadata)
     """
     # Handle both old and new checkpoint locations
     # First try the new location (inside results directory)
@@ -181,112 +244,195 @@ def load_checkpoint(checkpoint_path: Path, base_name: str, full_neuron_params: O
     metadata = {}
     
     if metadata_yaml_path.exists():
-        metadata = OmegaConf.load(metadata_yaml_path)
+        with open(metadata_yaml_path, 'r') as f:
+            metadata = yaml.safe_load(f)
 
-    # Load checkpoint data from HDF5 (without automatic JAX conversion to handle strings)
+    # Load checkpoint data from HDF5 (with JAX conversion since all data is now JAX-compatible)
     checkpoint_dict = ioh5.load(checkpoint_h5_path, enable_jax=True)
+    
+    # Determine checkpoint type from metadata
+    checkpoint_type = metadata.get("checkpoint_type", "batch")
+    is_streaming = checkpoint_type == "streaming"
+    
+    if is_streaming:
+        # Handle streaming mode - get metadata from YAML
+        completed_simulations = set(metadata.get("completed_simulations", []))
+        failed_simulations = set(metadata.get("failed_simulations", []))
+        progress_info = metadata.get("progress_info", {})
+        
+        # Reconstruct results_dict
+        results_dict = {}
+        if "results" in checkpoint_dict:
+            for key, result_array in checkpoint_dict["results"].items():
+                sim_idx = int(key.replace("sim_", ""))
+                results_dict[sim_idx] = result_array  # Already JAX arrays
+        
+        # Reconstruct states_dict
+        states_dict = {}
+        if "states" in checkpoint_dict:
+            for key, state_dict in checkpoint_dict["states"].items():
+                sim_idx = int(key.replace("sim_", ""))
+                # Convert dict back to Pruning_state
+                state_converted = {}
+                for field_name, field_value in state_dict.items():
+                    if field_value is not None:
+                        state_converted[field_name] = jnp.asarray(field_value)
+                    else:
+                        state_converted[field_name] = None
+                states_dict[sim_idx] = Pruning_state(**state_converted)
+        
+        # Reconstruct mini_circuits_dict
+        mini_circuits_dict = {}
+        if "mini_circuits" in checkpoint_dict:
+            for key, mini_circuit in checkpoint_dict["mini_circuits"].items():
+                sim_idx = int(key.replace("sim_", ""))
+                mini_circuits_dict[sim_idx] = jnp.asarray(mini_circuit)
+        
+        # Reconstruct w_masks_dict
+        w_masks_dict = {}
+        if "w_masks" in checkpoint_dict:
+            for key, w_mask in checkpoint_dict["w_masks"].items():
+                sim_idx = int(key.replace("sim_", ""))
+                w_masks_dict[sim_idx] = jnp.asarray(w_mask)
+        
+        # Create streaming CheckpointState
+        checkpoint_state = CheckpointState(
+            batch_index=0,  # Not applicable for streaming
+            completed_batches=0,  # Not applicable for streaming
+            total_batches=0,  # Not applicable for streaming
+            neuron_params=None,  # Not stored for streaming
+            n_result_batches=0,  # Not applicable for streaming
+            checkpoint_type="streaming",
+            completed_simulations=completed_simulations,
+            results_dict=results_dict,
+            states_dict=states_dict,
+            mini_circuits_dict=mini_circuits_dict,
+            w_masks_dict=w_masks_dict,
+            failed_sims=failed_simulations,
+            progress_info=progress_info
+        )
+        
+        print(f"Streaming checkpoint loaded: {checkpoint_h5_path}")
+        print(f"Resuming with {len(completed_simulations)} completed simulations")
+        
+        return checkpoint_state, None, metadata
+        
+    else:
+        # Handle batch mode (existing logic)
+        
+        # Convert relevant arrays to JAX arrays manually
+        for key in ['batch_index', 'completed_batches', 'total_batches', 'n_result_batches']:
+            if key in checkpoint_dict:
+                checkpoint_dict[key] = int(checkpoint_dict[key])
+        
+        # Extract basic fields
+        basic_fields = {
+            'batch_index': int(checkpoint_dict['batch_index']),
+            'completed_batches': int(checkpoint_dict['completed_batches']),
+            'total_batches': int(checkpoint_dict['total_batches']),
+            'n_result_batches': int(checkpoint_dict['n_result_batches']),
+        }
+        
+        
+        # Reconstruct accumulated mini circuits if available
+        accumulated_mini_circuits = None
+        if metadata.get("has_mini_circuits", False) and "accumulated_mini_circuits" in checkpoint_dict:
+            accumulated_mini_circuits = []
+            mini_circuits_dict = checkpoint_dict["accumulated_mini_circuits"]
+            # Sort by batch number to maintain order
+            sorted_keys = sorted(mini_circuits_dict.keys(), key=lambda x: int(x.split('_')[1]))
+            for key in sorted_keys:
+                accumulated_mini_circuits.append(jnp.asarray(mini_circuits_dict[key]))
+        
+        del full_neuron_params
+        gc.collect()  # Free memory before loading neuron_params
+        # Create the loaded neuron_params (might be a batch extract)
+        neuron_params = NeuronParams(**checkpoint_dict['neuron_params'])
 
-    # Convert relevant arrays to JAX arrays manually
-    for key in ['batch_index', 'completed_batches', 'total_batches', 'n_result_batches']:
-        if key in checkpoint_dict:
-            checkpoint_dict[key] = int(checkpoint_dict[key])
-    
-    # Extract basic fields
-    basic_fields = {
-        'batch_index': int(checkpoint_dict['batch_index']),
-        'completed_batches': int(checkpoint_dict['completed_batches']),
-        'total_batches': int(checkpoint_dict['total_batches']),
-        'n_result_batches': int(checkpoint_dict['n_result_batches']),
-    }
-    
-    
-    # Reconstruct accumulated mini circuits if available
-    accumulated_mini_circuits = None
-    if metadata.get("has_mini_circuits", False) and "accumulated_mini_circuits" in checkpoint_dict:
-        accumulated_mini_circuits = []
-        mini_circuits_dict = checkpoint_dict["accumulated_mini_circuits"]
-        # Sort by batch number to maintain order
-        sorted_keys = sorted(mini_circuits_dict.keys(), key=lambda x: int(x.split('_')[1]))
-        for key in sorted_keys:
-            accumulated_mini_circuits.append(jnp.asarray(mini_circuits_dict[key]))
-    
-    del full_neuron_params
-    gc.collect()  # Free memory before loading neuron_params
-    # Create the loaded neuron_params (might be a batch extract)
-    neuron_params = NeuronParams(**checkpoint_dict['neuron_params'])
-
-    # Reconstruct pruning_state if available
-    pruning_state = None
-    if metadata.get("has_pruning_state", False) and "pruning_state" in checkpoint_dict:
-        pruning_state_dict = checkpoint_dict["pruning_state"]
-        # Convert arrays to JAX arrays
-        converted_pruning_state = {}
-        for key, value in pruning_state_dict.items():
-            if value is not None:
-                converted_pruning_state[key] = jnp.asarray(value)
-            else:
-                converted_pruning_state[key] = None
-        pruning_state = Pruning_state(**converted_pruning_state)
-    
-    # Create checkpoint state
-    checkpoint_state = CheckpointState(
-        **basic_fields,
-        neuron_params=neuron_params,
-        accumulated_mini_circuits=accumulated_mini_circuits,
-        pruning_state=pruning_state,
-    )
-    
-    print(f"Checkpoint loaded: {checkpoint_h5_path}")
-    print(f"Resuming from batch {checkpoint_state.batch_index} ({checkpoint_state.completed_batches}/{checkpoint_state.total_batches} batches completed)")
-    
-    return checkpoint_state, neuron_params, metadata
+        # Reconstruct pruning_state if available
+        pruning_state = None
+        if metadata.get("has_pruning_state", False) and "pruning_state" in checkpoint_dict:
+            pruning_state_dict = checkpoint_dict["pruning_state"]
+            # Convert arrays to JAX arrays
+            converted_pruning_state = {}
+            for key, value in pruning_state_dict.items():
+                if value is not None:
+                    converted_pruning_state[key] = jnp.asarray(value)
+                else:
+                    converted_pruning_state[key] = None
+            pruning_state = Pruning_state(**converted_pruning_state)
+        
+        # Create checkpoint state
+        checkpoint_state = CheckpointState(
+            **basic_fields,
+            neuron_params=neuron_params,
+            accumulated_mini_circuits=accumulated_mini_circuits,
+            pruning_state=pruning_state,
+            checkpoint_type="batch"
+        )
+        
+        print(f"Batch checkpoint loaded: {checkpoint_h5_path}")
+        print(f"Resuming from batch {checkpoint_state.batch_index} ({checkpoint_state.completed_batches}/{checkpoint_state.total_batches} batches completed)")
+        
+        return checkpoint_state, neuron_params, metadata
 
 
-def find_latest_checkpoint(checkpoint_dir: Path, pattern: str = "checkpoint_batch_*") -> Optional[Path]:
+def find_latest_checkpoint(checkpoint_dir: Path, pattern: str = "checkpoint_*") -> Optional[Tuple[Path, str]]:
     """
-    Find the latest checkpoint in a directory based on batch number.
+    Find the latest checkpoint in a directory based on checkpoint number.
+    
+    Unified function that works for both batch and streaming checkpoints.
     
     Args:
         checkpoint_dir: Directory to search for checkpoints
         pattern: Glob pattern for checkpoint files (without extension)
         
     Returns:
-        Path to the latest checkpoint file, or None if no checkpoints found
+        Tuple of (checkpoint_path, base_name) or None if no checkpoints found
     """
     if not checkpoint_dir.exists():
         print(f"Checkpoint directory does not exist starting from scratch: {checkpoint_dir}")
-        return None, None
+        return None
     
     # Look for results directories that contain the checkpoints
     results_dirs = natsorted(list(checkpoint_dir.glob(f"results_{pattern}")))
 
-    # Extract batch numbers and find the latest
+    # Extract checkpoint numbers and find the latest
     latest_checkpoint = None
     base_name = None
-    latest_batch = -1
+    latest_number = -1
     
     # Check new-style checkpoints (in results directories)
     for results_dir in results_dirs:
         try:
-            # Extract batch number from directory name like "results_checkpoint_batch_5"
-            base_name = results_dir.name.replace('results_', '')
-            batch_str = base_name.split('_')[-1]
-            batch_num = int(batch_str)
+            # Extract number from directory name like "results_checkpoint_5" or "results_checkpoint_batch_5"
+            base_name_candidate = results_dir.name.replace('results_', '')
             
-            # Check if the HDF5 file exists in this directory
-            h5_file = results_dir / f"{base_name}.h5"
-            if h5_file.exists() and batch_num > latest_batch:
-                latest_batch = batch_num
-                latest_checkpoint = h5_file.parent
+            # Handle both "checkpoint_123" and "checkpoint_batch_123" formats
+            parts = base_name_candidate.split('_')
+            if len(parts) >= 2:
+                number_str = parts[-1]  # Last part should be the number
+                checkpoint_number = int(number_str)
+                
+                # Check if the HDF5 file exists in this directory
+                h5_file = results_dir / f"{base_name_candidate}.h5"
+                if h5_file.exists() and checkpoint_number > latest_number:
+                    latest_number = checkpoint_number
+                    latest_checkpoint = h5_file.parent
+                    base_name = base_name_candidate
         except (ValueError, IndexError):
             # Skip directories that don't match expected naming pattern
             continue
 
-    return latest_checkpoint, base_name
+    if latest_checkpoint:
+        return latest_checkpoint, base_name
+    return None
 
-def cleanup_old_checkpoints(checkpoint_dir: Path, keep_last_n: int = 3, pattern: str = "checkpoint_batch_*"):
+def cleanup_old_checkpoints(checkpoint_dir: Path, keep_last_n: int = 3, pattern: str = "checkpoint_*"):
     """
     Remove old checkpoint files, keeping only the most recent ones.
+    
+    Unified function that works for both batch and streaming checkpoints.
     
     Args:
         checkpoint_dir: Directory containing checkpoints
@@ -307,21 +453,25 @@ def cleanup_old_checkpoints(checkpoint_dir: Path, keep_last_n: int = 3, pattern:
     if len(checkpoint_bases) <= keep_last_n:
         return  # Nothing to clean up
     
-    # Sort by batch number and keep only the latest ones
+    # Sort by checkpoint number and keep only the latest ones
     sorted_bases = []
     for base in checkpoint_bases:
         try:
-            batch_num = int(base.split('_')[-1])
-            sorted_bases.append((batch_num, base))
+            # Handle both "checkpoint_123" and "checkpoint_batch_123" formats
+            parts = base.split('_')
+            if len(parts) >= 2:
+                number_str = parts[-1]  # Last part should be the number
+                checkpoint_number = int(number_str)
+                sorted_bases.append((checkpoint_number, base))
         except (ValueError, IndexError):
             continue
     
-    sorted_bases.sort(key=lambda x: x[0])  # Sort by batch number
+    sorted_bases.sort(key=lambda x: x[0])  # Sort by checkpoint number
     
     # Remove old checkpoints
     to_remove = sorted_bases[:-keep_last_n]  # All except the last keep_last_n
     
-    for batch_num, base in to_remove:
+    for checkpoint_number, base in to_remove:
         # Remove results directory (which contains both the HDF5 and YAML files)
         results_dir = checkpoint_dir / f"results_{base}"
         if results_dir.exists():

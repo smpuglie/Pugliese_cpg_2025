@@ -13,7 +13,10 @@ The package is organized into the following submodules:
 
 # Import main simulation functions
 from .simulation.vnc_sim import run_vnc_simulation, prepare_neuron_params, prepare_sim_params, parse_simulation_config
-from .memory.checkpointing import CheckpointState, save_checkpoint, load_checkpoint
+from .memory.checkpointing import (
+    CheckpointState, save_checkpoint, load_checkpoint,
+    find_latest_checkpoint, cleanup_old_checkpoints
+)
 from .data.data_classes import NeuronParams, SimParams, SimulationConfig, Pruning_state
 
 __all__ = [
@@ -28,4 +31,6 @@ __all__ = [
     'CheckpointState',
     'save_checkpoint',
     'load_checkpoint',
+    'find_latest_checkpoint',
+    'cleanup_old_checkpoints',
 ]

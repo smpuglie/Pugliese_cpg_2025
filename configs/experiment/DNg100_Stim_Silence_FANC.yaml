@@ -1,5 +1,5 @@
 # This is the default configuration for the experiment.
-name: DNg100_Stim_Silence
+name: DNg100_Stim_Silence_FANC
 
 wPath: ${paths.data_dir}/fanc t1 connectome data/W_BDN2toMN_20250107_corrected.npy
 dfPath: ${paths.data_dir}/fanc t1 connectome data/wTable_BDN2toMN_20250107_corrected.csv

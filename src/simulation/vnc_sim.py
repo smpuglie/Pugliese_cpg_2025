@@ -1825,6 +1825,7 @@ def parse_simulation_config(cfg: DictConfig) -> SimulationConfig:
         n_high_fr_upper=getattr(cfg.sim, "n_high_fr_upper", 100),
         high_fr_threshold=getattr(cfg.sim, "high_fr_threshold", 100.0),
         enable_checkpointing=getattr(cfg.sim, "enable_checkpointing", False),
+        checkpoint_interval=getattr(cfg.sim, "checkpoint_interval", 100)
     )
 
 # #############################################################################################################################=

@@ -8,6 +8,7 @@ import numpy as np
 import traceback
 import psutil                    
 import gc
+from pathlib import Path
 from typing import Optional
 
 from typing import Dict, Any, Optional, Tuple, List, Union
@@ -23,10 +24,17 @@ from src.simulation.vnc_sim import (
     compute_oscillation_score
 )
 from src.utils.shuffle_utils import full_shuffle
-from src.data.data_classes import NeuronParams, SimParams, SimulationConfig, Pruning_state
+from src.data.data_classes import NeuronParams, SimParams, SimulationConfig, Pruning_state, CheckpointState
 from src.memory.adaptive_memory import (
     monitor_memory_usage, get_conservative_batch_size, log_memory_status, get_gpu_count,
     create_memory_manager, calculate_optimal_concurrent_size
+)
+from src.memory.checkpointing import (
+    CheckpointState, save_checkpoint, load_checkpoint,
+    find_latest_checkpoint, cleanup_old_checkpoints
+)
+from src.memory.checkpointing import (
+    save_checkpoint, load_checkpoint, find_latest_checkpoint, cleanup_old_checkpoints
 )
 
 class AsyncLogger:
@@ -94,60 +102,69 @@ def initialize_single_sim_pruning_state(
     sim_params: SimParams, 
     sim_index: int
 ) -> Pruning_state:
-    """Initialize pruning state for a specific simulation index."""
-    mn_idxs = neuron_params.mn_idxs
-    all_neurons = jnp.arange(neuron_params.W.shape[-1])
-    in_idxs = jnp.setdiff1d(all_neurons, mn_idxs)
+    """Initialize pruning state for a specific simulation index with memory efficiency."""
+    try:
+        mn_idxs = neuron_params.mn_idxs
+        all_neurons = jnp.arange(neuron_params.W.shape[-1])
+        in_idxs = jnp.setdiff1d(all_neurons, mn_idxs)
 
-    # Create state for single simulation (no batch dimension)
-    W_mask = jnp.full((neuron_params.W.shape[0], neuron_params.W.shape[1]), True, dtype=jnp.bool_)
-    interneuron_mask = jnp.full((W_mask.shape[-1],), fill_value=False, dtype=jnp.bool_)
-    interneuron_mask = interneuron_mask.at[in_idxs].set(True)
-    level = jnp.zeros((1,), dtype=jnp.int32)
-    total_removed_neurons = jnp.full((W_mask.shape[-1],), False, dtype=jnp.bool_)
-    removed_stim_neurons = jnp.full((total_removed_neurons.shape[-1],), False, dtype=jnp.bool_)
-    neurons_put_back = jnp.full((total_removed_neurons.shape[-1],), False, dtype=jnp.bool_)
-    prev_put_back = jnp.full((total_removed_neurons.shape[-1],), False, dtype=jnp.bool_)
-    last_removed = jnp.full((total_removed_neurons.shape[-1],), False, dtype=jnp.bool_)
-    min_circuit = jnp.full((1,), False)
+        # Create state for single simulation (no batch dimension)
+        W_mask = jnp.full((neuron_params.W.shape[0], neuron_params.W.shape[1]), True, dtype=jnp.bool_)
+        interneuron_mask = jnp.full((W_mask.shape[-1],), fill_value=False, dtype=jnp.bool_)
+        interneuron_mask = interneuron_mask.at[in_idxs].set(True)
+        level = jnp.zeros((1,), dtype=jnp.int32)
+        total_removed_neurons = jnp.full((W_mask.shape[-1],), False, dtype=jnp.bool_)
+        removed_stim_neurons = jnp.full((total_removed_neurons.shape[-1],), False, dtype=jnp.bool_)
+        neurons_put_back = jnp.full((total_removed_neurons.shape[-1],), False, dtype=jnp.bool_)
+        prev_put_back = jnp.full((total_removed_neurons.shape[-1],), False, dtype=jnp.bool_)
+        last_removed = jnp.full((total_removed_neurons.shape[-1],), False, dtype=jnp.bool_)
+        min_circuit = jnp.full((1,), False)
 
-    # Initialize most recent good oscillating state tracking for single simulation
-    last_good_oscillating_removed = jnp.full((total_removed_neurons.shape[-1],), False, dtype=jnp.bool_)
-    last_good_oscillating_put_back = jnp.full((total_removed_neurons.shape[-1],), False, dtype=jnp.bool_)
-    last_good_oscillation_score = jnp.full((1,), -1.0)  # Initialize with -1 (no good state yet)
-    last_good_W_mask = jnp.zeros_like(W_mask, dtype=jnp.bool_)  # Initialize with empty W_mask
+        # Initialize most recent good oscillating state tracking for single simulation
+        last_good_oscillating_removed = jnp.full((total_removed_neurons.shape[-1],), False, dtype=jnp.bool_)
+        last_good_oscillating_put_back = jnp.full((total_removed_neurons.shape[-1],), False, dtype=jnp.bool_)
+        last_good_oscillation_score = jnp.full((1,), -1.0)  # Initialize with -1 (no good state yet)
+        last_good_W_mask = jnp.zeros_like(W_mask, dtype=jnp.bool_)  # Initialize with empty W_mask
 
-    # Initialize probabilities for this specific simulation
-    exclude_mask = ~interneuron_mask
-    p_arrays = removal_probability(jnp.ones((W_mask.shape[-1],)), exclude_mask)
+        # Initialize probabilities for this specific simulation
+        exclude_mask = ~interneuron_mask
+        p_arrays = removal_probability(jnp.ones((W_mask.shape[-1],)), exclude_mask)
 
-    # Get the specific seed for this simulation index
-    if sim_index < len(neuron_params.seeds):
-        sim_seed = neuron_params.seeds[sim_index]
-    else:
-        # Use last seed if we don't have enough seeds
-        sim_seed = neuron_params.seeds[-1]
+        # Get the specific seed for this simulation index with bounds checking
+        if sim_index < len(neuron_params.seeds):
+            sim_seed = neuron_params.seeds[sim_index]
+        else:
+            # Use last seed if we don't have enough seeds (defensive programming)
+            sim_seed = neuron_params.seeds[-1]
 
-    return Pruning_state(
-        W_mask=W_mask,
-        interneuron_mask=interneuron_mask,
-        level=level,
-        total_removed_neurons=total_removed_neurons,
-        removed_stim_neurons=removed_stim_neurons,
-        neurons_put_back=neurons_put_back,
-        prev_put_back=prev_put_back,
-        last_removed=last_removed,
-        remove_p=p_arrays,
-        min_circuit=min_circuit,
-        keys=sim_seed,  # Simulation seed, shape (2,) not (1, 2)
-        last_good_oscillating_removed=last_good_oscillating_removed,
-        last_good_oscillating_put_back=last_good_oscillating_put_back,
-        last_good_oscillation_score=last_good_oscillation_score,
-        last_good_W_mask=last_good_W_mask,
-        last_good_key=jnp.zeros((2,), dtype=jnp.uint32),
-        last_good_stim_idx=jnp.array(-1, dtype=jnp.int32),
-        last_good_param_idx=jnp.array(-1, dtype=jnp.int32)
-    )
+        return Pruning_state(
+            W_mask=W_mask,
+            interneuron_mask=interneuron_mask,
+            level=level,
+            total_removed_neurons=total_removed_neurons,
+            removed_stim_neurons=removed_stim_neurons,
+            neurons_put_back=neurons_put_back,
+            prev_put_back=prev_put_back,
+            last_removed=last_removed,
+            remove_p=p_arrays,
+            min_circuit=min_circuit,
+            keys=sim_seed,  # Simulation seed, shape (2,) not (1, 2)
+            last_good_oscillating_removed=last_good_oscillating_removed,
+            last_good_oscillating_put_back=last_good_oscillating_put_back,
+            last_good_oscillation_score=last_good_oscillation_score,
+            last_good_W_mask=last_good_W_mask,
+            last_good_key=jnp.zeros((2,), dtype=jnp.uint32),
+            last_good_stim_idx=jnp.array(-1, dtype=jnp.int32),
+            last_good_param_idx=jnp.array(-1, dtype=jnp.int32)
+        )
+        
+    except Exception as e:
+        # If initialization fails, perform cleanup and re-raise with better error context
+        try:
+            gc.collect()
+        except:
+            pass
+        raise Exception(f"Failed to initialize pruning state for sim {sim_index}: {e}")
     
     
 class AsyncPruningManager:
@@ -160,6 +177,22 @@ class AsyncPruningManager:
         sim_config: SimulationConfig,
         max_workers: int = None
     ):
+        # Pre-initialization memory check and cleanup
+        try:
+            memory_info = monitor_memory_usage(0)
+            if memory_info.get('gpu_usage_percent', 0) > 80:
+                print(f"⚠️  WARNING: High GPU memory usage ({memory_info.get('gpu_usage_percent', 0):.1f}%) during manager initialization")
+                # Perform emergency cleanup
+                jax.clear_caches()
+                gc.collect()
+                if hasattr(jax, 'clear_backends'):
+                    try:
+                        jax.clear_backends()
+                    except:
+                        pass
+        except Exception as e:
+            print(f"Warning: Could not check memory status during initialization: {e}")
+        
         self.neuron_params = neuron_params
         self.sim_params = sim_params
         self.sim_config = sim_config
@@ -585,6 +618,15 @@ class AsyncPruningManager:
             assigned_device: Specific device to use (if None, uses default assignment)
         """
         try:
+            # Pre-simulation memory check
+            memory_status = monitor_memory_usage(sim_index)
+            if memory_status.get('gpu_usage_percent', 0) > 90:
+                async_logger.log_sim(sim_index, 
+                    f"WARNING: High GPU memory usage ({memory_status.get('gpu_usage_percent', 0):.1f}%) before simulation start", 
+                    "ERROR")
+                # Trigger emergency cleanup
+                self.memory_manager.monitor_and_cleanup_if_needed(sim_index, warn_threshold=85.0)
+            
             # Initialize state for this specific simulation using the new function
             initial_state = initialize_single_sim_pruning_state(
                 self.neuron_params, 
@@ -695,17 +737,8 @@ class AsyncPruningManager:
                 traceback.print_exc()
                 raise e
             
-            # Store updated state directly (already simulation-level, no batch dimension to remove)
-            # prev_good_score = float(sim_state.pruning_state.last_good_oscillation_score.squeeze())
+            # Update state
             sim_state.pruning_state = updated_state
-            # new_good_score = float(updated_state.last_good_oscillation_score.squeeze())
-            
-            # # Check if a new good oscillation was found (score changed from previous)
-            # if new_good_score > prev_good_score and new_good_score > 0:
-            #     async_logger.log_sim(sim_index, 
-            #         f"New good oscillation found (score: {new_good_score:.4f})", 
-            #         "PROGRESS")
-            
             sim_state.iteration_count = iteration
             sim_state.last_update_time = time.time()
             iteration += 1
@@ -753,16 +786,15 @@ class AsyncPruningManager:
             # Use current state as fallback
             final_W_mask = sim_state.pruning_state.W_mask
             expected_final_oscillation_score = 0.0000  # Expected to be poor
+            # For fallback case, calculate param_idx before using it
+            fallback_param_idx = sim_index % self.sim_params.n_param_sets
             # For fallback case, still use the evolved key for consistency 
             # Even in fallback, we should use the evolved key if available
-            final_key = last_good_key if jnp.any(last_good_key != 0) else self.neuron_params.seeds[param_idx]
+            final_key = last_good_key if jnp.any(last_good_key != 0) else self.neuron_params.seeds[fallback_param_idx]
         else:
             # Use the last good W_mask that had proper oscillations
             final_W_mask = last_good_W_mask
             expected_final_oscillation_score = last_good_oscillation_score
-            # CRITICAL FIX: Use the SAME fixed seed that was used in the pruning iteration
-            # The pruning JIT function uses self.neuron_params.seeds[param_idx]
-            # We must use the same seed for consistency, not the evolving RNG key
         
         # Run final simulation with the last good W_mask
         async_logger.log_sim(sim_index, 
@@ -911,10 +943,29 @@ class AsyncPruningManager:
         return sim_index, final_results, sim_state.pruning_state, mini_circuit, final_W_mask
     
     def _handle_simulation_failure(self, sim_index: int, e: Exception, target_device, async_logger) -> Tuple[int, jnp.ndarray, dict, jnp.ndarray]:
-        """Handle simulation failure by creating fallback results."""
+        """Handle simulation failure by creating fallback results with proper cleanup."""
         async_logger.log_sim(sim_index, 
             f"ERROR in simulation: {e}", 
             "ERROR")
+        
+        # Comprehensive cleanup for failed simulation
+        try:
+            # Clear JAX caches and force garbage collection
+            jax.clear_caches()
+            gc.collect()
+            
+            # Force GPU memory cleanup if possible
+            if hasattr(jax, 'clear_backends'):
+                jax.clear_backends()
+                
+            # Memory cleanup using memory manager
+            if hasattr(self, 'memory_manager'):
+                self.memory_manager.perform_cleanup(context=f"sim_{sim_index}_failed")
+                
+        except Exception as cleanup_e:
+            async_logger.log_sim(sim_index, 
+                f"WARNING: Cleanup after failure also failed: {cleanup_e}", 
+                "ERROR")
         
         # Create fallback result to prevent crash
         final_results = jnp.ones((self.sim_params.n_neurons, len(self.sim_params.t_axis))) * 0.002
@@ -936,7 +987,7 @@ class AsyncPruningManager:
         
         return sim_index, final_results, fallback_pruning_state, mini_circuit, fallback_W_mask
     
-    async def run_streaming_simulations(self, total_simulations: int, max_concurrent: Optional[int] = None) -> Tuple[List[jnp.ndarray], List[Pruning_state], List[jnp.ndarray], List[jnp.ndarray]]:
+    async def run_streaming_simulations(self, total_simulations: int, max_concurrent: Optional[int] = None, checkpoint_dir: Optional[Path] = None, enable_checkpointing: bool = False) -> Tuple[List[jnp.ndarray], List[Pruning_state], List[jnp.ndarray], List[jnp.ndarray]]:
         """Run all simulations with streaming execution - returns results, states, mini_circuits, AND final_W_masks"""
         """
         Run simulations with continuous streaming - start new simulations as soon as others finish.
@@ -944,10 +995,19 @@ class AsyncPruningManager:
         Args:
             total_simulations: Total number of simulations to run
             max_concurrent: Maximum number of simulations to run concurrently (default: auto-calculated)
+            checkpoint_dir: Directory to save checkpoints (optional)
+            enable_checkpointing: Whether to enable periodic checkpointing
         
         Returns:
-            Tuple of (results_list, states_list, mini_circuits_list) in simulation index order
+            Tuple of (results_list, states_list, mini_circuits_list, w_masks_list) in simulation index order
         """
+        # DEBUG: Print checkpoint parameters
+        print(f"🔍 CHECKPOINT DEBUG: enable_checkpointing={enable_checkpointing}, checkpoint_dir={checkpoint_dir}")
+        if enable_checkpointing:
+            print(f"🔍 CHECKPOINT DEBUG: Checkpoint directory exists: {checkpoint_dir.exists() if checkpoint_dir else 'None'}")
+        else:
+            print(f"🔍 CHECKPOINT DEBUG: Checkpointing is disabled")
+            
         if max_concurrent is None:
             max_concurrent = calculate_optimal_concurrent_size(
                 n_neurons=self.sim_params.n_neurons,
@@ -969,8 +1029,40 @@ class AsyncPruningManager:
         w_masks_dict = {}
         failed_sims = set()
         
-        # Create a queue of simulation indices to process
-        pending_sims = list(range(total_simulations))
+        # Checkpoint recovery
+        completed_count = 0
+        if enable_checkpointing and checkpoint_dir:
+            checkpoint_result = find_latest_checkpoint(checkpoint_dir)
+            if checkpoint_result:
+                checkpoint_path, base_name = checkpoint_result
+                async_logger.log_batch(f"🔄 Found checkpoint: {checkpoint_path}/{base_name}")
+                
+                try:
+                    checkpoint_state, _, metadata = load_checkpoint(checkpoint_path, base_name)
+                    if checkpoint_state and checkpoint_state.checkpoint_type == "streaming":
+                        # Restore state from streaming checkpoint
+                        results_dict = checkpoint_state.results_dict or {}
+                        states_dict = checkpoint_state.states_dict or {}
+                        mini_circuits_dict = checkpoint_state.mini_circuits_dict or {}
+                        w_masks_dict = checkpoint_state.w_masks_dict or {}
+                        failed_sims = checkpoint_state.failed_sims or set()
+                        completed_count = checkpoint_state.progress_info.get('completed_count', 0) if checkpoint_state.progress_info else 0
+                        
+                        async_logger.log_batch(f"✅ Checkpoint loaded: {completed_count}/{total_simulations} simulations already completed")
+                        
+                        # Log recovery details
+                        if failed_sims:
+                            async_logger.log_batch(f"⚠️ Found {len(failed_sims)} failed simulations in checkpoint: {list(failed_sims)}")
+                    else:
+                        async_logger.log_batch("⚠️ Found non-streaming checkpoint, starting fresh...")
+                            
+                except Exception as checkpoint_error:
+                    async_logger.log_batch(f"❌ Failed to load checkpoint: {checkpoint_error}")
+                    async_logger.log_batch("Starting fresh simulation...")
+        
+        # Create a queue of simulation indices to process (excluding completed ones)
+        pending_sims = [i for i in range(total_simulations) if i not in results_dict]
+        async_logger.log_batch(f"Simulations to process: {len(pending_sims)} pending, {len(results_dict)} already completed")
         active_tasks = {}  # task -> sim_index mapping
         task_devices = {}  # task -> device_id mapping
         device_load_counts = {i: 0 for i in range(self.n_devices)}  # track sims per device
@@ -979,8 +1071,7 @@ class AsyncPruningManager:
             """Get the device with the least number of active simulations."""
             return min(device_load_counts.keys(), key=lambda device_id: device_load_counts[device_id])
         
-        # Progress tracking
-        completed_count = 0
+        # Progress tracking (completed_count already set from checkpoint recovery)
         start_time = time.time()
         
         # Create simplified progress monitoring task with memory tracking
@@ -1102,6 +1193,55 @@ class AsyncPruningManager:
                             async_logger.log_batch(f"⚠️  Warning: Sim {sim_idx} completed with suspiciously low max rate: {result_max}")
                         
                         async_logger.log_batch(f"✅ Completed Sim {sim_idx} on device {device_id} (load: {device_load_counts[device_id]}) - max rate: {result_max:.4f} ({completed_count}/{total_simulations})")
+                        
+                        # Periodic checkpointing
+                        if enable_checkpointing and checkpoint_dir:
+                            # Check if we should save a checkpoint (periodic + memory-based)
+                            try:
+                                memory_info = psutil.virtual_memory()
+                                current_memory_percent = memory_info.percent
+                                # Get checkpoint interval from config (default to 10 if not specified)
+                                checkpoint_interval = getattr(self.sim_config, 'checkpoint_interval', 10)
+                                # Save checkpoint every N simulations OR when memory usage > 80%
+                                should_checkpoint = (completed_count % checkpoint_interval == 0) or (current_memory_percent > 80.0)
+                                async_logger.log_batch(f"Memory {current_memory_percent:.1f}%, checkpoint_interval={checkpoint_interval}, should_checkpoint={should_checkpoint} (completed_count={completed_count})")
+                            except:
+                                # Fallback to just periodic checkpoints if memory monitoring fails
+                                checkpoint_interval = getattr(self.sim_config, 'checkpoint_interval', 10)
+                                should_checkpoint = (completed_count % checkpoint_interval == 0)
+                                async_logger.log_batch(f"Memory check failed, using periodic checkpoint: checkpoint_interval={checkpoint_interval}, should_checkpoint={should_checkpoint} (completed_count={completed_count})")
+                            
+                            if should_checkpoint:
+                                try:
+                                    checkpoint_state = CheckpointState(
+                                        batch_index=0,  # Not applicable for streaming
+                                        completed_batches=0,  # Not applicable for streaming  
+                                        total_batches=0,  # Not applicable for streaming
+                                        neuron_params=None,  # Not stored for streaming
+                                        n_result_batches=0,  # Not applicable for streaming
+                                        checkpoint_type="streaming",
+                                        completed_simulations=set(results_dict.keys()),
+                                        results_dict=results_dict.copy(),
+                                        states_dict=states_dict.copy(),
+                                        mini_circuits_dict=mini_circuits_dict.copy(),
+                                        w_masks_dict=w_masks_dict.copy(),
+                                        failed_sims=failed_sims.copy(),
+                                        progress_info={
+                                            'completed_count': completed_count,
+                                            'total_simulations': total_simulations,
+                                            'timestamp': time.time()
+                                        }
+                                    )
+                                    
+                                    checkpoint_path = checkpoint_dir / f"checkpoint_{completed_count}"
+                                    save_checkpoint(checkpoint_state, checkpoint_path)
+                                    async_logger.log_batch(f"💾 Checkpoint saved at {checkpoint_path} ({completed_count}/{total_simulations} completed)")
+                                    
+                                    # Clean up old checkpoints (keep last 3)
+                                    cleanup_old_checkpoints(checkpoint_dir, keep_last_n=3)
+                                    
+                                except Exception as checkpoint_error:
+                                    async_logger.log_batch(f"⚠️ Checkpoint save failed: {checkpoint_error}")
                         
                         # Clean up memory after successful completion
                         del result, final_results, final_state, mini_circuit
@@ -1264,12 +1404,37 @@ class AsyncPruningManager:
         mini_circuits_list = [mini_circuits_dict[i] for i in range(total_simulations)]
         w_masks_list = [w_masks_dict[i] for i in range(total_simulations)]
         
-        # Final comprehensive memory cleanup
+        # Final comprehensive memory cleanup with enhanced GPU clearing
         del results_dict, states_dict, mini_circuits_dict, w_masks_dict, active_tasks, task_devices, device_load_counts
-        jax.clear_caches()
-        gc.collect()
         
-        async_logger.log_batch("🧹 Final memory cleanup completed")
+        # Comprehensive JAX cleanup
+        jax.clear_caches()
+        
+        # Force backend cleanup if available
+        try:
+            if hasattr(jax, 'clear_backends'):
+                jax.clear_backends()
+        except Exception as e:
+            async_logger.log_batch(f"Warning: Could not clear JAX backends: {e}")
+        
+        # GPU memory cleanup  
+        try:
+            # Force GPU synchronization and cleanup
+            for device_id in range(self.n_devices):
+                with jax.default_device(jax.devices()[device_id]):
+                    pass  # This forces device synchronization
+                    
+            # Additional memory cleanup
+            gc.collect()
+            
+            # Memory manager cleanup
+            if hasattr(self, 'memory_manager'):
+                self.memory_manager.perform_cleanup(context="final_streaming_cleanup")
+                
+        except Exception as e:
+            async_logger.log_batch(f"Warning: GPU cleanup failed: {e}")
+        
+        async_logger.log_batch("🧹 Final comprehensive memory cleanup completed")
         
         return results_list, states_list, mini_circuits_list, w_masks_list
     
@@ -1295,7 +1460,9 @@ def run_streaming_pruning_simulation(
     neuron_params: NeuronParams,
     sim_params: SimParams,
     sim_config: SimulationConfig,
-    max_concurrent: Optional[int] = None
+    max_concurrent: Optional[int] = None,
+    checkpoint_dir: Optional[Path] = None,
+    enable_checkpointing: bool = False
 ) -> Tuple[jnp.ndarray, jnp.ndarray, NeuronParams]:
     """
     Run pruning simulation with streaming processing - new simulations start as others finish.
@@ -1306,19 +1473,84 @@ def run_streaming_pruning_simulation(
     - Faster overall completion time
     - Real-time progress monitoring
     - Enhanced memory management for large simulations (n_replicates >= 1024)
+    - Checkpointing support for recovery from failures
     
     Args:
         neuron_params: Neuron parameters
         sim_params: Simulation parameters  
         sim_config: Simulation configuration
         max_concurrent: Maximum concurrent simulations (default: auto-calculated)
+        checkpoint_dir: Directory for checkpointing (optional)
+        enable_checkpointing: Whether to enable checkpointing
     
     Returns:
         Tuple of (results_array, mini_circuits_array, updated_neuron_params)
     """
     total_sims = sim_params.n_stim_configs * sim_params.n_param_sets
     
-# Calculate optimal max_concurrent if not provided, with conservative adjustments for large sims
+    # Setup checkpointing
+    checkpoint_state = None
+    completed_sims = set()
+    start_sim = 0
+    
+    if enable_checkpointing and checkpoint_dir is not None:
+        checkpoint_dir = Path(checkpoint_dir)
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Check for existing checkpoint
+        checkpoint_result = find_latest_checkpoint(checkpoint_dir)
+        if checkpoint_result is not None:
+            latest_checkpoint, base_name = checkpoint_result
+            try:
+                checkpoint_state, adjusted_neuron_params, metadata = load_checkpoint(
+                    latest_checkpoint, base_name, neuron_params
+                )
+                
+                # Handle different checkpoint types
+                if checkpoint_state.checkpoint_type == "streaming":
+                    # For streaming: use completed_simulations, keep original neuron_params
+                    completed_sims = set(checkpoint_state.completed_simulations)
+                    start_sim = len(checkpoint_state.completed_simulations)
+                    # Don't replace neuron_params for streaming (adjusted_neuron_params is None)
+                else:
+                    # For batch: use completed_batches, use adjusted neuron_params
+                    completed_sims = set(range(checkpoint_state.completed_batches))
+                    start_sim = checkpoint_state.completed_batches
+                    neuron_params = adjusted_neuron_params
+                
+                print(f"📂 Resuming from checkpoint at simulation {start_sim}/{total_sims}")
+            except Exception as e:
+                print(f"⚠️  Could not load checkpoint {latest_checkpoint}: {e}")
+                print("Starting from beginning...")
+                completed_sims = set()
+                start_sim = 0
+    
+    # Comprehensive initial cleanup to ensure fresh start
+    print("🧹 Performing initial memory cleanup for fresh start...")
+    jax.clear_caches()
+    gc.collect()
+    
+    # Force backend cleanup if available
+    try:
+        if hasattr(jax, 'clear_backends'):
+            jax.clear_backends()
+        print("✅ JAX backends cleared")
+    except Exception as e:
+        print(f"⚠️  Warning: Could not clear JAX backends: {e}")
+    
+    # GPU memory cleanup and synchronization
+    try:
+        # Force GPU synchronization on all devices
+        devices = jax.devices()
+        for device in devices:
+            with jax.default_device(device):
+                # Force a small operation to synchronize
+                _ = jnp.array([1.0])
+        print(f"✅ Synchronized {len(devices)} GPU devices")
+    except Exception as e:
+        print(f"⚠️  Warning: GPU synchronization failed: {e}")
+    
+    # Calculate optimal max_concurrent if not provided, with conservative adjustments for large sims
     if max_concurrent is None:
         calculated_max_concurrent = calculate_optimal_concurrent_size(
             n_neurons=sim_params.n_neurons,
@@ -1336,14 +1568,52 @@ def run_streaming_pruning_simulation(
     else:
         print(f"Using provided max_concurrent for pruning: {max_concurrent}")
     
-    # Create async manager
-    manager = AsyncPruningManager(neuron_params, sim_params, sim_config)
+    # Create async manager with error handling
+    manager = None
+    all_results, all_states, all_mini_circuits, all_final_w_masks = None, None, None, None
     
-    async def run_streaming():
-        return await manager.run_streaming_simulations(total_sims, max_concurrent)
+    try:
+        manager = AsyncPruningManager(neuron_params, sim_params, sim_config)
+        
+        async def run_streaming():
+            return await manager.run_streaming_simulations(total_sims, max_concurrent, checkpoint_dir, enable_checkpointing)
+        
+        # Run the streaming async execution
+        all_results, all_states, all_mini_circuits, all_final_w_masks = asyncio.run(run_streaming())
+        
+    except Exception as e:
+        print(f"❌ Async simulation failed: {e}")
+        print("🔄 Cleaning up resources and raising exception...")
+        
+        # Comprehensive cleanup on failure
+        jax.clear_caches()
+        gc.collect()
+        
+        try:
+            if hasattr(jax, 'clear_backends'):
+                jax.clear_backends()
+        except:
+            pass
+            
+        # Clean up manager if it exists
+        if manager is not None:
+            try:
+                if hasattr(manager, 'memory_manager'):
+                    manager.memory_manager.perform_cleanup(context="failed_run_cleanup")
+            except:
+                pass
+        
+        # Re-raise the exception to be handled by the caller
+        raise e
     
-    # Run the streaming async execution
-    all_results, all_states, all_mini_circuits, all_final_w_masks = asyncio.run(run_streaming())
+    finally:
+        # Always perform cleanup regardless of success/failure
+        if manager is not None:
+            try:
+                if hasattr(manager, 'memory_manager'):
+                    manager.memory_manager.perform_cleanup(context="final_run_cleanup")
+            except:
+                pass
     
     # Convert results to arrays and reshape
     results_array = jnp.stack(all_results, axis=0)
@@ -1362,6 +1632,11 @@ def run_streaming_pruning_simulation(
     
     # Update the original neuron_params with all the final W_masks
     updated_neuron_params = neuron_params._replace(W_mask=final_w_masks_array)
+
+    # Final cleanup of intermediate arrays
+    del all_results, all_states, all_mini_circuits, all_final_w_masks
+    gc.collect()
+    print("✅ Streaming pruning simulation completed successfully")
 
     return results_reshaped, mini_circuits_array, updated_neuron_params
 
@@ -1391,7 +1666,7 @@ class AsyncRegularSimManager:
             simulation_type="regular"
         )
         
-        # Multi-GPU setup
+        # Multi-GPU setup with enhanced memory management
         self.n_devices = jax.device_count()
         self.devices = jax.devices()
         gpu_devices = [d for d in self.devices if 'gpu' in str(d).lower() or 'cuda' in str(d).lower()]
@@ -1399,11 +1674,13 @@ class AsyncRegularSimManager:
         
         print(f"Async Regular Sim Manager: {self.n_devices} total devices, {self.n_gpu_devices} GPU devices")
         
-        # Initialize CUDA contexts
+        # Initialize CUDA contexts with memory pre-allocation
         try:
             for i, device in enumerate(self.devices[:self.n_gpu_devices]):
-                test_tensor = jax.device_put(jnp.ones(10), device)
-                del test_tensor
+                with jax.default_device(device):
+                    # Small memory pre-allocation to avoid CUDA initialization issues
+                    test_tensor = jax.device_put(jnp.ones(100), device)
+                    del test_tensor
                 print(f"  Initialized CUDA context on device {i}: {device}")
         except Exception as e:
             print(f"Warning: Could not initialize all CUDA contexts: {e}")
@@ -1414,8 +1691,8 @@ class AsyncRegularSimManager:
         
         self.max_workers = max_workers or min(32, (self.n_devices * 2))
         
-        # Pre-replicate read-only data across devices
-        print("Pre-replicating read-only data across devices...")
+        # Pre-replicate read-only data across devices with memory efficiency
+        print("Pre-replicating read-only data across devices with memory efficiency...")
         self._setup_shared_data()
         
         # State management
@@ -1986,11 +2263,36 @@ class AsyncRegularSimManager:
         # Convert to ordered list
         results_list = [results_dict[i] for i in range(total_simulations)]
         
-        # Final memory cleanup
+        # Final comprehensive memory cleanup
         del results_dict, active_tasks, task_devices, device_load_counts
+        
+        # Comprehensive JAX cleanup
         jax.clear_caches()
-        import gc
-        gc.collect()
+        
+        # Force backend cleanup if available
+        try:
+            if hasattr(jax, 'clear_backends'):
+                jax.clear_backends()
+        except Exception as e:
+            async_logger.log_batch(f"Warning: Could not clear JAX backends: {e}")
+        
+        # GPU memory cleanup  
+        try:
+            # Force GPU synchronization and cleanup
+            for device_id in range(self.n_devices):
+                with jax.default_device(jax.devices()[device_id]):
+                    pass  # This forces device synchronization
+                    
+            # Additional memory cleanup
+            import gc
+            gc.collect()
+            
+            # Memory manager cleanup
+            if hasattr(self, 'memory_manager'):
+                self.memory_manager.perform_cleanup(context="final_regular_cleanup")
+                
+        except Exception as e:
+            async_logger.log_batch(f"Warning: GPU cleanup failed: {e}")
         
         return results_list
     
@@ -2092,6 +2394,31 @@ def run_streaming_regular_simulation(
     """
     total_sims = sim_params.n_stim_configs * sim_params.n_param_sets
     
+    # Comprehensive initial cleanup to ensure fresh start
+    print("🧹 Performing initial memory cleanup for fresh start...")
+    jax.clear_caches()
+    gc.collect()
+    
+    # Force backend cleanup if available
+    try:
+        if hasattr(jax, 'clear_backends'):
+            jax.clear_backends()
+        print("✅ JAX backends cleared")
+    except Exception as e:
+        print(f"⚠️  Warning: Could not clear JAX backends: {e}")
+    
+    # GPU memory cleanup and synchronization
+    try:
+        # Force GPU synchronization on all devices
+        devices = jax.devices()
+        for device in devices:
+            with jax.default_device(device):
+                # Force a small operation to synchronize
+                _ = jnp.array([1.0])
+        print(f"✅ Synchronized {len(devices)} GPU devices")
+    except Exception as e:
+        print(f"⚠️  Warning: GPU synchronization failed: {e}")
+    
     # Handle DN screen mode - run individual neuron screening
     if getattr(sim_config, 'dn_screen', False):
         print("Running in DN Screen mode - testing individual neurons")
@@ -2109,23 +2436,61 @@ def run_streaming_regular_simulation(
     else:
         print(f"Using provided max_concurrent: {max_concurrent}")
     
-    # Create async manager
-    manager = AsyncRegularSimManager(neuron_params, sim_params, sim_config)
+    # Create async manager with error handling
+    manager = None
+    results_list = None
     
-    # Apply stimulation adjustment if enabled
-    if getattr(sim_config, 'adjustStimI', False):
-        print("Stimulation adjustment is enabled - will adjust during streaming")
+    try:
+        manager = AsyncRegularSimManager(neuron_params, sim_params, sim_config)
+        
+        # Apply stimulation adjustment if enabled
+        if getattr(sim_config, 'adjustStimI', False):
+            print("Stimulation adjustment is enabled - will adjust during streaming")
+        
+        print(f"Simulation type: {getattr(sim_config, 'sim_type', 'baseline')}")
+        print(f"Starting streaming regular simulation with {total_sims} total simulations")
+        
+        async def run_simulations():
+            # Run the streaming simulations
+            results_list = await manager.run_streaming_regular_simulations(total_sims, max_concurrent)
+            return results_list
+        
+        # Run the async event loop
+        results_list = asyncio.run(run_simulations())
+        
+    except Exception as e:
+        print(f"❌ Async regular simulation failed: {e}")
+        print("🔄 Cleaning up resources and raising exception...")
+        
+        # Comprehensive cleanup on failure
+        jax.clear_caches()
+        gc.collect()
+        
+        try:
+            if hasattr(jax, 'clear_backends'):
+                jax.clear_backends()
+        except:
+            pass
+            
+        # Clean up manager if it exists
+        if manager is not None:
+            try:
+                if hasattr(manager, 'memory_manager'):
+                    manager.memory_manager.perform_cleanup(context="failed_regular_run_cleanup")
+            except:
+                pass
+        
+        # Re-raise the exception to be handled by the caller
+        raise e
     
-    print(f"Simulation type: {getattr(sim_config, 'sim_type', 'baseline')}")
-    print(f"Starting streaming regular simulation with {total_sims} total simulations")
-    
-    async def run_simulations():
-        # Run the streaming simulations
-        results_list = await manager.run_streaming_regular_simulations(total_sims, max_concurrent)
-        return results_list
-    
-    # Run the async event loop
-    results_list = asyncio.run(run_simulations())
+    finally:
+        # Always perform cleanup regardless of success/failure
+        if manager is not None:
+            try:
+                if hasattr(manager, 'memory_manager'):
+                    manager.memory_manager.perform_cleanup(context="final_regular_run_cleanup")
+            except:
+                pass
     
     # Convert results to the expected output format
     results_array = jnp.stack(results_list, axis=0)
@@ -2133,6 +2498,11 @@ def run_streaming_regular_simulation(
         sim_params.n_stim_configs, sim_params.n_param_sets,
         sim_params.n_neurons, len(sim_params.t_axis)
     )
+    
+    # Final cleanup of intermediate arrays
+    del results_list
+    gc.collect()
+    print("✅ Streaming regular simulation completed successfully")
     
     return results_reshaped
 
