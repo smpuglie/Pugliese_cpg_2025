@@ -26,15 +26,11 @@ from src.simulation.vnc_sim import (
 from src.utils.shuffle_utils import full_shuffle
 from src.data.data_classes import NeuronParams, SimParams, SimulationConfig, Pruning_state, CheckpointState
 from src.memory.adaptive_memory import (
-    monitor_memory_usage, get_conservative_batch_size, log_memory_status, get_gpu_count,
-    create_memory_manager, calculate_optimal_concurrent_size
+    monitor_memory_usage, create_memory_manager, calculate_optimal_concurrent_size
 )
 from src.memory.checkpointing import (
     CheckpointState, save_checkpoint, load_checkpoint,
     find_latest_checkpoint, cleanup_old_checkpoints
-)
-from src.memory.checkpointing import (
-    save_checkpoint, load_checkpoint, find_latest_checkpoint, cleanup_old_checkpoints
 )
 
 class AsyncLogger:
@@ -177,19 +173,36 @@ class AsyncPruningManager:
         sim_config: SimulationConfig,
         max_workers: int = None
     ):
-        # Pre-initialization memory check and cleanup
+        # ENHANCED Pre-initialization memory check and cleanup
+        print("🧹 Performing comprehensive memory cleanup before AsyncPruningManager initialization...")
+        
+        # Clear JAX caches and backends multiple times
+        for cleanup_round in range(3):
+            jax.clear_caches()
+            if hasattr(jax, 'clear_backends'):
+                try:
+                    jax.clear_backends()
+                except:
+                    pass
+            gc.collect()
+        
+        # Force GPU synchronization and small allocations to ensure cleanup
+        try:
+            devices = jax.devices()
+            for device in devices:
+                with jax.default_device(device):
+                    _ = jnp.array([1.0])  # Small allocation to test memory
+            print(f"✅ GPU memory test passed on {len(devices)} devices")
+        except Exception as e:
+            print(f"⚠️  GPU memory test failed: {e}")
+        
+        # Check memory status after cleanup
         try:
             memory_info = monitor_memory_usage(0)
-            if memory_info.get('gpu_usage_percent', 0) > 80:
-                print(f"⚠️  WARNING: High GPU memory usage ({memory_info.get('gpu_usage_percent', 0):.1f}%) during manager initialization")
-                # Perform emergency cleanup
-                jax.clear_caches()
-                gc.collect()
-                if hasattr(jax, 'clear_backends'):
-                    try:
-                        jax.clear_backends()
-                    except:
-                        pass
+            gpu_usage = memory_info.get('gpu_usage_percent', 0)
+            print(f"📊 Post-cleanup GPU memory usage: {gpu_usage:.1f}%")
+            if gpu_usage > 70:
+                print(f"⚠️  WARNING: Still high GPU memory usage after cleanup")
         except Exception as e:
             print(f"Warning: Could not check memory status during initialization: {e}")
         
@@ -987,16 +1000,19 @@ class AsyncPruningManager:
         
         return sim_index, final_results, fallback_pruning_state, mini_circuit, fallback_W_mask
     
-    async def run_streaming_simulations(self, total_simulations: int, max_concurrent: Optional[int] = None, checkpoint_dir: Optional[Path] = None, enable_checkpointing: bool = False) -> Tuple[List[jnp.ndarray], List[Pruning_state], List[jnp.ndarray], List[jnp.ndarray]]:
+    async def run_streaming_simulations(self, total_simulations: int, max_concurrent: int, 
+                                       checkpoint_dir: Optional[Path] = None, enable_checkpointing: bool = False,
+                                       pre_loaded_checkpoint_data: Optional[Dict[str, Any]] = None) -> Tuple[List[jnp.ndarray], List[Pruning_state], List[jnp.ndarray], List[jnp.ndarray]]:
         """Run all simulations with streaming execution - returns results, states, mini_circuits, AND final_W_masks"""
         """
         Run simulations with continuous streaming - start new simulations as soon as others finish.
         
         Args:
             total_simulations: Total number of simulations to run
-            max_concurrent: Maximum number of simulations to run concurrently (default: auto-calculated)
+            max_concurrent: Maximum number of simulations to run concurrently (calculated by caller)
             checkpoint_dir: Directory to save checkpoints (optional)
             enable_checkpointing: Whether to enable periodic checkpointing
+            pre_loaded_checkpoint_data: Pre-loaded checkpoint data to avoid duplicate loading (optional)
         
         Returns:
             Tuple of (results_list, states_list, mini_circuits_list, w_masks_list) in simulation index order
@@ -1008,17 +1024,9 @@ class AsyncPruningManager:
         else:
             print(f"🔍 CHECKPOINT DEBUG: Checkpointing is disabled")
             
-        if max_concurrent is None:
-            max_concurrent = calculate_optimal_concurrent_size(
-                n_neurons=self.sim_params.n_neurons,
-                n_timepoints=len(self.sim_params.t_axis),
-                total_simulations=total_simulations,
-                n_devices=self.n_devices,
-                is_pruning=True
-            )
-            async_logger.log_batch(f"Auto-calculated max_concurrent for pruning: {max_concurrent}")
-        else:
-            async_logger.log_batch(f"Using provided max_concurrent for pruning: {max_concurrent}")
+        # max_concurrent is always calculated by run_streaming_pruning_simulation, so it should never be None
+        assert max_concurrent is not None, "max_concurrent should be calculated by caller and never be None"
+        async_logger.log_batch(f"Using max_concurrent: {max_concurrent}")
         
         async_logger.log_batch(f"Starting streaming execution: {total_simulations} total simulations, max {max_concurrent} concurrent")
         
@@ -1031,34 +1039,19 @@ class AsyncPruningManager:
         
         # Checkpoint recovery
         completed_count = 0
-        if enable_checkpointing and checkpoint_dir:
-            checkpoint_result = find_latest_checkpoint(checkpoint_dir)
-            if checkpoint_result:
-                checkpoint_path, base_name = checkpoint_result
-                async_logger.log_batch(f"🔄 Found checkpoint: {checkpoint_path}/{base_name}")
-                
-                try:
-                    checkpoint_state, _, metadata = load_checkpoint(checkpoint_path, base_name)
-                    if checkpoint_state and checkpoint_state.checkpoint_type == "streaming":
-                        # Restore state from streaming checkpoint
-                        results_dict = checkpoint_state.results_dict or {}
-                        states_dict = checkpoint_state.states_dict or {}
-                        mini_circuits_dict = checkpoint_state.mini_circuits_dict or {}
-                        w_masks_dict = checkpoint_state.w_masks_dict or {}
-                        failed_sims = checkpoint_state.failed_sims or set()
-                        completed_count = checkpoint_state.progress_info.get('completed_count', 0) if checkpoint_state.progress_info else 0
-                        
-                        async_logger.log_batch(f"✅ Checkpoint loaded: {completed_count}/{total_simulations} simulations already completed")
-                        
-                        # Log recovery details
-                        if failed_sims:
-                            async_logger.log_batch(f"⚠️ Found {len(failed_sims)} failed simulations in checkpoint: {list(failed_sims)}")
-                    else:
-                        async_logger.log_batch("⚠️ Found non-streaming checkpoint, starting fresh...")
-                            
-                except Exception as checkpoint_error:
-                    async_logger.log_batch(f"❌ Failed to load checkpoint: {checkpoint_error}")
-                    async_logger.log_batch("Starting fresh simulation...")
+        # Use pre-loaded checkpoint data if provided (eliminates duplicate checkpoint loading)
+        if pre_loaded_checkpoint_data is not None:
+            results_dict = pre_loaded_checkpoint_data.get('results_dict', {})
+            states_dict = pre_loaded_checkpoint_data.get('states_dict', {})
+            mini_circuits_dict = pre_loaded_checkpoint_data.get('mini_circuits_dict', {})
+            w_masks_dict = pre_loaded_checkpoint_data.get('w_masks_dict', {})
+            failed_sims = pre_loaded_checkpoint_data.get('failed_sims', set())
+            completed_count = pre_loaded_checkpoint_data.get('completed_count', 0)
+            async_logger.log_batch(f"📂 Using pre-loaded checkpoint data: {completed_count}/{total_simulations} simulations already completed")
+        else:
+            # No checkpoint data provided, starting fresh
+            async_logger.log_batch("Starting fresh simulation (no checkpoint data provided)")
+            completed_count = 0
         
         # Create a queue of simulation indices to process (excluding completed ones)
         pending_sims = [i for i in range(total_simulations) if i not in results_dict]
@@ -1135,7 +1128,7 @@ class AsyncPruningManager:
                             f"Streaming Progress: {completed_count}/{total_simulations} completed, "
                             f"{active_count} active, {pending_count} pending | "
                             f"Rate: {rate:.2f} sims/sec, ETA: {eta/60:.1f} min | "
-                            f"RAM: {memory_percent:.1f}% used, {available_gb:.1f}GB free{gpu_memory_status}{memory_warning}"
+                            f"RAM: {memory_percent:.1f}% used, GPU: {available_gb:.1f}GB free{gpu_memory_status}{memory_warning}"
                         )
                     except:
                         # Fallback without memory monitoring
@@ -1517,6 +1510,7 @@ def run_streaming_pruning_simulation(
     checkpoint_state = None
     completed_sims = set()
     start_sim = 0
+    checkpoint_data_for_manager = None
     
     if enable_checkpointing and checkpoint_dir is not None:
         checkpoint_dir = Path(checkpoint_dir)
@@ -1526,22 +1520,50 @@ def run_streaming_pruning_simulation(
         checkpoint_result = find_latest_checkpoint(checkpoint_dir)
         if checkpoint_result is not None:
             latest_checkpoint, base_name = checkpoint_result
+            print(f"🔍 Found checkpoint: {latest_checkpoint}")
+            
+            # Perform memory cleanup before attempting to load checkpoint
+            print("🧹 Pre-loading memory cleanup...")
+            jax.clear_caches()
+            for _ in range(3):
+                gc.collect()
+            
             try:
                 checkpoint_state, adjusted_neuron_params, metadata = load_checkpoint(
                     latest_checkpoint, base_name, neuron_params
                 )
                 
-                # Handle different checkpoint types
+                # Handle different checkpoint types and prepare data for manager
                 if checkpoint_state.checkpoint_type == "streaming":
                     # For streaming: use completed_simulations, keep original neuron_params
                     completed_sims = set(checkpoint_state.completed_simulations)
                     start_sim = len(checkpoint_state.completed_simulations)
+                    
+                    # Prepare checkpoint data for manager (avoids duplicate loading)
+                    checkpoint_data_for_manager = {
+                        'results_dict': checkpoint_state.results_dict or {},
+                        'states_dict': checkpoint_state.states_dict or {},
+                        'mini_circuits_dict': checkpoint_state.mini_circuits_dict or {},
+                        'w_masks_dict': checkpoint_state.w_masks_dict or {},
+                        'failed_sims': checkpoint_state.failed_sims or set(),
+                        'completed_count': len(checkpoint_state.completed_simulations)
+                    }
                     # Don't replace neuron_params for streaming (adjusted_neuron_params is None)
                 else:
                     # For batch: use completed_batches, use adjusted neuron_params
                     completed_sims = set(range(checkpoint_state.completed_batches))
                     start_sim = checkpoint_state.completed_batches
                     neuron_params = adjusted_neuron_params
+                    
+                    # For batch checkpoints, create basic checkpoint data
+                    checkpoint_data_for_manager = {
+                        'results_dict': {},
+                        'states_dict': {},
+                        'mini_circuits_dict': {},
+                        'w_masks_dict': {},
+                        'failed_sims': set(),
+                        'completed_count': checkpoint_state.completed_batches
+                    }
                 
                 print(f"📂 Resuming from checkpoint at simulation {start_sim}/{total_sims}")
             except Exception as e:
@@ -1549,6 +1571,7 @@ def run_streaming_pruning_simulation(
                 print("Starting from beginning...")
                 completed_sims = set()
                 start_sim = 0
+                checkpoint_data_for_manager = None
     
     # Comprehensive initial cleanup to ensure fresh start
     print("🧹 Performing initial memory cleanup for fresh start...")
@@ -1577,21 +1600,16 @@ def run_streaming_pruning_simulation(
     
     # Calculate optimal max_concurrent if not provided, with conservative adjustments for large sims
     if max_concurrent is None:
-        calculated_max_concurrent = calculate_optimal_concurrent_size(
+        max_concurrent = calculate_optimal_concurrent_size(
             n_neurons=sim_params.n_neurons,
             n_timepoints=len(sim_params.t_axis),
             total_simulations=total_sims,
             is_pruning=True
         )
-        # Apply conservative adjustment for very large simulations
-        # Get GPU count for conservative calculations  
-        n_gpus = get_gpu_count()
-        
-        max_concurrent = get_conservative_batch_size(total_sims, None, calculated_max_concurrent, n_gpus)
-        if max_concurrent != calculated_max_concurrent:
-            print(f"Applied conservative adjustment: {calculated_max_concurrent} -> {max_concurrent}")
+
     else:
         print(f"Using provided max_concurrent for pruning: {max_concurrent}")
+        
     
     # Create async manager with error handling
     manager = None
@@ -1601,8 +1619,8 @@ def run_streaming_pruning_simulation(
         manager = AsyncPruningManager(neuron_params, sim_params, sim_config)
         
         async def run_streaming():
-            return await manager.run_streaming_simulations(total_sims, max_concurrent, checkpoint_dir, enable_checkpointing)
-        
+            return await manager.run_streaming_simulations(total_sims, max_concurrent, checkpoint_dir, enable_checkpointing, checkpoint_data_for_manager)
+
         # Run the streaming async execution
         all_results, all_states, all_mini_circuits, all_final_w_masks = asyncio.run(run_streaming())
         
@@ -2122,8 +2140,19 @@ class AsyncRegularSimManager:
         print(f"    Warning: Maximum adjustment iterations reached")
         return False
 
-    async def run_streaming_regular_simulations(self, total_simulations: int, max_concurrent: Optional[int] = None, checkpoint_dir: Optional[Path] = None, enable_checkpointing: bool = False) -> List[jnp.ndarray]:
-        """Run regular simulations with continuous streaming and optional stimulation adjustment."""
+    async def run_streaming_regular_simulations(self, total_simulations: int, max_concurrent: int, checkpoint_dir: Optional[Path] = None, enable_checkpointing: bool = False, pre_loaded_checkpoint_data: Optional[Tuple] = None) -> List[jnp.ndarray]:
+        """Run regular simulations with continuous streaming and optional stimulation adjustment.
+        
+        Args:
+            total_simulations: Total number of simulations to run
+            max_concurrent: Maximum concurrent simulations (calculated by caller)
+            checkpoint_dir: Directory for checkpointing (optional)
+            enable_checkpointing: Whether to enable checkpointing
+            pre_loaded_checkpoint_data: Pre-loaded checkpoint data tuple (checkpoint_state, adjusted_neuron_params, metadata) to avoid duplicate loading
+        
+        Returns:
+            List of simulation results
+        """
         # DEBUG: Print checkpoint parameters
         print(f"🔍 REGULAR CHECKPOINT DEBUG: enable_checkpointing={enable_checkpointing}, checkpoint_dir={checkpoint_dir}")
         if enable_checkpointing:
@@ -2131,17 +2160,9 @@ class AsyncRegularSimManager:
         else:
             print(f"🔍 REGULAR CHECKPOINT DEBUG: Checkpointing is disabled")
             
-        if max_concurrent is None:
-            max_concurrent = calculate_optimal_concurrent_size(
-                n_neurons=self.sim_params.n_neurons,
-                n_timepoints=len(self.sim_params.t_axis),
-                total_simulations=total_simulations,
-                n_devices=self.n_devices,
-                is_pruning=False
-            )
-            async_logger.log_batch(f"Auto-calculated max_concurrent: {max_concurrent}")
-        else:
-            async_logger.log_batch(f"Using provided max_concurrent: {max_concurrent}")
+        # max_concurrent is always calculated by run_streaming_regular_simulation, so it should never be None
+        assert max_concurrent is not None, "max_concurrent should be calculated by caller and never be None"
+        async_logger.log_batch(f"Using max_concurrent: {max_concurrent}")
         
         async_logger.log_batch(f"Starting streaming regular simulations: {total_simulations} total, max {max_concurrent} concurrent")
         
@@ -2150,58 +2171,67 @@ class AsyncRegularSimManager:
         
         if adjust_stimulation:
             async_logger.log_batch("Stimulation adjustment enabled - using batch processing")
-            return await self._run_with_stimulation_adjustment(total_simulations, max_concurrent, checkpoint_dir, enable_checkpointing)
+            return await self._run_with_stimulation_adjustment(total_simulations, max_concurrent, checkpoint_dir, enable_checkpointing, pre_loaded_checkpoint_data)
         else:
             async_logger.log_batch("Standard streaming mode")
-            return await self._run_standard_streaming(total_simulations, max_concurrent, checkpoint_dir, enable_checkpointing)
+            return await self._run_standard_streaming(total_simulations, max_concurrent, checkpoint_dir, enable_checkpointing, pre_loaded_checkpoint_data)
     
-    async def _run_standard_streaming(self, total_simulations: int, max_concurrent: int, checkpoint_dir: Optional[Path] = None, enable_checkpointing: bool = False) -> List[jnp.ndarray]:
-        """Run simulations with standard streaming (no stimulation adjustment)."""
+    async def _run_standard_streaming(self, total_simulations: int, max_concurrent: int, checkpoint_dir: Optional[Path] = None, enable_checkpointing: bool = False, pre_loaded_checkpoint_data: Optional[Tuple] = None) -> List[jnp.ndarray]:
+        """Run simulations with standard streaming (no stimulation adjustment).
+        
+        Args:
+            total_simulations: Total number of simulations to run
+            max_concurrent: Maximum concurrent simulations
+            checkpoint_dir: Directory for checkpointing (optional)
+            enable_checkpointing: Whether to enable checkpointing
+            pre_loaded_checkpoint_data: Pre-loaded checkpoint data tuple (checkpoint_state, adjusted_neuron_params, metadata) to avoid duplicate loading
+        
+        Returns:
+            List of simulation results
+        """
         # Initialize result storage
         results_dict = {}
         failed_sims = set()
         
-        # Checkpoint recovery
+        # Checkpoint recovery using pre-loaded data (avoids duplicate loading)
         completed_count = 0
-        if enable_checkpointing and checkpoint_dir:
-            checkpoint_result = find_latest_checkpoint(checkpoint_dir, pattern="regular_checkpoint_*")
-            if checkpoint_result:
-                try:
-                    latest_checkpoint, base_name = checkpoint_result
-                    checkpoint_state, adjusted_neuron_params, metadata = load_checkpoint(latest_checkpoint, base_name, self.adjusted_neuron_params)
+        if enable_checkpointing and checkpoint_dir and pre_loaded_checkpoint_data:
+            checkpoint_state, adjusted_neuron_params, metadata = pre_loaded_checkpoint_data
+            async_logger.log_batch(f"🔍 Using pre-loaded checkpoint data")
+            
+            try:
+                # Handle different checkpoint types
+                if checkpoint_state.checkpoint_type == "streaming":
+                    # For streaming: use completed_simulations, keep original neuron_params
+                    completed_sims = set(checkpoint_state.completed_simulations)
+                    completed_count = len(checkpoint_state.completed_simulations)
+                    # Load results from checkpoint
+                    for sim_idx in checkpoint_state.completed_simulations:
+                        if hasattr(checkpoint_state, 'results_dict') and checkpoint_state.results_dict:
+                            results_dict[sim_idx] = checkpoint_state.results_dict[sim_idx]
+                        else:
+                            # Create placeholder result for completed simulations without stored results
+                            placeholder_result = jnp.zeros((self.sim_params.n_neurons, len(self.sim_params.t_axis)))
+                            placeholder_result = jax.device_put(placeholder_result, jax.devices("cpu")[0])
+                            results_dict[sim_idx] = placeholder_result
                     
-                    # Handle different checkpoint types
-                    if checkpoint_state.checkpoint_type == "streaming":
-                        # For streaming: use completed_simulations, keep original neuron_params
-                        completed_sims = set(checkpoint_state.completed_simulations)
-                        completed_count = len(checkpoint_state.completed_simulations)
-                        # Load results from checkpoint
-                        for sim_idx in checkpoint_state.completed_simulations:
-                            if hasattr(checkpoint_state, 'results_dict') and checkpoint_state.results_dict:
-                                results_dict[sim_idx] = checkpoint_state.results_dict[sim_idx]
-                            else:
-                                # Create placeholder result for completed simulations without stored results
-                                placeholder_result = jnp.zeros((self.sim_params.n_neurons, len(self.sim_params.t_axis)))
-                                placeholder_result = jax.device_put(placeholder_result, jax.devices("cpu")[0])
-                                results_dict[sim_idx] = placeholder_result
+                    # Don't replace neuron_params for streaming (adjusted_neuron_params might be None)
+                    if adjusted_neuron_params is not None:
+                        self.adjusted_neuron_params = adjusted_neuron_params
                         
-                        # Don't replace neuron_params for streaming (adjusted_neuron_params might be None)
-                        if adjusted_neuron_params is not None:
-                            self.adjusted_neuron_params = adjusted_neuron_params
-                            
-                        async_logger.log_batch(f"📂 Resuming from streaming checkpoint: {completed_count}/{total_simulations} completed")
-                    else:
-                        # For batch: use completed_batches, use adjusted neuron_params
-                        completed_count = checkpoint_state.completed_batches
-                        if adjusted_neuron_params is not None:
-                            self.adjusted_neuron_params = adjusted_neuron_params
-                        async_logger.log_batch(f"📂 Resuming from batch checkpoint: {completed_count} batches completed")
-                        
-                except Exception as e:
-                    async_logger.log_batch(f"⚠️ Could not load checkpoint {latest_checkpoint}: {e}")
-                    async_logger.log_batch("Starting from beginning...")
-                    completed_count = 0
-                    results_dict = {}
+                    async_logger.log_batch(f"📂 Resuming from streaming checkpoint: {completed_count}/{total_simulations} completed")
+                else:
+                    # For batch: use completed_batches, use adjusted neuron_params
+                    completed_count = checkpoint_state.completed_batches
+                    if adjusted_neuron_params is not None:
+                        self.adjusted_neuron_params = adjusted_neuron_params
+                    async_logger.log_batch(f"📂 Resuming from batch checkpoint: {completed_count} batches completed")
+                    
+            except Exception as e:
+                async_logger.log_batch(f"⚠️ Could not process pre-loaded checkpoint data: {e}")
+                async_logger.log_batch("Starting from beginning...")
+                completed_count = 0
+                results_dict = {}
         
         # Create a queue of simulation indices to process (excluding completed ones)
         pending_sims = [i for i in range(total_simulations) if i not in results_dict]
@@ -2462,58 +2492,67 @@ class AsyncRegularSimManager:
         
         return results_list
     
-    async def _run_with_stimulation_adjustment(self, total_simulations: int, max_concurrent: int, checkpoint_dir: Optional[Path] = None, enable_checkpointing: bool = False) -> List[jnp.ndarray]:
+    async def _run_with_stimulation_adjustment(self, total_simulations: int, max_concurrent: int, checkpoint_dir: Optional[Path] = None, enable_checkpointing: bool = False, pre_loaded_checkpoint_data: Optional[Tuple] = None) -> List[jnp.ndarray]:
+        """Run simulations with stimulation adjustment (batch processing).
+        
+        Args:
+            total_simulations: Total number of simulations to run
+            max_concurrent: Maximum concurrent simulations
+            checkpoint_dir: Directory for checkpointing (optional)
+            enable_checkpointing: Whether to enable checkpointing
+            pre_loaded_checkpoint_data: Pre-loaded checkpoint data tuple (checkpoint_state, adjusted_neuron_params, metadata) to avoid duplicate loading
+        
+        Returns:
+            List of simulation results
+        """
         """Run simulations with stimulation adjustment using streaming processing."""
         # Initialize result storage
         results_dict = {}
         failed_sims = set()
         adjustment_iterations = {}  # Track iterations per simulation
         
-        # Checkpoint recovery for streaming stimulus adjustment
+        # Checkpoint recovery for streaming stimulus adjustment using pre-loaded data (avoids duplicate loading)
         completed_count = 0
-        if enable_checkpointing and checkpoint_dir:
-            from src.memory.checkpointing import find_latest_checkpoint, load_checkpoint
-            checkpoint_result = find_latest_checkpoint(checkpoint_dir, pattern="regular_checkpoint_*")
-            if checkpoint_result:
-                try:
-                    latest_checkpoint, base_name = checkpoint_result
-                    checkpoint_state, adjusted_neuron_params, metadata = load_checkpoint(latest_checkpoint, base_name, self.adjusted_neuron_params)
+        if enable_checkpointing and checkpoint_dir and pre_loaded_checkpoint_data:
+            checkpoint_state, adjusted_neuron_params, metadata = pre_loaded_checkpoint_data
+            async_logger.log_batch(f"🔍 Using pre-loaded checkpoint data for stimulation adjustment")
+            
+            try:
+                # Handle different checkpoint types
+                if checkpoint_state.checkpoint_type == "streaming":
+                    # For streaming: use completed_simulations, keep original neuron_params
+                    completed_sims = set(checkpoint_state.completed_simulations)
+                    completed_count = len(checkpoint_state.completed_simulations)
+                    # Load results from checkpoint
+                    for sim_idx in checkpoint_state.completed_simulations:
+                        if hasattr(checkpoint_state, 'results_dict') and checkpoint_state.results_dict:
+                            results_dict[sim_idx] = checkpoint_state.results_dict[sim_idx]
+                            adjustment_iterations[sim_idx] = 0  # Mark as completed
+                        else:
+                            # Create placeholder result for completed simulations
+                            placeholder_result = jnp.zeros((self.sim_params.n_neurons, len(self.sim_params.t_axis)))
+                            placeholder_result = jax.device_put(placeholder_result, jax.devices("cpu")[0])
+                            results_dict[sim_idx] = placeholder_result
+                            adjustment_iterations[sim_idx] = 0  # Mark as completed
                     
-                    # Handle different checkpoint types
-                    if checkpoint_state.checkpoint_type == "streaming":
-                        # For streaming: use completed_simulations, keep original neuron_params
-                        completed_sims = set(checkpoint_state.completed_simulations)
-                        completed_count = len(checkpoint_state.completed_simulations)
-                        # Load results from checkpoint
-                        for sim_idx in checkpoint_state.completed_simulations:
-                            if hasattr(checkpoint_state, 'results_dict') and checkpoint_state.results_dict:
-                                results_dict[sim_idx] = checkpoint_state.results_dict[sim_idx]
-                                adjustment_iterations[sim_idx] = 0  # Mark as completed
-                            else:
-                                # Create placeholder result for completed simulations
-                                placeholder_result = jnp.zeros((self.sim_params.n_neurons, len(self.sim_params.t_axis)))
-                                placeholder_result = jax.device_put(placeholder_result, jax.devices("cpu")[0])
-                                results_dict[sim_idx] = placeholder_result
-                                adjustment_iterations[sim_idx] = 0  # Mark as completed
+                    # Don't replace neuron_params for streaming (adjusted_neuron_params might be None)
+                    if adjusted_neuron_params is not None:
+                        self.adjusted_neuron_params = adjusted_neuron_params
                         
-                        # Don't replace neuron_params for streaming (adjusted_neuron_params might be None)
-                        if adjusted_neuron_params is not None:
-                            self.adjusted_neuron_params = adjusted_neuron_params
-                            
-                        async_logger.log_batch(f"📂 Resuming from streaming stimulus adjustment checkpoint: {completed_count}/{total_simulations} completed")
-                    else:
-                        # Legacy batch checkpoint support
-                        completed_count = checkpoint_state.completed_batches
-                        if adjusted_neuron_params is not None:
-                            self.adjusted_neuron_params = adjusted_neuron_params
-                        async_logger.log_batch(f"📂 Resuming from batch stimulus adjustment checkpoint: {completed_count} batches completed")
-                        
-                except Exception as e:
-                    async_logger.log_batch(f"⚠️ Could not load checkpoint {latest_checkpoint}: {e}")
-                    async_logger.log_batch("Starting from beginning...")
-                    completed_count = 0
-                    results_dict = {}
-                    adjustment_iterations = {}
+                    async_logger.log_batch(f"📂 Resuming from streaming stimulus adjustment checkpoint: {completed_count}/{total_simulations} completed")
+                else:
+                    # Legacy batch checkpoint support
+                    completed_count = checkpoint_state.completed_batches
+                    if adjusted_neuron_params is not None:
+                        self.adjusted_neuron_params = adjusted_neuron_params
+                    async_logger.log_batch(f"📂 Resuming from batch stimulus adjustment checkpoint: {completed_count} batches completed")
+                    
+            except Exception as e:
+                async_logger.log_batch(f"⚠️ Could not process pre-loaded checkpoint data: {e}")
+                async_logger.log_batch("Starting from beginning...")
+                completed_count = 0
+                results_dict = {}
+                adjustment_iterations = {}
         
         # Create a queue of simulation indices to process (excluding completed ones)
         pending_sims = [i for i in range(total_simulations) if i not in results_dict]
@@ -2999,9 +3038,34 @@ def run_streaming_regular_simulation(
         print(f"Simulation type: {getattr(sim_config, 'sim_type', 'baseline')}")
         print(f"Starting streaming regular simulation with {total_sims} total simulations")
         
+        # Load checkpoint data once if checkpointing is enabled (avoiding duplicate loading)
+        checkpoint_data_for_manager = None
+        if enable_checkpointing and checkpoint_dir:
+            from src.memory.checkpointing import find_latest_checkpoint, load_checkpoint
+            checkpoint_result = find_latest_checkpoint(checkpoint_dir, pattern="regular_checkpoint_*")
+            if checkpoint_result:
+                latest_checkpoint, base_name = checkpoint_result
+                print(f"🔍 Found checkpoint: {latest_checkpoint}")
+                
+                # Perform memory cleanup before attempting to load checkpoint
+                print("🧹 Pre-loading memory cleanup...")
+                jax.clear_caches()
+                import gc
+                for _ in range(3):
+                    gc.collect()
+                    
+                try:
+                    checkpoint_state, adjusted_neuron_params, metadata = load_checkpoint(latest_checkpoint, base_name, manager.adjusted_neuron_params)
+                    checkpoint_data_for_manager = (checkpoint_state, adjusted_neuron_params, metadata)
+                    print(f"📂 Successfully loaded checkpoint for reuse by manager")
+                except Exception as e:
+                    print(f"⚠️ Could not load checkpoint {latest_checkpoint}: {e}")
+                    print("Starting from beginning...")
+                    checkpoint_data_for_manager = None
+        
         async def run_simulations():
-            # Run the streaming simulations
-            results_list = await manager.run_streaming_regular_simulations(total_sims, max_concurrent, checkpoint_dir, enable_checkpointing)
+            # Run the streaming simulations with pre-loaded checkpoint data
+            results_list = await manager.run_streaming_regular_simulations(total_sims, max_concurrent, checkpoint_dir, enable_checkpointing, checkpoint_data_for_manager)
             return results_list
         
         # Run the async event loop
@@ -3138,7 +3202,7 @@ def run_dn_screen_simulations(
     print(f"Starting DN screen with {total_sims} total simulations ({n_dns} DNs × {sim_params.n_param_sets} param sets)")
     
     async def run_screen_simulations():
-        results_list = await manager.run_streaming_regular_simulations(total_sims, max_concurrent)
+        results_list = await manager.run_streaming_regular_simulations(total_sims, max_concurrent, None, False, None)
         return results_list
     
     # Run the async event loop

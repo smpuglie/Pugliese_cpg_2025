@@ -6,6 +6,7 @@ for long-running neural network simulations, including:
 - Automatic checkpoint creation at configurable intervals
 - Resume functionality with complete state preservation
 - Memory-efficient storage using HDF5, YAML, and sparse formats
+- CPU-first loading strategy for compressed HDF5 reliability
 - Integration with OmegaConf configuration management
 """
 
@@ -14,6 +15,7 @@ import gc
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple, NamedTuple
 import yaml
+import jax
 import jax.numpy as jnp
 import sparse
 from omegaconf import OmegaConf
@@ -220,7 +222,9 @@ def load_checkpoint(checkpoint_path: Path, base_name: str, full_neuron_params: O
     """
     Load simulation checkpoint from disk using HDF5, YAML, and sparse NPZ files.
     
-    Unified function that handles both batch and streaming checkpoint modes.
+    Uses CPU-first loading strategy for maximum reliability with compressed HDF5 files.
+    Since HDF5 compression makes uncompressed size unpredictable, always starts with
+    CPU loading to avoid GPU memory allocation failures.
     
     Args:
         checkpoint_path: Path to the checkpoint file
@@ -232,6 +236,22 @@ def load_checkpoint(checkpoint_path: Path, base_name: str, full_neuron_params: O
     Returns:
         Tuple of (CheckpointState, neuron_params, metadata)
     """
+    # Check memory status before loading checkpoint
+    try:
+        from src.memory.adaptive_memory import monitor_memory_usage
+        memory_info = monitor_memory_usage()
+        gpu_usage = memory_info.get('gpu_usage_percent', 0)
+        if gpu_usage > 80:
+            print(f"⚠️  High GPU memory usage ({gpu_usage:.1f}%) detected before checkpoint loading")
+            print("🧹 Performing preventive memory cleanup...")
+            import jax
+            jax.clear_caches()
+            import gc
+            for _ in range(3):
+                gc.collect()
+    except Exception as e:
+        print(f"Warning: Could not check memory status: {e}")
+    
     # Handle both old and new checkpoint locations
     # First try the new location (inside results directory)
     checkpoint_h5_path = checkpoint_path / f"{base_name}.h5"
@@ -247,8 +267,49 @@ def load_checkpoint(checkpoint_path: Path, base_name: str, full_neuron_params: O
         with open(metadata_yaml_path, 'r') as f:
             metadata = yaml.safe_load(f)
 
-    # Load checkpoint data from HDF5 (with JAX conversion since all data is now JAX-compatible)
-    checkpoint_dict = ioh5.load(checkpoint_h5_path, enable_jax=True)
+    # Load checkpoint data from HDF5 with CPU-first strategy for reliability
+    # Always use CPU-first for compressed HDF5 files since size prediction is unreliable
+    checkpoint_size = checkpoint_h5_path.stat().st_size
+    size_mb = checkpoint_size / (1024 * 1024)
+    
+    print(f"📥 Loading {size_mb:.1f}MB checkpoint using CPU-first strategy for maximum reliability...")
+    print("� CPU-first approach: Safe for compressed HDF5 files where uncompressed size is unpredictable")
+    
+    try:
+        # Always load on CPU first for compressed checkpoints
+        checkpoint_dict = ioh5.load(checkpoint_h5_path, enable_jax=False)
+        
+        # Convert to JAX arrays selectively and efficiently
+        print("🔄 Converting essential data to JAX arrays with selective GPU placement...")
+        import jax  # Ensure jax is available in this scope
+        for key, value in checkpoint_dict.items():
+            if key in ['batch_index', 'completed_batches', 'total_batches', 'n_result_batches']:
+                # Keep metadata as regular Python types
+                continue
+            elif isinstance(value, dict):
+                # Handle nested dictionaries (like results, states, etc.)
+                for subkey, subvalue in value.items():
+                    if subvalue is not None and hasattr(subvalue, '__array__'):
+                        try:
+                            # Use device_put for explicit placement control
+                            checkpoint_dict[key][subkey] = jax.device_put(jnp.asarray(subvalue), jax.devices("cpu")[0])
+                        except Exception as convert_e:
+                            print(f"⚠️  Warning: Could not convert {key}.{subkey} to JAX: {convert_e}")
+                            # Keep as numpy array
+                            pass
+            elif value is not None and hasattr(value, '__array__'):
+                try:
+                    # Place on CPU initially for large arrays
+                    checkpoint_dict[key] = jax.device_put(jnp.asarray(value), jax.devices("cpu")[0])
+                except Exception as convert_e:
+                    print(f"⚠️  Warning: Could not convert {key} to JAX: {convert_e}")
+                    # Keep as numpy array
+                    pass
+        print("✅ Checkpoint loaded successfully using reliable CPU-first strategy")
+        
+    except Exception as cpu_e:
+        print(f"❌ CPU-first loading failed: {cpu_e}")
+        raise cpu_e
     
     # Determine checkpoint type from metadata
     checkpoint_type = metadata.get("checkpoint_type", "batch")

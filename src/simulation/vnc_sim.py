@@ -1272,6 +1272,15 @@ def _run_stim_neurons(
     if sim_config.enable_checkpointing and (checkpoint_dir is not None):
         latest_checkpoint, base_name = find_latest_checkpoint(checkpoint_dir)
         if latest_checkpoint:
+            print(f"🔍 Found checkpoint: {latest_checkpoint}")
+            
+            # Perform memory cleanup before attempting to load checkpoint
+            print("🧹 Pre-loading memory cleanup...")
+            jax.clear_caches()
+            import gc
+            for _ in range(3):
+                gc.collect()
+                
             try:
                 checkpoint_state, adjusted_neuron_params, metadata = load_checkpoint(latest_checkpoint, base_name, neuron_params)
                 start_batch = checkpoint_state.batch_index + 1

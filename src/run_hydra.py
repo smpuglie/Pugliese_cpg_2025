@@ -251,8 +251,6 @@ def main(cfg: DictConfig):
                     from src.simulation.vnc_sim import prepare_vnc_simulation_params
                 except ImportError as e:
                     print(f"Warning: Could not import async modules: {e}")
-                    print("Falling back to synchronous execution")
-                    results, final_mini_circuits, neuron_params = run_vnc_simulation(cfg)
                 else:
                     # Use the same data preparation as sync version
                     print("Loading network configuration...")
