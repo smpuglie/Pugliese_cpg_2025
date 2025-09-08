@@ -1871,7 +1871,6 @@ def prepare_vnc_simulation_params(cfg: DictConfig):
     Returns:
         Tuple of (W_table, neuron_params, sim_params, sim_config, n_stim_configs)
     """
-    print("Loading network configuration...")
     W_table = load_wTable(cfg.experiment.dfPath)
     
     # Handle DN screening if specified

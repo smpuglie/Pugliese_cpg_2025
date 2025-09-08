@@ -15,6 +15,43 @@ import time
 import os
 import psutil
 from typing import Optional, Dict, Any
+from src.data.data_classes import Pruning_state
+
+
+def move_pruning_state_to_cpu(pruning_state: Pruning_state) -> Pruning_state:
+    """Move all arrays in a Pruning_state to CPU device.
+    
+    This is a memory management utility that ensures all JAX arrays within
+    a Pruning_state NamedTuple are placed on CPU devices for consistent
+    memory management and checkpointing.
+    
+    Args:
+        pruning_state: The Pruning_state object with arrays potentially on GPU
+        
+    Returns:
+        A new Pruning_state object with all arrays moved to CPU
+    """
+    cpu_device = jax.devices("cpu")[0]
+    return Pruning_state(
+        W_mask=jax.device_put(pruning_state.W_mask, cpu_device),
+        interneuron_mask=jax.device_put(pruning_state.interneuron_mask, cpu_device),
+        level=jax.device_put(pruning_state.level, cpu_device),
+        total_removed_neurons=jax.device_put(pruning_state.total_removed_neurons, cpu_device),
+        removed_stim_neurons=jax.device_put(pruning_state.removed_stim_neurons, cpu_device),
+        neurons_put_back=jax.device_put(pruning_state.neurons_put_back, cpu_device),
+        prev_put_back=jax.device_put(pruning_state.prev_put_back, cpu_device),
+        last_removed=jax.device_put(pruning_state.last_removed, cpu_device),
+        remove_p=jax.device_put(pruning_state.remove_p, cpu_device),
+        min_circuit=jax.device_put(pruning_state.min_circuit, cpu_device),
+        keys=jax.device_put(pruning_state.keys, cpu_device),
+        last_good_oscillating_removed=jax.device_put(pruning_state.last_good_oscillating_removed, cpu_device),
+        last_good_oscillating_put_back=jax.device_put(pruning_state.last_good_oscillating_put_back, cpu_device),
+        last_good_oscillation_score=jax.device_put(pruning_state.last_good_oscillation_score, cpu_device),
+        last_good_W_mask=jax.device_put(pruning_state.last_good_W_mask, cpu_device),
+        last_good_key=jax.device_put(pruning_state.last_good_key, cpu_device),
+        last_good_stim_idx=jax.device_put(pruning_state.last_good_stim_idx, cpu_device),
+        last_good_param_idx=jax.device_put(pruning_state.last_good_param_idx, cpu_device)
+    )
 
 
 def get_gpu_count() -> int:
@@ -137,10 +174,16 @@ def log_memory_status(status: dict, logger_func=print, prefix: str = ""):
     logger_func(f"{prefix}{ram_status}{gpu_status}{warning}")
     
 
-def basic_memory_cleanup():
+def basic_memory_cleanup(logger_func=print):
     """Basic memory cleanup - just the essentials."""
     gc.collect()
     jax.clear_caches()
+    # Force backend cleanup if available
+    try:
+        if hasattr(jax, 'clear_backends'):
+            jax.clear_backends()
+    except Exception as e:
+        logger_func.log_batch(f"Warning: Could not clear JAX backends: {e}")
     time.sleep(0.05)  # Brief pause for memory to actually free
 
 
@@ -232,13 +275,13 @@ class AdaptiveMemoryManager:
                 return iteration % 50 == 0
         else:
             return iteration % 100 == 0
-    
-    def perform_cleanup(self, force_aggressive: bool = False, context: str = ""):
+
+    def perform_cleanup(self, logger_func=print, context: str = ""):
         """Perform memory cleanup."""
-        basic_memory_cleanup()
+        basic_memory_cleanup(logger_func=logger_func)
         if context and self.is_large_simulation:  # Only log for large sims to reduce noise
-            print(f"  Memory cleanup: {context}")
-    
+            logger_func(f"  Memory cleanup: {context}")
+
     def monitor_and_cleanup_if_needed(self, sim_index: int, warn_threshold: float = 85.0) -> bool:
         """Monitor memory and cleanup if needed."""
         # Only check every 10 simulations to reduce overhead

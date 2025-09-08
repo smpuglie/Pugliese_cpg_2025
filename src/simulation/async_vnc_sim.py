@@ -26,7 +26,8 @@ from src.simulation.vnc_sim import (
 from src.utils.shuffle_utils import full_shuffle
 from src.data.data_classes import NeuronParams, SimParams, SimulationConfig, Pruning_state, CheckpointState
 from src.memory.adaptive_memory import (
-    monitor_memory_usage, create_memory_manager, calculate_optimal_concurrent_size, log_memory_status
+    monitor_memory_usage, create_memory_manager, calculate_optimal_concurrent_size, log_memory_status,
+    move_pruning_state_to_cpu
 )
 from src.memory.checkpointing import (
     CheckpointState, save_checkpoint, load_checkpoint,
@@ -237,15 +238,26 @@ class AsyncPruningManager:
         # Add memory pre-allocation to avoid CUDA initialization issues
         try:
             for i, device in enumerate(self.devices[:self.n_gpu_devices]):
+                print(f"  🔧 Initializing device {i}: {device}")
+                
+                # Clear cache before each device to prevent conflicts
+                jax.clear_caches()
+                
                 # Pre-allocate small tensor on each GPU to initialize CUDA context
                 test_tensor = jax.device_put(jnp.ones(10), device)
                 del test_tensor
-                print(f"  Initialized CUDA context on device {i}: {device}")
+                
+                # Immediate cleanup after each device initialization
+                jax.clear_caches()
+                gc.collect()
+                
+                print(f"  ✅ Initialized CUDA context on device {i}: {device}")
+                
         except Exception as e:
-            print(f"Warning: Could not initialize all CUDA contexts: {e}")
+            print(f"⚠️ Warning: Could not initialize all CUDA contexts: {e}")
             # Fall back to single GPU if multi-GPU fails
             if self.n_gpu_devices > 1:
-                print("  Falling back to single GPU mode")
+                print("  🔄 Falling back to single GPU mode")
                 self.n_gpu_devices = 1
                 self.devices = self.devices[:1]
         
@@ -277,6 +289,15 @@ class AsyncPruningManager:
         """Set up memory-efficient shared data across devices."""
         try:
             print("Setting up memory-efficient shared data across devices...")
+            
+            # CRITICAL: Clear compilation cache before large memory allocations
+            # This prevents rematerialization conflicts when checkpoint resuming
+            print("🧹 Clearing compilation cache before device memory allocation...")
+            jax.clear_caches()
+            
+            # Force garbage collection to ensure clean memory state
+            for _ in range(2):
+                gc.collect()
             
             # Pre-place the large W matrix on each device to avoid copying per simulation
             # This is the most memory-intensive data that we want to share
@@ -756,23 +777,31 @@ class AsyncPruningManager:
             sim_state.last_update_time = time.time()
             iteration += 1
             
+            # Monitor memory usage more frequently for proactive management
+            if iteration % 50 == 0:  # Check memory every 50 iterations
+                memory_status = monitor_memory_usage(sim_index)
+                gpu_percent = memory_status.get('gpu_percent', 0)
+                ram_percent = memory_status.get('ram_percent', 0)
+                
+                # Trigger emergency cleanup if memory is approaching dangerous levels
+                if gpu_percent > 80 or ram_percent > 80:
+                    async_logger.log_sim(sim_index, f"High memory detected - GPU: {gpu_percent:.1f}%, RAM: {ram_percent:.1f}% - triggering cleanup", "MEMORY")
+                    # Aggressive cleanup
+                    jax.clear_caches()
+                    gc.collect()
+                    self.memory_manager.perform_cleanup(logger_func=async_logger.log_batch, context=f"emergency_sim_{sim_index}_iter_{iteration}")
+                
+                # Log memory warnings for very high usage
+                if gpu_percent > 85 or ram_percent > 85:
+                    log_memory_status(memory_status, 
+                                    lambda msg: async_logger.log_sim(sim_index, f"WARNING - High Memory: {msg}", "MEMORY"),
+                                    "")
+            
             # Use adaptive memory manager for optimized cleanup
             cleanup_result = self.memory_manager.should_cleanup(sim_index, iteration)
             if cleanup_result:
-                self.memory_manager.perform_cleanup(context=f"sim_{sim_index}_iter_{iteration}")
-                async_logger.log_sim(sim_index, f"Memory cleanup at iteration {iteration}", "PROGRESS")
-            
-            # Monitor memory usage for large simulations
-            if sim_index % 100 == 0 and iteration % 50 == 0:  # Sample monitoring
-                memory_status = monitor_memory_usage(sim_index)
-                if memory_status.get('ram_warning', False) or memory_status.get('gpu_warning', False):
-                    log_memory_status(memory_status, 
-                                    lambda msg: async_logger.log_sim(sim_index, f"Memory: {msg}", "PROGRESS"),
-                                    "")
-                    # Trigger cleanup if memory is high
-                    cleanup_performed = self.memory_manager.monitor_and_cleanup_if_needed(sim_index, warn_threshold=85.0)
-                    if cleanup_performed:
-                        async_logger.log_sim(sim_index, "Emergency memory cleanup triggered", "PROGRESS")            # Yield control to allow other simulations to run
+                self.memory_manager.perform_cleanup(logger_func=async_logger.log_batch, context=f"sim_{sim_index}_iter_{iteration}")
+                async_logger.log_sim(sim_index, f"Memory cleanup at iteration {iteration}", "PROGRESS")            # Yield control to allow other simulations to run
             await asyncio.sleep(0)
         
         if iteration >= self.sim_config.max_pruning_iterations:
@@ -973,8 +1002,8 @@ class AsyncPruningManager:
                 
             # Memory cleanup using memory manager
             if hasattr(self, 'memory_manager'):
-                self.memory_manager.perform_cleanup(context=f"sim_{sim_index}_failed")
-                
+                self.memory_manager.perform_cleanup(logger_func=async_logger.log_batch, context=f"sim_{sim_index}_failed")
+
         except Exception as cleanup_e:
             async_logger.log_sim(sim_index, 
                 f"WARNING: Cleanup after failure also failed: {cleanup_e}", 
@@ -1086,7 +1115,6 @@ class AsyncPruningManager:
                     
                     # Memory monitoring for large simulations
                     try:
-                        from src.memory.adaptive_memory import monitor_memory_usage
                         memory_status = monitor_memory_usage()
                         memory_percent = memory_status.get('ram_percent', 0)
                         available_gb = memory_status.get('ram_available_gb', 0)
@@ -1139,7 +1167,10 @@ class AsyncPruningManager:
         
         # Start progress monitoring
         monitor_task = asyncio.create_task(monitor_progress())
-        
+        # Memory manager cleanup
+        if hasattr(self, 'memory_manager'):
+            self.memory_manager.perform_cleanup(logger_func=async_logger.log_batch, context="init_streaming_cleanup")
+
         try:
             # Initial batch - start up to max_concurrent simulations
             for _ in range(min(max_concurrent, len(pending_sims))):
@@ -1176,7 +1207,7 @@ class AsyncPruningManager:
                         
                         # Move results to CPU immediately to free GPU memory
                         final_results = jax.device_put(final_results, jax.devices("cpu")[0])
-                        final_state = jax.device_put(final_state, jax.devices("cpu")[0])
+                        final_state = move_pruning_state_to_cpu(final_state)
                         mini_circuit = jax.device_put(mini_circuit, jax.devices("cpu")[0])
                         final_W_mask = jax.device_put(final_W_mask, jax.devices("cpu")[0])
                         
@@ -1196,7 +1227,6 @@ class AsyncPruningManager:
                         if enable_checkpointing and checkpoint_dir:
                             # Check if we should save a checkpoint (periodic + memory-based)
                             try:
-                                from src.memory.adaptive_memory import monitor_memory_usage
                                 memory_status = monitor_memory_usage()
                                 current_memory_percent = memory_status.get('ram_percent', 0)
                                 current_gpu_percent = memory_status.get('gpu_percent', 0)
@@ -1213,6 +1243,26 @@ class AsyncPruningManager:
                             
                             if should_checkpoint:
                                 try:
+                                    # Ensure all checkpoint data is on CPU before creating checkpoint state
+                                    cpu_device = jax.devices("cpu")[0]
+                                    
+                                    # Create CPU-only copies of all data
+                                    cpu_results_dict = {
+                                        k: jax.device_put(v, cpu_device) for k, v in results_dict.items()
+                                    }
+                                    
+                                    # Handle states_dict (Pruning_state objects) specially
+                                    cpu_states_dict = {}
+                                    for k, pruning_state in states_dict.items():
+                                        cpu_states_dict[k] = move_pruning_state_to_cpu(pruning_state)
+                                    
+                                    cpu_mini_circuits_dict = {
+                                        k: jax.device_put(v, cpu_device) for k, v in mini_circuits_dict.items()
+                                    }
+                                    cpu_w_masks_dict = {
+                                        k: jax.device_put(v, cpu_device) for k, v in w_masks_dict.items()
+                                    }
+                                    
                                     checkpoint_state = CheckpointState(
                                         batch_index=0,  # Not applicable for streaming
                                         completed_batches=0,  # Not applicable for streaming  
@@ -1221,10 +1271,10 @@ class AsyncPruningManager:
                                         n_result_batches=0,  # Not applicable for streaming
                                         checkpoint_type="streaming",
                                         completed_simulations=set(results_dict.keys()),
-                                        results_dict=results_dict.copy(),
-                                        states_dict=states_dict.copy(),
-                                        mini_circuits_dict=mini_circuits_dict.copy(),
-                                        w_masks_dict=w_masks_dict.copy(),
+                                        results_dict=cpu_results_dict,
+                                        states_dict=cpu_states_dict,
+                                        mini_circuits_dict=cpu_mini_circuits_dict,
+                                        w_masks_dict=cpu_w_masks_dict,
                                         failed_sims=failed_sims.copy(),
                                         progress_info={
                                             'completed_count': completed_count,
@@ -1277,12 +1327,16 @@ class AsyncPruningManager:
                             
                             # Move results to CPU
                             basic_result = jax.device_put(basic_result, jax.devices("cpu")[0])
-                            basic_state = jax.device_put(basic_state, jax.devices("cpu")[0])
+                            basic_state = move_pruning_state_to_cpu(basic_state)
                             basic_mini_circuit = jax.device_put(basic_mini_circuit, jax.devices("cpu")[0])
                             
                             results_dict[sim_idx] = basic_result
                             states_dict[sim_idx] = basic_state
                             mini_circuits_dict[sim_idx] = basic_mini_circuit
+                            # Add basic W_mask for basic simulations to prevent KeyError
+                            basic_W_mask = jnp.ones((self.sim_params.n_neurons, self.sim_params.n_neurons), dtype=jnp.bool)
+                            basic_W_mask = jax.device_put(basic_W_mask, jax.devices("cpu")[0])
+                            w_masks_dict[sim_idx] = basic_W_mask
                             
                             # Clean up memory
                             del basic_result, basic_state, basic_mini_circuit
@@ -1339,12 +1393,16 @@ class AsyncPruningManager:
                         
                         # Move empty results to CPU
                         empty_result = jax.device_put(empty_result, jax.devices("cpu")[0])
-                        empty_state = jax.device_put(empty_state, jax.devices("cpu")[0])
+                        empty_state = move_pruning_state_to_cpu(empty_state)
                         empty_mini_circuit = jax.device_put(empty_mini_circuit, jax.devices("cpu")[0])
                         
                         results_dict[sim_idx] = empty_result
                         states_dict[sim_idx] = empty_state
                         mini_circuits_dict[sim_idx] = empty_mini_circuit
+                        # Add empty W_mask for failed simulations to prevent KeyError
+                        empty_W_mask = jnp.ones((self.sim_params.n_neurons, self.sim_params.n_neurons), dtype=jnp.bool)
+                        empty_W_mask = jax.device_put(empty_W_mask, jax.devices("cpu")[0])
+                        w_masks_dict[sim_idx] = empty_W_mask
                         
                         # Clean up failed simulation memory
                         del empty_result, empty_state, empty_mini_circuit
@@ -1429,8 +1487,8 @@ class AsyncPruningManager:
             
             # Memory manager cleanup
             if hasattr(self, 'memory_manager'):
-                self.memory_manager.perform_cleanup(context="final_streaming_cleanup")
-                
+                self.memory_manager.perform_cleanup(logger_func=async_logger.log_batch, context="final_streaming_cleanup")
+
         except Exception as e:
             async_logger.log_batch(f"Warning: GPU cleanup failed: {e}")
         
@@ -1515,6 +1573,17 @@ def run_streaming_pruning_simulation(
                     latest_checkpoint, base_name, neuron_params
                 )
                 
+                # CRITICAL: Clear compilation cache IMMEDIATELY after loading checkpoint
+                # This prevents JAX from trying to reconcile loaded arrays with existing cache
+                print("🧹 Post-loading compilation cache clear (prevents rematerialization conflicts)...")
+                jax.clear_caches()
+                
+                # Force garbage collection to clean up temporary loading artifacts  
+                for _ in range(3):
+                    gc.collect()
+                
+                print("✅ Checkpoint loaded and memory optimized for continuation")
+                
                 # Handle different checkpoint types and prepare data for manager
                 if checkpoint_state.checkpoint_type == "streaming":
                     # For streaming: use completed_simulations, keep original neuron_params
@@ -1546,7 +1615,15 @@ def run_streaming_pruning_simulation(
                         'failed_sims': set(),
                         'completed_count': checkpoint_state.completed_batches
                     }
-                
+                del checkpoint_state, adjusted_neuron_params, metadata
+                gc.collect()
+                jax.clear_caches()
+                try:
+                    if hasattr(jax, 'clear_backends'):
+                        jax.clear_backends()
+                    print("✅ JAX backends cleared")
+                except Exception as e:
+                    print(f"⚠️  Warning: Could not clear JAX backends: {e}")
                 print(f"📂 Resuming from checkpoint at simulation {start_sim}/{total_sims}")
             except Exception as e:
                 print(f"⚠️  Could not load checkpoint {latest_checkpoint}: {e}")
@@ -1624,7 +1701,7 @@ def run_streaming_pruning_simulation(
         if manager is not None:
             try:
                 if hasattr(manager, 'memory_manager'):
-                    manager.memory_manager.perform_cleanup(context="failed_run_cleanup")
+                    manager.memory_manager.perform_cleanup(logger_func=async_logger.log_batch, context="failed_run_cleanup")
             except:
                 pass
         
@@ -1636,7 +1713,7 @@ def run_streaming_pruning_simulation(
         if manager is not None:
             try:
                 if hasattr(manager, 'memory_manager'):
-                    manager.memory_manager.perform_cleanup(context="final_run_cleanup")
+                    manager.memory_manager.perform_cleanup(logger_func=async_logger.log_batch, context="final_run_cleanup")
             except:
                 pass
     
@@ -2249,7 +2326,6 @@ class AsyncRegularSimManager:
                     
                     # Enhanced memory monitoring similar to AsyncPruningManager
                     try:
-                        from src.memory.adaptive_memory import monitor_memory_usage
                         memory_status = monitor_memory_usage()
                         memory_percent = memory_status.get('ram_percent', 0)
                         available_gb = memory_status.get('ram_available_gb', 0)
@@ -2322,6 +2398,9 @@ class AsyncRegularSimManager:
                         result = await task
                         sim_idx_result, final_results = result
                         
+                        # Move results to CPU immediately to free GPU memory
+                        final_results = jax.device_put(final_results, jax.devices("cpu")[0])
+                        
                         results_dict[sim_idx] = final_results
                         
                         result_max = float(jnp.max(final_results))
@@ -2336,13 +2415,23 @@ class AsyncRegularSimManager:
                                 
                                 # Create checkpoint state for streaming simulations
                                 from src.data.data_classes import CheckpointState
+                                
+                                # Ensure neuron_params arrays are on CPU
+                                cpu_device = jax.devices("cpu")[0]
+                                cpu_adjusted_neuron_params = None
+                                if self.adjusted_neuron_params is not None:
+                                    cpu_adjusted_neuron_params = jax.tree.map(
+                                        lambda x: jax.device_put(x, cpu_device) if hasattr(x, 'device') else x,
+                                        self.adjusted_neuron_params
+                                    )
+                                
                                 checkpoint_state = CheckpointState(
                                     batch_index=None,  # Not applicable for streaming
                                     completed_batches=None,  # Not applicable for streaming  
                                     total_batches=None,  # Not applicable for streaming
                                     n_result_batches=None,  # Not applicable for streaming
                                     accumulated_mini_circuits=None,  # Not applicable for regular sims
-                                    neuron_params=self.adjusted_neuron_params,
+                                    neuron_params=cpu_adjusted_neuron_params,
                                     pruning_state=None,  # Not applicable for regular sims
                                     checkpoint_type="streaming",
                                     completed_simulations=completed_simulations,
@@ -2446,8 +2535,8 @@ class AsyncRegularSimManager:
             
             # Memory manager cleanup
             if hasattr(self, 'memory_manager'):
-                self.memory_manager.perform_cleanup(context="final_regular_cleanup")
-                
+                self.memory_manager.perform_cleanup(logger_func=async_logger.log_batch, context="final_regular_cleanup")
+
         except Exception as e:
             async_logger.log_batch(f"Warning: GPU cleanup failed: {e}")
         
@@ -2563,7 +2652,6 @@ class AsyncRegularSimManager:
                     
                     # Enhanced memory monitoring similar to AsyncPruningManager
                     try:
-                        from src.memory.adaptive_memory import monitor_memory_usage
                         memory_status = monitor_memory_usage()
                         memory_percent = memory_status.get('ram_percent', 0)
                         available_gb = memory_status.get('ram_available_gb', 0)
@@ -2630,6 +2718,9 @@ class AsyncRegularSimManager:
                     try:
                         result = await task
                         sim_idx_result, final_results = result
+                        
+                        # Move results to CPU immediately to free GPU memory
+                        final_results = jax.device_put(final_results, jax.devices("cpu")[0])
                         
                         # Analyze activity levels for this simulation
                         max_rates = jnp.max(final_results, axis=-1)  # (n_neurons,)
@@ -2728,13 +2819,23 @@ class AsyncRegularSimManager:
                                     
                                     # Create checkpoint state for streaming simulations
                                     from src.data.data_classes import CheckpointState
+                                    
+                                    # Ensure neuron_params arrays are on CPU
+                                    cpu_device = jax.devices("cpu")[0]
+                                    cpu_adjusted_neuron_params = None
+                                    if self.adjusted_neuron_params is not None:
+                                        cpu_adjusted_neuron_params = jax.tree.map(
+                                            lambda x: jax.device_put(x, cpu_device) if hasattr(x, 'device') else x,
+                                            self.adjusted_neuron_params
+                                        )
+                                    
                                     checkpoint_state = CheckpointState(
                                         batch_index=None,  # Not applicable for streaming
                                         completed_batches=None,  # Not applicable for streaming  
                                         total_batches=None,  # Not applicable for streaming
                                         n_result_batches=None,  # Not applicable for streaming
                                         accumulated_mini_circuits=None,  # Not applicable for regular sims
-                                        neuron_params=self.adjusted_neuron_params,
+                                        neuron_params=cpu_adjusted_neuron_params,
                                         pruning_state=None,  # Not applicable for regular sims
                                         checkpoint_type="streaming",
                                         completed_simulations=completed_simulations,
@@ -2842,8 +2943,8 @@ class AsyncRegularSimManager:
             
             # Memory manager cleanup
             if hasattr(self, 'memory_manager'):
-                self.memory_manager.perform_cleanup(context="final_stim_adj_cleanup")
-                
+                self.memory_manager.perform_cleanup(logger_func=async_logger.log_batch, context="final_stim_adj_cleanup")
+
         except Exception as e:
             async_logger.log_batch(f"Warning: GPU cleanup failed: {e}")
         
@@ -3029,7 +3130,7 @@ def run_streaming_regular_simulation(
         if manager is not None:
             try:
                 if hasattr(manager, 'memory_manager'):
-                    manager.memory_manager.perform_cleanup(context="failed_regular_run_cleanup")
+                    manager.memory_manager.perform_cleanup(logger_func=async_logger.log_batch, context="failed_regular_run_cleanup")
             except:
                 pass
         
@@ -3041,7 +3142,7 @@ def run_streaming_regular_simulation(
         if manager is not None:
             try:
                 if hasattr(manager, 'memory_manager'):
-                    manager.memory_manager.perform_cleanup(context="final_regular_run_cleanup")
+                    manager.memory_manager.perform_cleanup(logger_func=async_logger.log_batch,context="final_regular_run_cleanup")
             except:
                 pass
     

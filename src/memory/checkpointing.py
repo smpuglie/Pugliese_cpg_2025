@@ -174,6 +174,7 @@ def save_checkpoint(checkpoint_state: CheckpointState, checkpoint_path: Path,
             states_data = {}
             for sim_idx, state in checkpoint_state.states_dict.items():
                 # Convert Pruning_state to dict
+                # Note: Arrays will be saved as-is but should be loaded back to CPU
                 state_dict = state._asdict() if hasattr(state, '_asdict') else state
                 states_data[f"sim_{sim_idx}"] = state_dict
             checkpoint_dict["states"] = states_data
@@ -273,19 +274,49 @@ def load_checkpoint(checkpoint_path: Path, base_name: str, full_neuron_params: O
     size_mb = checkpoint_size / (1024 * 1024)
     
     print(f"📥 Loading {size_mb:.1f}MB checkpoint using CPU-first strategy for maximum reliability...")
-    print("� CPU-first approach: Safe for compressed HDF5 files where uncompressed size is unpredictable")
+    
+    """
+    MEMORY PLACEMENT STRATEGY:
+    - All checkpoint data is loaded and kept on CPU devices
+    - This includes completed simulation results, states, circuits, and masks
+    - The async simulation initialization will handle moving necessary data to GPU as needed
+    - This ensures: 1) Data preservation when old checkpoints are deleted
+                   2) Minimal GPU memory usage during checkpoint loading  
+                   3) Optimal placement during simulation startup
+    """
     
     try:
         # Always load on CPU first for compressed checkpoints
         checkpoint_dict = ioh5.load(checkpoint_h5_path, enable_jax=False)
         
-        # Convert to JAX arrays selectively and efficiently
-        print("🔄 Converting essential data to JAX arrays with selective GPU placement...")
+        # Convert to JAX arrays selectively and efficiently with memory management
+        print("🔄 Converting essential data to JAX arrays with memory-safe GPU placement...")
         import jax  # Ensure jax is available in this scope
+        
+        # CRITICAL: Clear any existing compilation cache before conversion
+        # This prevents conflicts when loading pre-computed checkpoint data
+        jax.clear_caches()
+        
+        # Determine checkpoint type early to optimize array placement
+        checkpoint_type = metadata.get("checkpoint_type", "batch")
+        is_streaming_check = checkpoint_type == "streaming"
+        
         for key, value in checkpoint_dict.items():
             if key in ['batch_index', 'completed_batches', 'total_batches', 'n_result_batches']:
                 # Keep metadata as regular Python types
                 continue
+            elif is_streaming_check and key in ['results', 'states', 'mini_circuits', 'w_masks']:
+                # CRITICAL: For streaming checkpoints, convert completed data but keep on CPU
+                # This data must be preserved but doesn't need GPU memory for new simulations
+                if isinstance(value, dict):
+                    for subkey, subvalue in value.items():
+                        if subvalue is not None and hasattr(subvalue, '__array__'):
+                            try:
+                                # Force CPU placement for completed simulation data
+                                checkpoint_dict[key][subkey] = jax.device_put(jnp.asarray(subvalue), jax.devices("cpu")[0])
+                            except Exception as convert_e:
+                                print(f"⚠️  Warning: Could not convert {key}.{subkey} to JAX on CPU: {convert_e}")
+                                pass
             elif isinstance(value, dict):
                 # Handle nested dictionaries (like results, states, etc.)
                 for subkey, subvalue in value.items():
@@ -305,7 +336,12 @@ def load_checkpoint(checkpoint_path: Path, base_name: str, full_neuron_params: O
                     print(f"⚠️  Warning: Could not convert {key} to JAX: {convert_e}")
                     # Keep as numpy array
                     pass
-        print("✅ Checkpoint loaded successfully using reliable CPU-first strategy")
+        
+        # Final cleanup after all conversions
+        import gc
+        gc.collect()
+        
+        print("✅ Checkpoint loaded successfully using memory-safe CPU-first strategy")
         
     except Exception as cpu_e:
         print(f"❌ CPU-first loading failed: {cpu_e}")
@@ -321,40 +357,59 @@ def load_checkpoint(checkpoint_path: Path, base_name: str, full_neuron_params: O
         failed_simulations = set(metadata.get("failed_simulations", []))
         progress_info = metadata.get("progress_info", {})
         
-        # Reconstruct results_dict
+        # CRITICAL: For streaming checkpoints, load completed data but keep it on CPU
+        # This data must be preserved as old checkpoints get deleted, but doesn't need GPU memory
         results_dict = {}
         if "results" in checkpoint_dict:
             for key, result_array in checkpoint_dict["results"].items():
                 sim_idx = int(key.replace("sim_", ""))
-                results_dict[sim_idx] = result_array  # Already JAX arrays
+                # Keep results on CPU - they're not needed for new simulations but must be preserved
+                results_dict[sim_idx] = jnp.asarray(result_array)  # Will stay on CPU from loading
         
-        # Reconstruct states_dict
+        # Reconstruct states_dict - keep on CPU
         states_dict = {}
         if "states" in checkpoint_dict:
             for key, state_dict in checkpoint_dict["states"].items():
                 sim_idx = int(key.replace("sim_", ""))
-                # Convert dict back to Pruning_state
+                # Convert dict back to Pruning_state - explicitly place on CPU
                 state_converted = {}
                 for field_name, field_value in state_dict.items():
                     if field_value is not None:
-                        state_converted[field_name] = jnp.asarray(field_value)
+                        if 'mask' in field_name:
+                            # Explicitly place boolean arrays on CPU
+                            state_converted[field_name] = jax.device_put(
+                                jnp.asarray(field_value, dtype=jnp.bool_), 
+                                jax.devices("cpu")[0]
+                            )
+                        else:
+                            # Explicitly place all other arrays on CPU
+                            state_converted[field_name] = jax.device_put(
+                                jnp.asarray(field_value), 
+                                jax.devices("cpu")[0]
+                            )
                     else:
                         state_converted[field_name] = None
                 states_dict[sim_idx] = Pruning_state(**state_converted)
         
-        # Reconstruct mini_circuits_dict
+        # Reconstruct mini_circuits_dict - keep on CPU
         mini_circuits_dict = {}
         if "mini_circuits" in checkpoint_dict:
             for key, mini_circuit in checkpoint_dict["mini_circuits"].items():
                 sim_idx = int(key.replace("sim_", ""))
-                mini_circuits_dict[sim_idx] = jnp.asarray(mini_circuit)
+                mini_circuits_dict[sim_idx] = jnp.asarray(mini_circuit, dtype=jnp.bool_)
         
-        # Reconstruct w_masks_dict
+        # Reconstruct w_masks_dict - keep on CPU
         w_masks_dict = {}
         if "w_masks" in checkpoint_dict:
             for key, w_mask in checkpoint_dict["w_masks"].items():
                 sim_idx = int(key.replace("sim_", ""))
-                w_masks_dict[sim_idx] = jnp.asarray(w_mask)
+                w_masks_dict[sim_idx] = jnp.asarray(w_mask, dtype=jnp.bool_)
+        
+        # Log what we loaded and where it's stored
+        print(f"📊 Loaded {len(results_dict)} results (kept on CPU)")
+        print(f"📊 Loaded {len(states_dict)} states (kept on CPU)")
+        print(f"📊 Loaded {len(mini_circuits_dict)} circuits (kept on CPU)")
+        print(f"📊 Loaded {len(w_masks_dict)} masks (kept on CPU)")
         
         # Create streaming CheckpointState
         checkpoint_state = CheckpointState(
@@ -365,16 +420,17 @@ def load_checkpoint(checkpoint_path: Path, base_name: str, full_neuron_params: O
             n_result_batches=0,  # Not applicable for streaming
             checkpoint_type="streaming",
             completed_simulations=completed_simulations,
-            results_dict=results_dict,
-            states_dict=states_dict,
-            mini_circuits_dict=mini_circuits_dict,
-            w_masks_dict=w_masks_dict,
+            results_dict=results_dict,  # Loaded but on CPU
+            states_dict=states_dict,    # Loaded but on CPU
+            mini_circuits_dict=mini_circuits_dict,  # Loaded but on CPU
+            w_masks_dict=w_masks_dict,  # Loaded but on CPU
             failed_sims=failed_simulations,
             progress_info=progress_info
         )
         
         print(f"Streaming checkpoint loaded: {checkpoint_h5_path}")
         print(f"Resuming with {len(completed_simulations)} completed simulations")
+        print("✅ Memory optimized: completed data loaded on CPU (preserved but not using GPU memory)")
         
         return checkpoint_state, None, metadata
         
@@ -414,11 +470,15 @@ def load_checkpoint(checkpoint_path: Path, base_name: str, full_neuron_params: O
         pruning_state = None
         if metadata.get("has_pruning_state", False) and "pruning_state" in checkpoint_dict:
             pruning_state_dict = checkpoint_dict["pruning_state"]
-            # Convert arrays to JAX arrays
+            # Convert arrays to JAX arrays and explicitly place on CPU
             converted_pruning_state = {}
             for key, value in pruning_state_dict.items():
                 if value is not None:
-                    converted_pruning_state[key] = jnp.asarray(value)
+                    # Explicitly place all pruning state arrays on CPU
+                    converted_pruning_state[key] = jax.device_put(
+                        jnp.asarray(value), 
+                        jax.devices("cpu")[0]
+                    )
                 else:
                     converted_pruning_state[key] = None
             pruning_state = Pruning_state(**converted_pruning_state)

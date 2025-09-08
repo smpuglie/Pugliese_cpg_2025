@@ -256,6 +256,15 @@ def main(cfg: DictConfig):
                     print("Loading network configuration...")
                     _, neuron_params, sim_params, sim_config, _ = prepare_vnc_simulation_params(cfg)
                     
+                    gc.collect()
+                    jax.clear_caches()
+                    # Force backend cleanup if available
+                    try:
+                        if hasattr(jax, 'clear_backends'):
+                            jax.clear_backends()
+                    except Exception as e:
+                        print(f"Warning: Could not clear JAX backends: {e}")
+
                     # Check memory status before starting async simulation
                     try:
                         import psutil
