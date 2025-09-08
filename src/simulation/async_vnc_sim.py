@@ -1093,18 +1093,10 @@ class AsyncPruningManager:
                         
                         # Multi-GPU memory monitoring
                         gpu_memory_status = ""
-                        
                         if memory_status.get('gpu_available', False):
-                            gpu_count = memory_status.get('gpu_count', 1)
-                            if gpu_count > 1:
-                                # Multi-GPU summary
-                                gpu_memory_status = f" | GPU: {memory_status['gpu_used_gb']:.1f}GB used, {memory_status['gpu_free_gb']:.1f}GB free ({gpu_count} GPUs)"
-                            else:
-                                # Single GPU
-                                gpu_devices = memory_status.get('gpu_devices', [])
-                                if gpu_devices:
-                                    gpu = gpu_devices[0]
-                                    gpu_memory_status = f" | GPU: {gpu['used_gb']:.1f}GB used, {gpu['free_gb']:.1f}GB free"
+                            gpu_percent = memory_status.get('gpu_percent', 0)
+                            gpu_free_gb = memory_status.get('gpu_free_gb', 0)
+                            gpu_memory_status = f" | GPU: {gpu_percent:.1f}% used, {gpu_free_gb:.1f}GB free"
     
                             
                         memory_warning = ""
@@ -2264,18 +2256,10 @@ class AsyncRegularSimManager:
                         
                         # Multi-GPU memory monitoring
                         gpu_memory_status = ""
-                            
                         if memory_status.get('gpu_available', False):
-                            gpu_count = memory_status.get('gpu_count', 1)
-                            if gpu_count > 1:
-                                # Multi-GPU summary
-                                gpu_memory_status = f" | GPU: {memory_status['gpu_used_gb']:.1f}GB used, {memory_status['gpu_free_gb']:.1f}GB free ({gpu_count} GPUs)"
-                            else:
-                                # Single GPU
-                                gpu_devices = memory_status.get('gpu_devices', [])
-                                if gpu_devices:
-                                    gpu = gpu_devices[0]
-                                    gpu_memory_status = f" | GPU: {gpu['used_gb']:.1f}GB used, {gpu['free_gb']:.1f}GB free"
+                            gpu_percent = memory_status.get('gpu_percent', 0)
+                            gpu_free_gb = memory_status.get('gpu_free_gb', 0)
+                            gpu_memory_status = f" | GPU: {gpu_percent:.1f}% used, {gpu_free_gb:.1f}GB free"
             
                         memory_warning = ""
                         gpu_percent = memory_status.get('gpu_percent', 0)
@@ -2586,31 +2570,10 @@ class AsyncRegularSimManager:
                         
                         # Multi-GPU memory monitoring
                         gpu_memory_status = ""
-                        try:
-                            
-                            if memory_status.get('gpu_available', False):
-                                gpu_count = memory_status.get('gpu_count', 1)
-                                if gpu_count > 1:
-                                    # Multi-GPU summary
-                                    gpu_memory_status = f" | GPU: {memory_status['gpu_used_gb']:.1f}GB used, {memory_status['gpu_free_gb']:.1f}GB free ({gpu_count} GPUs)"
-                                else:
-                                    # Single GPU
-                                    gpu_devices = memory_status.get('gpu_devices', [])
-                                    if gpu_devices:
-                                        gpu = gpu_devices[0]
-                                        gpu_memory_status = f" | GPU: {gpu['used_gb']:.1f}GB used, {gpu['free_gb']:.1f}GB free"
-                        except Exception as e:
-                            # Fallback to old method if adaptive_memory fails
-                            try:
-                                import pynvml
-                                pynvml.nvmlInit()
-                                handle = pynvml.nvmlDeviceGetHandleByIndex(0)
-                                info = pynvml.nvmlDeviceGetMemoryInfo(handle)
-                                gpu_used_gb = info.used / (1024**3)
-                                gpu_free_gb = info.free / (1024**3)
-                                gpu_memory_status = f" | GPU: {gpu_used_gb:.1f}GB used, {gpu_free_gb:.1f}GB free (GPU0 only)"
-                            except:
-                                pass
+                        if memory_status.get('gpu_available', False):
+                            gpu_percent = memory_status.get('gpu_percent', 0)
+                            gpu_free_gb = memory_status.get('gpu_free_gb', 0)
+                            gpu_memory_status = f" | GPU: {gpu_percent:.1f}% used, {gpu_free_gb:.1f}GB free"
                             
                         memory_warning = ""
                         gpu_percent = memory_status.get('gpu_percent', 0)

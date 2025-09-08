@@ -182,37 +182,12 @@ def calculate_optimal_concurrent_size(
     output_size_mb = (n_neurons * n_timepoints * 4) / (1024**2)  # float32
     intermediate_mb = output_size_mb * 1.5  # ODE solver overhead
     
-    if is_pruning:
-        # Pruning simulations have MUCH higher memory overhead due to:
-        # 1. Multiple W_mask copies and iterations
-        # 2. State tracking for convergence
-        # 3. JAX compilation cache growth over time
-        # 4. Temporary arrays during mask updates
-        # 5. Memory fragmentation from repeated allocations
-        
-        # More realistic pruning overhead calculation
-        pruning_state_mb = (n_neurons * 30 * 4) / (1024**2)  # Increased from 20 to 50
-        mask_operations_mb = (n_neurons * n_neurons * 4) / (1024**2) * 0.5  # Mask copying overhead
-        compilation_cache_mb = 150  # JAX compilation cache grows significantly
-        fragmentation_overhead = 1.5  # Memory fragmentation factor
-        
-        base_memory_mb = (output_size_mb + intermediate_mb + pruning_state_mb + mask_operations_mb + compilation_cache_mb)
-        total_per_sim_mb = base_memory_mb * 2.0 * fragmentation_overhead 
-        
-        print(f"Pruning memory breakdown: output={output_size_mb:.1f}MB, state={pruning_state_mb:.1f}MB, "
-              f"mask_ops={mask_operations_mb:.1f}MB, cache={compilation_cache_mb}MB, "
-              f"total_per_sim={total_per_sim_mb:.1f}MB")
-    else:
-        total_per_sim_mb = (output_size_mb + intermediate_mb) * 1.5
+    total_per_sim_mb = (output_size_mb + intermediate_mb) * 1.5
     
     # Weight matrix memory (shared across simulations)
     weight_matrix_mb = (n_neurons * n_neurons * 4) / (1024**2) * 1.5
     
-    # Use conservative memory allocation 
-    if is_pruning:
-        memory_fraction = 0.70  # Very conservative for all pruning simulations
-    else:
-        memory_fraction = 0.75  # Standard allocation for non-pruning
+    memory_fraction = 0.75  # Standard allocation for non-pruning
     
     usable_memory_mb = (gpu_memory_gb * 1024) * memory_fraction
     available_for_concurrent_mb = usable_memory_mb - weight_matrix_mb
@@ -221,6 +196,10 @@ def calculate_optimal_concurrent_size(
         memory_limited = 1
     else:
         memory_limited = max(1, int(available_for_concurrent_mb / total_per_sim_mb))
+
+    if is_pruning and n_devices > 1:
+        # For Pruning, hard code 8 sims per GPU to avoid OOMs
+        memory_limited = 8 * n_devices
 
     # Ensure we don't exceed total simulations
     optimal = min(memory_limited, total_simulations)
