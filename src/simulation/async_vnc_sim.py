@@ -778,7 +778,7 @@ class AsyncPruningManager:
             iteration += 1
             
             # Monitor memory usage more frequently for proactive management
-            if iteration % 50 == 0:  # Check memory every 50 iterations
+            if iteration % 100 == 0:  # Check memory every 50 iterations
                 memory_status = monitor_memory_usage(sim_index)
                 gpu_percent = memory_status.get('gpu_percent', 0)
                 ram_percent = memory_status.get('ram_percent', 0)

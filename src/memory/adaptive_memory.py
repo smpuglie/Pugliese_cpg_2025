@@ -267,14 +267,7 @@ class AdaptiveMemoryManager:
         if iteration < 5:
             return False
             
-        if self.is_large_simulation:
-            # More frequent cleanup for large simulations
-            if sim_index >= 500:  # Near known OOM point
-                return iteration % 10 == 0
-            else:
-                return iteration % 50 == 0
-        else:
-            return iteration % 100 == 0
+        return iteration % 100 == 0
 
     def perform_cleanup(self, logger_func=print, context: str = ""):
         """Perform memory cleanup."""
