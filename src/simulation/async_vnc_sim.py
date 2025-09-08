@@ -1097,18 +1097,35 @@ class AsyncPruningManager:
                         memory_percent = memory_info.percent
                         available_gb = memory_info.available / (1024**3)
                         
-                        # GPU memory monitoring if possible
+                        # Multi-GPU memory monitoring
                         gpu_memory_status = ""
                         try:
-                            import pynvml
-                            pynvml.nvmlInit()
-                            handle = pynvml.nvmlDeviceGetHandleByIndex(0)
-                            info = pynvml.nvmlDeviceGetMemoryInfo(handle)
-                            gpu_used_gb = info.used / (1024**3)
-                            gpu_free_gb = info.free / (1024**3)
-                            gpu_memory_status = f" | GPU: {gpu_used_gb:.1f}GB used, {gpu_free_gb:.1f}GB free"
-                        except:
-                            pass
+                            from src.memory.adaptive_memory import monitor_memory_usage
+                            memory_status = monitor_memory_usage()
+                            
+                            if memory_status.get('gpu_available', False):
+                                gpu_count = memory_status.get('gpu_count', 1)
+                                if gpu_count > 1:
+                                    # Multi-GPU summary
+                                    gpu_memory_status = f" | GPU: {memory_status['gpu_used_gb']:.1f}GB used, {memory_status['gpu_free_gb']:.1f}GB free ({gpu_count} GPUs)"
+                                else:
+                                    # Single GPU
+                                    gpu_devices = memory_status.get('gpu_devices', [])
+                                    if gpu_devices:
+                                        gpu = gpu_devices[0]
+                                        gpu_memory_status = f" | GPU: {gpu['used_gb']:.1f}GB used, {gpu['free_gb']:.1f}GB free"
+                        except Exception as e:
+                            # Fallback to old method if adaptive_memory fails
+                            try:
+                                import pynvml
+                                pynvml.nvmlInit()
+                                handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+                                info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+                                gpu_used_gb = info.used / (1024**3)
+                                gpu_free_gb = info.free / (1024**3)
+                                gpu_memory_status = f" | GPU: {gpu_used_gb:.1f}GB used, {gpu_free_gb:.1f}GB free (GPU0 only)"
+                            except:
+                                pass
                             
                         memory_warning = ""
                         if memory_percent > 85 or available_gb < 5:
@@ -1136,6 +1153,14 @@ class AsyncPruningManager:
                     # Show device load balancing
                     load_str = ", ".join([f"GPU{device_id}: {load}" for device_id, load in device_load_counts.items()])
                     async_logger.log_batch(f"Device loads: {load_str}")
+                    
+                    # Show detailed GPU status every 50 completed simulations
+                    if completed_count > 0 and completed_count % 50 == 0:
+                        try:
+                            from src.memory.adaptive_memory import log_detailed_gpu_status
+                            log_detailed_gpu_status(lambda msg: async_logger.log_batch(msg), "GPU Detail: ")
+                        except:
+                            pass
                     
                     last_report_time = current_time
         

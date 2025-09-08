@@ -84,18 +84,52 @@ def monitor_memory_usage(simulation_idx: Optional[int] = None, warn_threshold: f
         status['ram_available_gb'] = memory_info.available / (1024**3)
         status['ram_warning'] = memory_info.percent > warn_threshold
         
-        # GPU memory if available
+        # GPU memory if available - check all GPUs
         try:
             import pynvml
             pynvml.nvmlInit()
-            handle = pynvml.nvmlDeviceGetHandleByIndex(0)
-            info = pynvml.nvmlDeviceGetMemoryInfo(handle)
-            status['gpu_used_gb'] = info.used / (1024**3)
-            status['gpu_free_gb'] = info.free / (1024**3)
-            status['gpu_percent'] = (info.used / info.total) * 100
-            status['gpu_warning'] = status['gpu_percent'] > warn_threshold
-        except:
+            device_count = pynvml.nvmlDeviceGetCount()
+            
+            # Collect info for all GPUs
+            gpu_infos = []
+            total_used = 0
+            total_free = 0
+            total_capacity = 0
+            
+            for i in range(device_count):
+                handle = pynvml.nvmlDeviceGetHandleByIndex(i)
+                info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+                gpu_name_raw = pynvml.nvmlDeviceGetName(handle)
+                gpu_name = gpu_name_raw.decode('utf-8') if isinstance(gpu_name_raw, bytes) else gpu_name_raw
+                
+                gpu_info = {
+                    'device_id': i,
+                    'name': gpu_name,
+                    'used_gb': info.used / (1024**3),
+                    'free_gb': info.free / (1024**3),
+                    'total_gb': info.total / (1024**3),
+                    'percent': (info.used / info.total) * 100,
+                    'warning': (info.used / info.total) * 100 > warn_threshold
+                }
+                gpu_infos.append(gpu_info)
+                
+                total_used += info.used
+                total_free += info.free
+                total_capacity += info.total
+            
+            # Store per-GPU info and aggregated totals
+            status['gpu_devices'] = gpu_infos
+            status['gpu_count'] = device_count
+            status['gpu_used_gb'] = total_used / (1024**3)
+            status['gpu_free_gb'] = total_free / (1024**3)
+            status['gpu_total_gb'] = total_capacity / (1024**3)
+            status['gpu_percent'] = (total_used / total_capacity) * 100 if total_capacity > 0 else 0
+            status['gpu_warning'] = any(gpu['warning'] for gpu in gpu_infos)
+            status['gpu_available'] = True
+            
+        except Exception as e:
             status['gpu_available'] = False
+            status['gpu_error'] = str(e)
             
     except Exception as e:
         status['error'] = str(e)
@@ -105,7 +139,7 @@ def monitor_memory_usage(simulation_idx: Optional[int] = None, warn_threshold: f
 
 def log_memory_status(status: dict, logger_func=print, prefix: str = ""):
     """
-    Log memory status information.
+    Log memory status information with multi-GPU support.
     
     Args:
         status: Status dictionary from monitor_memory_usage()
@@ -118,16 +152,50 @@ def log_memory_status(status: dict, logger_func=print, prefix: str = ""):
     
     ram_status = f"RAM: {status['ram_percent']:.1f}% used, {status['ram_available_gb']:.1f}GB free"
     
-    if status.get('gpu_available', True):
-        gpu_status = f" | GPU: {status['gpu_percent']:.1f}% used, {status['gpu_free_gb']:.1f}GB free"
+    # Multi-GPU support
+    if status.get('gpu_available', False):
+        gpu_devices = status.get('gpu_devices', [])
+        gpu_count = status.get('gpu_count', 0)
+        
+        if gpu_count > 1:
+            # Show aggregated totals for multiple GPUs
+            gpu_status = f" | GPU Total ({gpu_count} GPUs): {status['gpu_percent']:.1f}% used, {status['gpu_free_gb']:.1f}GB free"
+            
+            # Log detailed per-GPU info if requested (can be controlled via prefix)
+            if "detailed" in prefix.lower():
+                logger_func(f"{prefix}{ram_status}{gpu_status}")
+                for gpu in gpu_devices:
+                    warning_icon = " ⚠️" if gpu['warning'] else ""
+                    logger_func(f"{prefix}  GPU{gpu['device_id']}: {gpu['percent']:.1f}% used, {gpu['free_gb']:.1f}GB free ({gpu['name']}){warning_icon}")
+                return
+        else:
+            # Single GPU - show detailed info
+            gpu = gpu_devices[0] if gpu_devices else {}
+            gpu_name = gpu.get('name', 'Unknown')
+            gpu_status = f" | GPU: {status['gpu_percent']:.1f}% used, {status['gpu_free_gb']:.1f}GB free ({gpu_name})"
     else:
-        gpu_status = ""
+        if 'gpu_error' in status:
+            gpu_status = f" | GPU: Error - {status['gpu_error']}"
+        else:
+            gpu_status = " | GPU: Not available"
     
     warning = ""
     if status.get('ram_warning', False) or status.get('gpu_warning', False):
         warning = " ⚠️ HIGH MEMORY USAGE!"
         
     logger_func(f"{prefix}{ram_status}{gpu_status}{warning}")
+
+
+def log_detailed_gpu_status(logger_func=print, prefix: str = ""):
+    """
+    Log detailed status for all GPUs.
+    
+    Args:
+        logger_func: Function to use for logging (default: print)
+        prefix: Prefix string for log messages
+    """
+    status = monitor_memory_usage()
+    log_memory_status(status, logger_func, f"{prefix}detailed ")  # Triggers detailed mode
 
 
 def should_trigger_cleanup(simulation_idx: int, batch_idx: int, total_sims: int, batch_size: int) -> bool:
@@ -559,25 +627,28 @@ def calculate_optimal_concurrent_size(
         n_gpu_devices = len(gpu_devices)
         
         if n_gpu_devices > 0:
-            # Try different methods to get GPU memory
+            # Try different methods to get GPU memory - check all GPUs
             try:
                 import pynvml
                 pynvml.nvmlInit()
+                device_count = pynvml.nvmlDeviceGetCount()
+                n_gpu_devices = device_count
                 
                 device_memories = []
-                for i in range(n_gpu_devices):
+                print(f"Detected {device_count} GPU device(s) via nvidia-ml:")
+                
+                for i in range(device_count):
                     handle = pynvml.nvmlDeviceGetHandleByIndex(i)
                     info = pynvml.nvmlDeviceGetMemoryInfo(handle)
-                    device_name = pynvml.nvmlDeviceGetName(handle).decode('utf-8')
+                    device_name_raw = pynvml.nvmlDeviceGetName(handle)
+                    device_name = device_name_raw.decode('utf-8') if isinstance(device_name_raw, bytes) else device_name_raw
                     memory_gb = info.total / (1024 ** 3)
                     device_memories.append(info.total)
-                    print(f"GPU {i}: {device_name} - {memory_gb:.1f}GB")
+                    print(f"  GPU {i}: {device_name} - {memory_gb:.1f}GB")
                 
-                gpu_memory_per_device = device_memories[0]
+                gpu_memory_per_device = device_memories[0]  # Use first GPU as reference
                 total_gpu_memory = sum(device_memories)
                 gpu_memory = total_gpu_memory
-                
-                print(f"Detected {n_gpu_devices} GPU device(s) via nvidia-ml")
                 
             except ImportError:
                 print("pynvml not available, using fallback GPU memory estimation...")
