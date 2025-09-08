@@ -4,7 +4,7 @@ name: DNg100_Stim_Prune
 wPath: ${paths.data_dir}/manc t1 connectome data/W_20250813_DNtoMN_unsorted.csv
 dfPath: ${paths.data_dir}/manc t1 connectome data/wTable_20250813_DNtoMN_unsorted_withModules.csv
 n_replicates: 1024
-batch_size: 64  # Reduced from default to prevent GPU OOM in large simulations
+batch_size: 32  # Reduced from 64 to prevent GPU memory fragmentation and cuFFT failures
 dn_screen: False
 stimNeurons: 
   - [31]

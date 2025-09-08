@@ -19,7 +19,7 @@ rtol: 2e-6
 atol: 5e-9  
 # Checkpointing configuration
 enable_checkpointing: True # Enable intermediate checkpointing
-checkpoint_interval: 100 # Save checkpoint every N batches (set to 1 to save after each batch)
+checkpoint_interval: 50 # Save checkpoint every N batches (set to 1 to save after each batch)
 
 # NEW: Async execution parameters
 async_mode: "streaming"  # Options: "sync", "streaming"

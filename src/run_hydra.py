@@ -2,7 +2,12 @@ import os
 
 # os.environ["CUDA_VISIBLE_DEVICES"] = "0"  # Use GPU 1
 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
-os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.95"
+# Reduced from 0.95 to 0.75 to prevent memory fragmentation and cuFFT failures
+# This leaves more headroom for intermediate operations and cleanup
+os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.75"
+# Additional memory management settings for long-running simulations
+os.environ["XLA_PYTHON_CLIENT_ALLOCATOR"] = "platform"
+os.environ["TF_GPU_ALLOCATOR"] = "cuda_malloc_async"  # Better fragmentation handling
 import jax
 import signal
 import sys
@@ -131,6 +136,24 @@ def emergency_memory_cleanup():
     import time
     time.sleep(2)
 
+def periodic_memory_cleanup(force_gpu_clear: bool = False):
+    """Periodic memory cleanup during long simulations."""
+    import time
+    try:
+        # Clear JAX caches periodically to prevent accumulation
+        if force_gpu_clear:
+            jax.clear_caches()
+        
+        # Standard garbage collection
+        for _ in range(2):
+            gc.collect()
+            
+        # Brief pause to allow cleanup
+        time.sleep(0.1)
+        
+    except Exception as e:
+        print(f"Warning: Periodic cleanup failed: {e}")
+
 def cleanup_logging(logger):
     """Clean up logging handlers properly."""
     try:
@@ -245,6 +268,8 @@ def main(cfg: DictConfig):
                         
                         if memory_percent > 85:
                             print("⚠️  WARNING: High memory usage before simulation start!")
+                            print("   Performing cleanup...")
+                            periodic_memory_cleanup(force_gpu_clear=True)
                             if memory_percent > 95:
                                 print("❌ CRITICAL: Memory usage too high to safely start simulation")
                                 print("   Please restart the job or reduce simulation parameters")
