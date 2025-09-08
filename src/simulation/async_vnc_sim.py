@@ -26,7 +26,7 @@ from src.simulation.vnc_sim import (
 from src.utils.shuffle_utils import full_shuffle
 from src.data.data_classes import NeuronParams, SimParams, SimulationConfig, Pruning_state, CheckpointState
 from src.memory.adaptive_memory import (
-    monitor_memory_usage, create_memory_manager, calculate_optimal_concurrent_size
+    monitor_memory_usage, create_memory_manager, calculate_optimal_concurrent_size, log_memory_status
 )
 from src.memory.checkpointing import (
     CheckpointState, save_checkpoint, load_checkpoint,
@@ -1128,7 +1128,7 @@ class AsyncPruningManager:
                             f"Streaming Progress: {completed_count}/{total_simulations} completed, "
                             f"{active_count} active, {pending_count} pending | "
                             f"Rate: {rate:.2f} sims/sec, ETA: {eta/60:.1f} min | "
-                            f"RAM: {memory_percent:.1f}% used, GPU: {available_gb:.1f}GB free{gpu_memory_status}{memory_warning}"
+                            f"RAM: {memory_percent:.1f}% used, {available_gb:.1f}GB free{gpu_memory_status}{memory_warning}"
                         )
                     except:
                         # Fallback without memory monitoring

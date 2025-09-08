@@ -88,6 +88,54 @@ def log_detailed_gpu_status(logger_func=print, prefix: str = ""):
     except Exception as e:
         logger_func(f"{prefix}GPU status unavailable: {e}")
 
+def log_memory_status(status: dict, logger_func=print, prefix: str = ""):
+    """
+    Log memory status information with multi-GPU support.
+    
+    Args:
+        status: Status dictionary from monitor_memory_usage()
+        logger_func: Function to use for logging (default: print)
+        prefix: Prefix string for log messages
+    """
+    if 'error' in status:
+        logger_func(f"{prefix}Memory monitoring unavailable: {status['error']}")
+        return
+    
+    ram_status = f"RAM: {status['ram_percent']:.1f}% used, {status['ram_available_gb']:.1f}GB free"
+    
+    # Multi-GPU support
+    if status.get('gpu_available', False):
+        gpu_devices = status.get('gpu_devices', [])
+        gpu_count = status.get('gpu_count', 0)
+        
+        if gpu_count > 1:
+            # Show aggregated totals for multiple GPUs
+            gpu_status = f" | GPU Total ({gpu_count} GPUs): {status['gpu_percent']:.1f}% used, {status['gpu_free_gb']:.1f}GB free"
+            
+            # Log detailed per-GPU info if requested (can be controlled via prefix)
+            if "detailed" in prefix.lower():
+                logger_func(f"{prefix}{ram_status}{gpu_status}")
+                for gpu in gpu_devices:
+                    warning_icon = " ⚠️" if gpu['warning'] else ""
+                    logger_func(f"{prefix}  GPU{gpu['device_id']}: {gpu['percent']:.1f}% used, {gpu['free_gb']:.1f}GB free ({gpu['name']}){warning_icon}")
+                return
+        else:
+            # Single GPU - show detailed info
+            gpu = gpu_devices[0] if gpu_devices else {}
+            gpu_name = gpu.get('name', 'Unknown')
+            gpu_status = f" | GPU: {status['gpu_percent']:.1f}% used, {status['gpu_free_gb']:.1f}GB free ({gpu_name})"
+    else:
+        if 'gpu_error' in status:
+            gpu_status = f" | GPU: Error - {status['gpu_error']}"
+        else:
+            gpu_status = " | GPU: Not available"
+    
+    warning = ""
+    if status.get('ram_warning', False) or status.get('gpu_warning', False):
+        warning = " ⚠️ HIGH MEMORY USAGE!"
+        
+    logger_func(f"{prefix}{ram_status}{gpu_status}{warning}")
+    
 
 def basic_memory_cleanup():
     """Basic memory cleanup - just the essentials."""
