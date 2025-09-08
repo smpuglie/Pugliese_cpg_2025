@@ -1086,42 +1086,30 @@ class AsyncPruningManager:
                     
                     # Memory monitoring for large simulations
                     try:
-                        memory_info = psutil.virtual_memory()
-                        memory_percent = memory_info.percent
-                        available_gb = memory_info.available / (1024**3)
+                        from src.memory.adaptive_memory import monitor_memory_usage
+                        memory_status = monitor_memory_usage()
+                        memory_percent = memory_status.get('ram_percent', 0)
+                        available_gb = memory_status.get('ram_available_gb', 0)
                         
                         # Multi-GPU memory monitoring
                         gpu_memory_status = ""
-                        try:
-                            from src.memory.adaptive_memory import monitor_memory_usage
-                            memory_status = monitor_memory_usage()
-                            
-                            if memory_status.get('gpu_available', False):
-                                gpu_count = memory_status.get('gpu_count', 1)
-                                if gpu_count > 1:
-                                    # Multi-GPU summary
-                                    gpu_memory_status = f" | GPU: {memory_status['gpu_used_gb']:.1f}GB used, {memory_status['gpu_free_gb']:.1f}GB free ({gpu_count} GPUs)"
-                                else:
-                                    # Single GPU
-                                    gpu_devices = memory_status.get('gpu_devices', [])
-                                    if gpu_devices:
-                                        gpu = gpu_devices[0]
-                                        gpu_memory_status = f" | GPU: {gpu['used_gb']:.1f}GB used, {gpu['free_gb']:.1f}GB free"
-                        except Exception as e:
-                            # Fallback to old method if adaptive_memory fails
-                            try:
-                                import pynvml
-                                pynvml.nvmlInit()
-                                handle = pynvml.nvmlDeviceGetHandleByIndex(0)
-                                info = pynvml.nvmlDeviceGetMemoryInfo(handle)
-                                gpu_used_gb = info.used / (1024**3)
-                                gpu_free_gb = info.free / (1024**3)
-                                gpu_memory_status = f" | GPU: {gpu_used_gb:.1f}GB used, {gpu_free_gb:.1f}GB free (GPU0 only)"
-                            except:
-                                pass
+                        
+                        if memory_status.get('gpu_available', False):
+                            gpu_count = memory_status.get('gpu_count', 1)
+                            if gpu_count > 1:
+                                # Multi-GPU summary
+                                gpu_memory_status = f" | GPU: {memory_status['gpu_used_gb']:.1f}GB used, {memory_status['gpu_free_gb']:.1f}GB free ({gpu_count} GPUs)"
+                            else:
+                                # Single GPU
+                                gpu_devices = memory_status.get('gpu_devices', [])
+                                if gpu_devices:
+                                    gpu = gpu_devices[0]
+                                    gpu_memory_status = f" | GPU: {gpu['used_gb']:.1f}GB used, {gpu['free_gb']:.1f}GB free"
+    
                             
                         memory_warning = ""
-                        if memory_percent > 85 or available_gb < 5:
+                        gpu_percent = memory_status.get('gpu_percent', 0)
+                        if memory_percent > 85 or available_gb < 5 or gpu_percent > 85:
                             memory_warning = " ⚠️ LOW MEMORY!"
                         
                         async_logger.log_batch(
@@ -1216,13 +1204,15 @@ class AsyncPruningManager:
                         if enable_checkpointing and checkpoint_dir:
                             # Check if we should save a checkpoint (periodic + memory-based)
                             try:
-                                memory_info = psutil.virtual_memory()
-                                current_memory_percent = memory_info.percent
+                                from src.memory.adaptive_memory import monitor_memory_usage
+                                memory_status = monitor_memory_usage()
+                                current_memory_percent = memory_status.get('ram_percent', 0)
+                                current_gpu_percent = memory_status.get('gpu_percent', 0)
                                 # Get checkpoint interval from config (default to 10 if not specified)
                                 checkpoint_interval = getattr(self.sim_config, 'checkpoint_interval', 10)
-                                # Save checkpoint every N simulations OR when memory usage > 80%
-                                should_checkpoint = (completed_count % checkpoint_interval == 0) or (current_memory_percent > 80.0)
-                                async_logger.log_batch(f"Memory {current_memory_percent:.1f}%, checkpoint_interval={checkpoint_interval}, should_checkpoint={should_checkpoint} (completed_count={completed_count})")
+                                # Save checkpoint every N simulations OR when RAM/GPU memory usage > 80%
+                                should_checkpoint = (completed_count % checkpoint_interval == 0) or (current_memory_percent > 80.0) or (current_gpu_percent > 80.0)
+                                async_logger.log_batch(f"Memory RAM:{current_memory_percent:.1f}% GPU:{current_gpu_percent:.1f}%, checkpoint_interval={checkpoint_interval}, should_checkpoint={should_checkpoint} (completed_count={completed_count})")
                             except:
                                 # Fallback to just periodic checkpoints if memory monitoring fails
                                 checkpoint_interval = getattr(self.sim_config, 'checkpoint_interval', 10)
@@ -2267,42 +2257,29 @@ class AsyncRegularSimManager:
                     
                     # Enhanced memory monitoring similar to AsyncPruningManager
                     try:
-                        memory_info = psutil.virtual_memory()
-                        memory_percent = memory_info.percent
-                        available_gb = memory_info.available / (1024**3)
+                        from src.memory.adaptive_memory import monitor_memory_usage
+                        memory_status = monitor_memory_usage()
+                        memory_percent = memory_status.get('ram_percent', 0)
+                        available_gb = memory_status.get('ram_available_gb', 0)
                         
                         # Multi-GPU memory monitoring
                         gpu_memory_status = ""
-                        try:
-                            from src.memory.adaptive_memory import monitor_memory_usage
-                            memory_status = monitor_memory_usage()
                             
-                            if memory_status.get('gpu_available', False):
-                                gpu_count = memory_status.get('gpu_count', 1)
-                                if gpu_count > 1:
-                                    # Multi-GPU summary
-                                    gpu_memory_status = f" | GPU: {memory_status['gpu_used_gb']:.1f}GB used, {memory_status['gpu_free_gb']:.1f}GB free ({gpu_count} GPUs)"
-                                else:
-                                    # Single GPU
-                                    gpu_devices = memory_status.get('gpu_devices', [])
-                                    if gpu_devices:
-                                        gpu = gpu_devices[0]
-                                        gpu_memory_status = f" | GPU: {gpu['used_gb']:.1f}GB used, {gpu['free_gb']:.1f}GB free"
-                        except Exception as e:
-                            # Fallback to old method if adaptive_memory fails
-                            try:
-                                import pynvml
-                                pynvml.nvmlInit()
-                                handle = pynvml.nvmlDeviceGetHandleByIndex(0)
-                                info = pynvml.nvmlDeviceGetMemoryInfo(handle)
-                                gpu_used_gb = info.used / (1024**3)
-                                gpu_free_gb = info.free / (1024**3)
-                                gpu_memory_status = f" | GPU: {gpu_used_gb:.1f}GB used, {gpu_free_gb:.1f}GB free (GPU0 only)"
-                            except:
-                                pass
-                            
+                        if memory_status.get('gpu_available', False):
+                            gpu_count = memory_status.get('gpu_count', 1)
+                            if gpu_count > 1:
+                                # Multi-GPU summary
+                                gpu_memory_status = f" | GPU: {memory_status['gpu_used_gb']:.1f}GB used, {memory_status['gpu_free_gb']:.1f}GB free ({gpu_count} GPUs)"
+                            else:
+                                # Single GPU
+                                gpu_devices = memory_status.get('gpu_devices', [])
+                                if gpu_devices:
+                                    gpu = gpu_devices[0]
+                                    gpu_memory_status = f" | GPU: {gpu['used_gb']:.1f}GB used, {gpu['free_gb']:.1f}GB free"
+            
                         memory_warning = ""
-                        if memory_percent > 85 or available_gb < 5:
+                        gpu_percent = memory_status.get('gpu_percent', 0)
+                        if memory_percent > 85 or available_gb < 5 or gpu_percent > 85:
                             memory_warning = " ⚠️ LOW MEMORY!"
                         
                         async_logger.log_batch(
@@ -2602,15 +2579,14 @@ class AsyncRegularSimManager:
                     
                     # Enhanced memory monitoring similar to AsyncPruningManager
                     try:
-                        memory_info = psutil.virtual_memory()
-                        memory_percent = memory_info.percent
-                        available_gb = memory_info.available / (1024**3)
+                        from src.memory.adaptive_memory import monitor_memory_usage
+                        memory_status = monitor_memory_usage()
+                        memory_percent = memory_status.get('ram_percent', 0)
+                        available_gb = memory_status.get('ram_available_gb', 0)
                         
                         # Multi-GPU memory monitoring
                         gpu_memory_status = ""
                         try:
-                            from src.memory.adaptive_memory import monitor_memory_usage
-                            memory_status = monitor_memory_usage()
                             
                             if memory_status.get('gpu_available', False):
                                 gpu_count = memory_status.get('gpu_count', 1)
@@ -2637,7 +2613,8 @@ class AsyncRegularSimManager:
                                 pass
                             
                         memory_warning = ""
-                        if memory_percent > 85 or available_gb < 5:
+                        gpu_percent = memory_status.get('gpu_percent', 0)
+                        if memory_percent > 85 or available_gb < 5 or gpu_percent > 85:
                             memory_warning = " ⚠️ LOW MEMORY!"
                         
                         async_logger.log_batch(
