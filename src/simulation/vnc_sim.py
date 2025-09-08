@@ -832,7 +832,8 @@ def calculate_optimal_batch_size(n_neurons: int, n_timepoints: int, n_replicates
                 for i in range(n_gpu_devices):
                     handle = pynvml.nvmlDeviceGetHandleByIndex(i)
                     info = pynvml.nvmlDeviceGetMemoryInfo(handle)
-                    device_name = pynvml.nvmlDeviceGetName(handle).decode('utf-8')
+                    device_name_raw = pynvml.nvmlDeviceGetName(handle)
+                    device_name = device_name_raw.decode('utf-8') if isinstance(device_name_raw, bytes) else device_name_raw
                     memory_gb = info.total / (1024 ** 3)
                     device_memories.append(info.total)
                     print(f"GPU {i}: {device_name} - {memory_gb:.1f}GB")

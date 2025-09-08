@@ -2235,11 +2235,59 @@ class AsyncRegularSimManager:
                     active_count = len(active_tasks)
                     pending_count = len(pending_sims)
                     
-                    async_logger.log_batch(
-                        f"Regular Sim Progress: {completed_count}/{total_simulations} completed, "
-                        f"{active_count} active, {pending_count} pending | "
-                        f"Rate: {rate:.2f} sims/sec, ETA: {eta/60:.1f} min"
-                    )
+                    # Enhanced memory monitoring similar to AsyncPruningManager
+                    try:
+                        memory_info = psutil.virtual_memory()
+                        memory_percent = memory_info.percent
+                        available_gb = memory_info.available / (1024**3)
+                        
+                        # Multi-GPU memory monitoring
+                        gpu_memory_status = ""
+                        try:
+                            from src.memory.adaptive_memory import monitor_memory_usage
+                            memory_status = monitor_memory_usage()
+                            
+                            if memory_status.get('gpu_available', False):
+                                gpu_count = memory_status.get('gpu_count', 1)
+                                if gpu_count > 1:
+                                    # Multi-GPU summary
+                                    gpu_memory_status = f" | GPU: {memory_status['gpu_used_gb']:.1f}GB used, {memory_status['gpu_free_gb']:.1f}GB free ({gpu_count} GPUs)"
+                                else:
+                                    # Single GPU
+                                    gpu_devices = memory_status.get('gpu_devices', [])
+                                    if gpu_devices:
+                                        gpu = gpu_devices[0]
+                                        gpu_memory_status = f" | GPU: {gpu['used_gb']:.1f}GB used, {gpu['free_gb']:.1f}GB free"
+                        except Exception as e:
+                            # Fallback to old method if adaptive_memory fails
+                            try:
+                                import pynvml
+                                pynvml.nvmlInit()
+                                handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+                                info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+                                gpu_used_gb = info.used / (1024**3)
+                                gpu_free_gb = info.free / (1024**3)
+                                gpu_memory_status = f" | GPU: {gpu_used_gb:.1f}GB used, {gpu_free_gb:.1f}GB free (GPU0 only)"
+                            except:
+                                pass
+                            
+                        memory_warning = ""
+                        if memory_percent > 85 or available_gb < 5:
+                            memory_warning = " ⚠️ LOW MEMORY!"
+                        
+                        async_logger.log_batch(
+                            f"Regular Sim Progress: {completed_count}/{total_simulations} completed, "
+                            f"{active_count} active, {pending_count} pending | "
+                            f"Rate: {rate:.2f} sims/sec, ETA: {eta/60:.1f} min | "
+                            f"RAM: {memory_percent:.1f}% used, {available_gb:.1f}GB free{gpu_memory_status}{memory_warning}"
+                        )
+                    except:
+                        # Fallback without memory monitoring
+                        async_logger.log_batch(
+                            f"Regular Sim Progress: {completed_count}/{total_simulations} completed, "
+                            f"{active_count} active, {pending_count} pending | "
+                            f"Rate: {rate:.2f} sims/sec, ETA: {eta/60:.1f} min"
+                        )
                     
                     # Show device load balancing
                     load_str = ", ".join([f"GPU{device_id}: {load}" for device_id, load in device_load_counts.items()])
@@ -2513,11 +2561,59 @@ class AsyncRegularSimManager:
                     adjusting_sims = sum(1 for sim_idx, iters in adjustment_iterations.items() 
                                        if iters > 0 and sim_idx not in results_dict)
                     
-                    async_logger.log_batch(
-                        f"Stimulus Adjustment Progress: {completed_count}/{total_simulations} completed, "
-                        f"{active_count} active, {pending_count} pending, {adjusting_sims} adjusting | "
-                        f"Rate: {rate:.2f} sims/sec, ETA: {eta/60:.1f} min"
-                    )
+                    # Enhanced memory monitoring similar to AsyncPruningManager
+                    try:
+                        memory_info = psutil.virtual_memory()
+                        memory_percent = memory_info.percent
+                        available_gb = memory_info.available / (1024**3)
+                        
+                        # Multi-GPU memory monitoring
+                        gpu_memory_status = ""
+                        try:
+                            from src.memory.adaptive_memory import monitor_memory_usage
+                            memory_status = monitor_memory_usage()
+                            
+                            if memory_status.get('gpu_available', False):
+                                gpu_count = memory_status.get('gpu_count', 1)
+                                if gpu_count > 1:
+                                    # Multi-GPU summary
+                                    gpu_memory_status = f" | GPU: {memory_status['gpu_used_gb']:.1f}GB used, {memory_status['gpu_free_gb']:.1f}GB free ({gpu_count} GPUs)"
+                                else:
+                                    # Single GPU
+                                    gpu_devices = memory_status.get('gpu_devices', [])
+                                    if gpu_devices:
+                                        gpu = gpu_devices[0]
+                                        gpu_memory_status = f" | GPU: {gpu['used_gb']:.1f}GB used, {gpu['free_gb']:.1f}GB free"
+                        except Exception as e:
+                            # Fallback to old method if adaptive_memory fails
+                            try:
+                                import pynvml
+                                pynvml.nvmlInit()
+                                handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+                                info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+                                gpu_used_gb = info.used / (1024**3)
+                                gpu_free_gb = info.free / (1024**3)
+                                gpu_memory_status = f" | GPU: {gpu_used_gb:.1f}GB used, {gpu_free_gb:.1f}GB free (GPU0 only)"
+                            except:
+                                pass
+                            
+                        memory_warning = ""
+                        if memory_percent > 85 or available_gb < 5:
+                            memory_warning = " ⚠️ LOW MEMORY!"
+                        
+                        async_logger.log_batch(
+                            f"Stimulus Adjustment Progress: {completed_count}/{total_simulations} completed, "
+                            f"{active_count} active, {pending_count} pending, {adjusting_sims} adjusting | "
+                            f"Rate: {rate:.2f} sims/sec, ETA: {eta/60:.1f} min | "
+                            f"RAM: {memory_percent:.1f}% used, {available_gb:.1f}GB free{gpu_memory_status}{memory_warning}"
+                        )
+                    except:
+                        # Fallback without memory monitoring
+                        async_logger.log_batch(
+                            f"Stimulus Adjustment Progress: {completed_count}/{total_simulations} completed, "
+                            f"{active_count} active, {pending_count} pending, {adjusting_sims} adjusting | "
+                            f"Rate: {rate:.2f} sims/sec, ETA: {eta/60:.1f} min"
+                        )
                     
                     last_report_time = current_time
         
