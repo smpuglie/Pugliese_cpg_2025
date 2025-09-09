@@ -1,0 +1,27 @@
+# Temporary DN_Screen configuration for testing stimulus adjustment checkpointing
+# This config limits to first 10 DNs with 4 replicates for faster testing
+
+# defaults:
+#   - sim: DN_Screen
+
+name: DN_Screen_Test
+
+wPath: ${paths.data_dir}/manc t1 connectome data/W_20250813_DNtoMN_unsorted.csv
+dfPath: ${paths.data_dir}/manc t1 connectome data/wTable_20250813_DNtoMN_unsorted_withModules.csv
+n_replicates: 4  # Reduced for testing
+batch_size: 256
+dn_screen: True
+# Limit to first 10 DNs for testing - we'll need to modify the code to respect this
+max_dn_test: 10  # Custom parameter to limit DN screening
+stimNeurons: 
+  - [31]
+removeNeurons: []
+keepOnly: []
+stimI: 
+  - [128]
+seed: 1
+saveFigs: True
+useTsp: False
+save_checkpoints: False
+max_pruning_iterations: 200
+oscillation_threshold: 0.5

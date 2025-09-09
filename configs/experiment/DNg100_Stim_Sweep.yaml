@@ -1,22 +1,29 @@
 # This is the default configuration for the experiment.
-name: DNg100_Stim_Prune
+name: DNg100_Stim_Sweep
 
 wPath: ${paths.data_dir}/manc t1 connectome data/W_20250813_DNtoMN_unsorted.csv
 dfPath: ${paths.data_dir}/manc t1 connectome data/wTable_20250813_DNtoMN_unsorted_withModules.csv
-n_replicates: 1024
+n_replicates: 128
 batch_size: 
 dn_screen: False
 stimNeurons: 
-  - [31]
+  - [31, 132]
+  # - [31]
 removeNeurons: []
 keepOnly: []
 stimI: 
-  - [250]
+  - [180,180]
+  - [200,200]
+  - [220,220]
+  - [240,240]
+  - [280,280]
+  - [300,300]
+  - [320,320]
+  - [340,340]
+  # - [250]
 seed: 1
 saveFigs: True
 useTsp: False
 save_checkpoints: False
 max_pruning_iterations: 200
 oscillation_threshold: 0.5
-# Memory management settings for large simulations
-conservative_memory: True  # Enable conservative memory management

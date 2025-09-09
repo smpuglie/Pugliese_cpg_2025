@@ -1,5 +1,5 @@
 # This is the default configuration for the experiment.
-name: DNg100_Stim_Prune
+name: DNg100_Stim_Prune_FANC
 
 wPath: ${paths.data_dir}/fanc t1l connectome data/W_BDN2toMN_20250107_corrected.npy
 dfPath: ${paths.data_dir}/fanc t1l connectome data/wTable_BDN2toMN_20250107_corrected.csv
@@ -7,11 +7,11 @@ n_replicates: 1024
 batch_size: 64
 dn_screen: False
 stimNeurons: 
-  - [31]
+  - [0]
 removeNeurons: []
 keepOnly: []
 stimI: 
-  - [250]
+  - [150]
 seed: 1
 saveFigs: True
 useTsp: False

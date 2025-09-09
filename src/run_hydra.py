@@ -1,8 +1,17 @@
 import os
 
 # os.environ["CUDA_VISIBLE_DEVICES"] = "0"  # Use GPU 1
-# os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
-os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.95"
+os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
+# Reduced from 0.95 to 0.75 to prevent memory fragmentation and cuFFT failures
+# This leaves more headroom for intermediate operations and cleanup
+os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.75"
+# Additional memory management settings for long-running simulations
+# os.environ["XLA_PYTHON_CLIENT_ALLOCATOR"] = "platform"
+os.environ["TF_GPU_ALLOCATOR"] = "cuda_malloc_async"  # Better fragmentation handling
+os.environ['XLA_FLAGS'] = (
+    '--xla_gpu_triton_gemm_any=True '
+    '--xla_gpu_enable_latency_hiding_scheduler=true '
+)
 import jax
 import signal
 import sys
@@ -17,9 +26,9 @@ import sparse
 import logging
 from omegaconf import DictConfig, OmegaConf
 from pathlib import Path
-import src.io_dict_to_hdf5 as ioh5
-from src.path_utils import convert_dict_to_path, save_config
-from src.vnc_sim import run_vnc_simulation, prepare_neuron_params, prepare_sim_params, parse_simulation_config, load_wTable
+import src.utils.io_dict_to_hdf5 as ioh5
+from src.utils.path_utils import convert_dict_to_path, save_config
+from src.simulation.vnc_sim import run_vnc_simulation, prepare_neuron_params, prepare_sim_params, parse_simulation_config, load_wTable
 
 # Set up logging to capture all output
 def setup_logging():
@@ -60,7 +69,7 @@ class CleanLoggingRedirect:
         sys.stdout = self.terminal
 
 def cleanup_jax():
-    """Clean up JAX resources properly."""
+    """Clean up JAX resources properly with enhanced memory management."""
     print("\nCleaning up JAX resources...")
     try:
         # Force synchronization of all pending operations
@@ -69,12 +78,85 @@ def cleanup_jax():
         # Clear JAX caches
         jax.clear_caches()
         
-        # Force garbage collection
-        gc.collect()
+        # Force backend cleanup if available
+        try:
+            if hasattr(jax, 'clear_backends'):
+                jax.clear_backends()
+            print("  JAX backends cleared")
+        except Exception as e:
+            print(f"  Warning: Could not clear JAX backends: {e}")
+        
+        # GPU memory cleanup and synchronization
+        try:
+            # Force GPU synchronization on all devices
+            devices = jax.devices()
+            for device in devices:
+                with jax.default_device(device):
+                    # Force a small operation to synchronize and clear
+                    _ = jax.device_put(jax.numpy.array([1.0]), device)
+            print(f"  Synchronized {len(devices)} devices")
+        except Exception as e:
+            print(f"  Warning: GPU synchronization failed: {e}")
+        
+        # Force garbage collection multiple times
+        for _ in range(3):
+            gc.collect()
         
         print("JAX cleanup completed.")
     except Exception as e:
         print(f"Error during JAX cleanup: {e}")
+
+def emergency_memory_cleanup():
+    """Emergency memory cleanup function for when simulations fail."""
+    print("🚨 Performing emergency memory cleanup...")
+    
+    try:
+        # Clear JAX resources
+        jax.clear_caches()
+        
+        # Force backend cleanup if available
+        if hasattr(jax, 'clear_backends'):
+            jax.clear_backends()
+        
+        # GPU memory cleanup
+        devices = jax.devices()
+        for device in devices:
+            try:
+                with jax.default_device(device):
+                    pass  # Force device sync
+            except:
+                pass
+        
+        # Aggressive garbage collection
+        for _ in range(5):
+            gc.collect()
+            
+        print("🧹 Emergency memory cleanup completed")
+        
+    except Exception as e:
+        print(f"⚠️  Emergency cleanup failed: {e}")
+        
+    # Wait a moment for cleanup to take effect
+    import time
+    time.sleep(2)
+
+def periodic_memory_cleanup(force_gpu_clear: bool = False):
+    """Periodic memory cleanup during long simulations."""
+    import time
+    try:
+        # Clear JAX caches periodically to prevent accumulation
+        if force_gpu_clear:
+            jax.clear_caches()
+        
+        # Standard garbage collection
+        for _ in range(2):
+            gc.collect()
+            
+        # Brief pause to allow cleanup
+        time.sleep(0.1)
+        
+    except Exception as e:
+        print(f"Warning: Periodic cleanup failed: {e}")
 
 def cleanup_logging(logger):
     """Clean up logging handlers properly."""
@@ -166,31 +248,68 @@ def main(cfg: DictConfig):
                 
                 # Import async functions
                 try:
-                    from src.async_vnc_sim import (
+                    from src.simulation.async_vnc_sim import (
                         run_streaming_pruning_simulation,
                         run_streaming_regular_simulation
                     )
-                    from src.vnc_sim import prepare_vnc_simulation_params
+                    from src.simulation.vnc_sim import prepare_vnc_simulation_params
                 except ImportError as e:
                     print(f"Warning: Could not import async modules: {e}")
-                    print("Falling back to synchronous execution")
-                    results, final_mini_circuits, neuron_params = run_vnc_simulation(cfg)
                 else:
                     # Use the same data preparation as sync version
                     print("Loading network configuration...")
                     _, neuron_params, sim_params, sim_config, _ = prepare_vnc_simulation_params(cfg)
+                    
+                    gc.collect()
+                    jax.clear_caches()
+                    # Force backend cleanup if available
+                    try:
+                        if hasattr(jax, 'clear_backends'):
+                            jax.clear_backends()
+                    except Exception as e:
+                        print(f"Warning: Could not clear JAX backends: {e}")
+
+                    # Check memory status before starting async simulation
+                    try:
+                        import psutil
+                        memory_info = psutil.virtual_memory()
+                        memory_percent = memory_info.percent
+                        available_gb = memory_info.available / (1024**3)
+                        print(f"Pre-simulation memory status: {memory_percent:.1f}% used, {available_gb:.1f}GB available")
+                        
+                        if memory_percent > 85:
+                            print("⚠️  WARNING: High memory usage before simulation start!")
+                            print("   Performing cleanup...")
+                            periodic_memory_cleanup(force_gpu_clear=True)
+                            if memory_percent > 95:
+                                print("❌ CRITICAL: Memory usage too high to safely start simulation")
+                                print("   Please restart the job or reduce simulation parameters")
+                    except:
+                        print("Could not check pre-simulation memory status")
                     
                     # Initialize variables to handle error cases
                     results = None
                     final_mini_circuits = None
                     
                     # Run async simulation based on mode and pruning setting
+                    # Enable checkpointing for long simulations (optional)
+                    enable_checkpointing = getattr(cfg.sim, "enable_checkpointing", False)
+                    print(f"Checkpointing configuration: enable_checkpointing={enable_checkpointing}")
+                    
+                    # Setup checkpointing directory for both pruning and regular simulations
+                    checkpoint_dir = cfg.paths.ckpt_dir / "checkpoints" if enable_checkpointing else None
+                    if enable_checkpointing:
+                        print(f"Checkpoints will be saved to: {checkpoint_dir}")
+
                     try:
                         if prune_network:
                             # Async pruning simulations
                             if async_mode == "streaming":
                                 results, final_mini_circuits, neuron_params = run_streaming_pruning_simulation(
-                                    neuron_params, sim_params, sim_config, max_concurrent=cfg.experiment.batch_size
+                                    neuron_params, sim_params, sim_config, 
+                                    max_concurrent=cfg.experiment.batch_size,
+                                    checkpoint_dir=checkpoint_dir,
+                                    enable_checkpointing=enable_checkpointing
                                 )
                             else:
                                 raise ValueError(f"Unknown async_mode for pruning: {async_mode}. Valid options: 'sync', 'streaming'")
@@ -198,20 +317,20 @@ def main(cfg: DictConfig):
                             # Async regular (non-pruning) simulations
                             if async_mode == "streaming":
                                 results = run_streaming_regular_simulation(
-                                    neuron_params, sim_params, sim_config, max_concurrent=cfg.experiment.batch_size
+                                    neuron_params, sim_params, sim_config, 
+                                    max_concurrent=cfg.experiment.batch_size,
+                                    checkpoint_dir=checkpoint_dir,
+                                    enable_checkpointing=cfg.sim.enable_checkpointing
                                 )
                                 final_mini_circuits = None  # Regular sims don't produce mini circuits
                             else:
                                 raise ValueError(f"Unknown async_mode for regular simulations: {async_mode}. Valid options: 'sync', 'streaming'")
                         
                         print(f"Async simulation completed successfully")
-                    except Exception as async_error:
-                        print(f"Async simulation failed: {async_error}")
-                        # Fallback to sync if needed
-                        print("Falling back to synchronous execution")
-                        results, final_mini_circuits, neuron_params = run_vnc_simulation(cfg)
-                        # Note: Could also re-raise here if you prefer to fail fast
-                        # raise
+                    except Exception as e:
+                        print(f"Error during async simulation: {e}")
+                        emergency_memory_cleanup()
+                        raise
             
             # Ensure all operations are completed before proceeding
             jax.block_until_ready(results)

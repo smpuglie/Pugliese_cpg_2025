@@ -5,7 +5,7 @@ pulseStart: 0.02
 pulseEnd: 0.999
 shuffle: False
 noise: False
-noiseStdvProp: 0.1
+noiseStdvProp: 0.0
 noiseMean: 0.0
 noiseStdv: 0.0
 prune_network: True
@@ -15,9 +15,11 @@ n_active_upper: 500
 n_active_lower: 5
 n_high_fr_upper: 100
 high_fr_threshold: 100.0
-
+rtol: 2e-6  
+atol: 5e-9  
 # Checkpointing configuration
-enable_checkpointing: False # Enable intermediate checkpointing
+enable_checkpointing: True # Enable intermediate checkpointing
+checkpoint_interval: 50 # Save checkpoint every N batches (set to 1 to save after each batch)
 
 # NEW: Async execution parameters
 async_mode: "streaming"  # Options: "sync", "streaming"

@@ -1,4 +1,4 @@
-from typing import NamedTuple, Optional, Tuple, List
+from typing import NamedTuple, Optional, Tuple, List, Dict, Set, Any
 from pathlib import Path
 import jax.numpy as jnp
 
@@ -55,6 +55,14 @@ class Pruning_state(NamedTuple):
     remove_p: jnp.ndarray
     min_circuit: jnp.ndarray
     keys: jnp.ndarray
+    # New fields for tracking most recent good oscillating state
+    last_good_oscillating_removed: jnp.ndarray  # Boolean mask of removed neurons when last good osc found
+    last_good_oscillating_put_back: jnp.ndarray  # Boolean mask of put_back neurons when last good osc found  
+    last_good_oscillation_score: jnp.ndarray     # The oscillation score value when last good osc found
+    last_good_W_mask: jnp.ndarray                # The exact W_mask when last good oscillation found
+    last_good_key: jnp.ndarray                   # The exact RNG key state when last good oscillation found
+    last_good_stim_idx: jnp.ndarray              # The stimulation index that produced the good oscillation
+    last_good_param_idx: jnp.ndarray             # The parameter index that produced the good oscillation
 
 
 class SimulationConfig(NamedTuple):
@@ -73,13 +81,23 @@ class SimulationConfig(NamedTuple):
     high_fr_threshold: float = 100.0
     # Checkpointing parameters
     enable_checkpointing: bool = False
+    checkpoint_interval: int = 10  # Save checkpoint every N batches or simulations
     
 class CheckpointState(NamedTuple):
-    """State information for simulation checkpointing."""
+    """State information for simulation checkpointing - unified for batch and streaming modes."""
     batch_index: int
     completed_batches: int
     total_batches: int
-    neuron_params: NeuronParams
+    neuron_params: Optional[NeuronParams]  # Made optional for streaming mode
     n_result_batches: int  # Number of result batches (for reconstruction)
     accumulated_mini_circuits: Optional[List[jnp.ndarray]] = None  # For pruning simulations
     pruning_state: Optional[Pruning_state] = None
+    # Streaming-specific fields (optional for batch mode)
+    checkpoint_type: str = "batch"  # "batch" or "streaming"
+    completed_simulations: Optional[Set[int]] = None  # For streaming: completed sim indices
+    results_dict: Optional[Dict[int, jnp.ndarray]] = None  # For streaming: individual results
+    states_dict: Optional[Dict[int, Pruning_state]] = None  # For streaming: individual states
+    mini_circuits_dict: Optional[Dict[int, jnp.ndarray]] = None  # For streaming: individual mini_circuits
+    w_masks_dict: Optional[Dict[int, jnp.ndarray]] = None  # For streaming: individual w_masks
+    failed_sims: Optional[Set[int]] = None  # For streaming: failed simulation indices
+    progress_info: Optional[Dict[str, Any]] = None  # For streaming: progress information
