@@ -27,7 +27,7 @@ from src.utils.shuffle_utils import full_shuffle
 from src.data.data_classes import NeuronParams, SimParams, SimulationConfig, Pruning_state, CheckpointState
 from src.memory.adaptive_memory import (
     monitor_memory_usage, create_memory_manager, calculate_optimal_concurrent_size, log_memory_status,
-    move_pruning_state_to_cpu
+    move_pruning_state_to_cpu, log_detailed_gpu_status
 )
 from src.memory.checkpointing import (
     CheckpointState, save_checkpoint, load_checkpoint,
@@ -180,11 +180,6 @@ class AsyncPruningManager:
         # Clear JAX caches and backends multiple times
         for cleanup_round in range(3):
             jax.clear_caches()
-            if hasattr(jax, 'clear_backends'):
-                try:
-                    jax.clear_backends()
-                except:
-                    pass
             gc.collect()
         
         # Force GPU synchronization and small allocations to ensure cleanup
@@ -233,7 +228,20 @@ class AsyncPruningManager:
         gpu_devices = [d for d in self.devices if 'gpu' in str(d).lower() or 'cuda' in str(d).lower()]
         self.n_gpu_devices = len(gpu_devices)
         
+        # Primary device rotation for distributing coordination overhead
+        self.primary_device_index = 0  # Start with device 0
+        self.coordination_rotation_interval = 50  # Rotate primary device every N simulations
+        
         print(f"Async Manager: {self.n_devices} total devices, {self.n_gpu_devices} GPU devices")
+        print(f"Primary device rotation: every {self.coordination_rotation_interval} simulations")
+        
+        # Set initial JAX default device to GPU 0 for coordination
+        if self.n_gpu_devices > 0:
+            try:
+                jax.config.update('jax_default_device', jax.devices()[0])
+                print(f"JAX default device set to: {jax.devices()[0]}")
+            except Exception as e:
+                print(f"Warning: Could not set JAX default device: {e}")
         
         # Add memory pre-allocation to avoid CUDA initialization issues
         try:
@@ -982,6 +990,11 @@ class AsyncPruningManager:
             f"COMPLETED: {iteration} iterations, {active_interneurons} neurons remaining ({total_removed} removed)", 
             "COMPLETE")
 
+        # Cleanup JAX caches and force garbage collection
+        with jax.default_device(target_device):
+            jax.clear_caches()
+            gc.collect()
+
         return sim_index, final_results, sim_state.pruning_state, mini_circuit, final_W_mask
     
     def _handle_simulation_failure(self, sim_index: int, e: Exception, target_device, async_logger) -> Tuple[int, jnp.ndarray, dict, jnp.ndarray]:
@@ -996,10 +1009,6 @@ class AsyncPruningManager:
             jax.clear_caches()
             gc.collect()
             
-            # Force GPU memory cleanup if possible
-            if hasattr(jax, 'clear_backends'):
-                jax.clear_backends()
-                
             # Memory cleanup using memory manager
             if hasattr(self, 'memory_manager'):
                 self.memory_manager.perform_cleanup(logger_func=async_logger.log_batch, context=f"sim_{sim_index}_failed")
@@ -1093,6 +1102,44 @@ class AsyncPruningManager:
             """Get the device with the least number of active simulations."""
             return min(device_load_counts.keys(), key=lambda device_id: device_load_counts[device_id])
         
+        def get_current_primary_device(completed_count):
+            """Get the current primary device based on rotation schedule."""
+            # Rotate primary device every coordination_rotation_interval simulations
+            rotation_cycle = completed_count // self.coordination_rotation_interval
+            primary_idx = rotation_cycle % self.n_devices
+            return primary_idx
+        
+        def rotate_primary_device_if_needed(completed_count, async_logger):
+            """Check if we should rotate primary device and log the change."""
+            new_primary_idx = get_current_primary_device(completed_count)
+            if new_primary_idx != self.primary_device_index:
+                old_primary = self.primary_device_index
+                self.primary_device_index = new_primary_idx
+                
+                # ACTUAL PRIMARY DEVICE ROTATION: Change JAX's global default device
+                try:
+                    # Set the new primary device as JAX's default coordination device
+                    jax.config.update('jax_default_device', jax.devices()[new_primary_idx])
+                    async_logger.log_batch(f"🔄 JAX default device changed: GPU{old_primary} -> GPU{new_primary_idx} at sim {completed_count}")
+                    
+                    # Clear compilation caches on the old primary to prevent stale references
+                    with jax.default_device(self.devices[old_primary]):
+                        jax.clear_caches()
+                    
+                    # Warm up the new primary device
+                    with jax.default_device(self.devices[new_primary_idx]):
+                        # Small computation to initialize compilation on new primary
+                        _ = jax.device_put(jnp.ones(10), self.devices[new_primary_idx])
+                        
+                    async_logger.log_batch(f"🎯 Primary coordination responsibility transferred to GPU{new_primary_idx}")
+                    
+                except Exception as rotation_error:
+                    async_logger.log_batch(f"⚠️ JAX default device rotation failed: {rotation_error}")
+                    async_logger.log_batch(f"🔄 Primary device rotated (cleanup only): GPU{old_primary} -> GPU{new_primary_idx} at sim {completed_count}")
+                
+                return True
+            return False
+        
         # Progress tracking (completed_count already set from checkpoint recovery)
         start_time = time.time()
         
@@ -1138,6 +1185,10 @@ class AsyncPruningManager:
                             f"Rate: {rate:.2f} sims/sec, ETA: {eta/60:.1f} min | "
                             f"RAM: {memory_percent:.1f}% used, {available_gb:.1f}GB free{gpu_memory_status}{memory_warning}"
                         )
+                        try:
+                            log_detailed_gpu_status(lambda msg: async_logger.log_batch(msg), "GPU Detail: ")
+                        except:
+                            pass
                     except:
                         # Fallback without memory monitoring
                         async_logger.log_batch(
@@ -1151,17 +1202,14 @@ class AsyncPruningManager:
                         active_sims_str = ", ".join([f"Sim{sim_idx}" for sim_idx in active_tasks.values()])
                         async_logger.log_batch(f"Active: {active_sims_str}")
                     
-                    # Show device load balancing
-                    load_str = ", ".join([f"GPU{device_id}: {load}" for device_id, load in device_load_counts.items()])
-                    async_logger.log_batch(f"Device loads: {load_str}")
+                    # Show device load balancing with primary device indicator
+                    current_primary = get_current_primary_device(completed_count)
+                    load_str = ", ".join([
+                        f"GPU{device_id}: {load}{'*' if device_id == current_primary else ''}" 
+                        for device_id, load in device_load_counts.items()
+                    ])
+                    async_logger.log_batch(f"Device loads: {load_str} (GPU{current_primary}* is primary)")
                     
-                    # Show detailed GPU status every 50 completed simulations
-                    if completed_count > 0 and completed_count % 50 == 0:
-                        try:
-                            from src.memory.adaptive_memory import log_detailed_gpu_status
-                            log_detailed_gpu_status(lambda msg: async_logger.log_batch(msg), "GPU Detail: ")
-                        except:
-                            pass
                     
                     last_report_time = current_time
         
@@ -1206,10 +1254,14 @@ class AsyncPruningManager:
                         sim_idx_result, final_results, final_state, mini_circuit, final_W_mask = result
                         
                         # Move results to CPU immediately to free GPU memory
-                        final_results = jax.device_put(final_results, jax.devices("cpu")[0])
+                        # Use current primary device for coordination-heavy data movement
+                        current_primary = get_current_primary_device(completed_count)
+                        with jax.default_device(self.devices[current_primary]):
+                            final_results = jax.device_put(final_results, jax.devices("cpu")[0])
+                            mini_circuit = jax.device_put(mini_circuit, jax.devices("cpu")[0])
+                            final_W_mask = jax.device_put(final_W_mask, jax.devices("cpu")[0])
+                        
                         final_state = move_pruning_state_to_cpu(final_state)
-                        mini_circuit = jax.device_put(mini_circuit, jax.devices("cpu")[0])
-                        final_W_mask = jax.device_put(final_W_mask, jax.devices("cpu")[0])
                         
                         results_dict[sim_idx] = final_results
                         states_dict[sim_idx] = final_state
@@ -1409,6 +1461,16 @@ class AsyncPruningManager:
                 
                 # Comprehensive memory cleanup after processing completed simulations
                 if done_tasks:
+                    # Current primary device cleanup after each batch of completions
+                    # This helps manage coordination overhead that accumulates on the primary device
+                    if len(done_tasks) > 0:
+                        try:
+                            current_primary = get_current_primary_device(completed_count)
+                            with jax.default_device(self.devices[current_primary]):
+                                jax.clear_caches()
+                        except Exception as e:
+                            pass  # Silent fail to avoid log spam
+                    
                     # Clear JAX caches more aggressively to prevent memory fragmentation
                     if len(done_tasks) >= 2 or completed_count % 10 == 0:
                         jax.clear_caches()
@@ -1419,9 +1481,26 @@ class AsyncPruningManager:
                     # Aggressive memory cleanup every 50 simulations to prevent OOM
                     if completed_count > 0 and completed_count % 50 == 0:
                         # Force more aggressive cleanup for long-running simulations
-                        jax.clear_caches()
+                        for device_id in range(self.n_devices):
+                            with jax.default_device(jax.devices()[device_id]):
+                                jax.clear_caches()
+
                         gc.collect()
                         async_logger.log_batch(f"🧹 Aggressive memory cleanup at sim {completed_count}")
+                    
+                    # More frequent primary device-specific backend clearing to handle coordination overhead
+                    if completed_count > 0 and completed_count % 10 == 0:
+                        try:
+                            # Check if we should rotate the primary device
+                            rotate_primary_device_if_needed(completed_count, async_logger)
+                            
+                            # Current primary device often accumulates compilation cache from coordination tasks
+                            current_primary = get_current_primary_device(completed_count)
+                            with jax.default_device(self.devices[current_primary]):
+                                jax.clear_caches()
+                            async_logger.log_batch(f"🎯 Primary device (GPU{current_primary}) backend clearing at sim {completed_count}")
+                        except Exception as e:
+                            async_logger.log_batch(f"⚠️ Primary device backend clearing failed: {e}")
                     
                     # Log memory cleanup
                     if len(done_tasks) > 0:
@@ -1470,8 +1549,17 @@ class AsyncPruningManager:
         
         # Force backend cleanup if available
         try:
-            if hasattr(jax, 'clear_backends'):
-                jax.clear_backends()
+
+                
+                # Additional cleanup for current primary device coordination overhead
+                try:
+                    current_primary = get_current_primary_device(completed_count)
+                    with jax.default_device(self.devices[current_primary]):
+                        jax.clear_caches()
+                    async_logger.log_batch(f"🎯 Final primary device (GPU{current_primary}) backend clearing completed")
+                except Exception as gpu_primary_e:
+                    async_logger.log_batch(f"⚠️ Primary device cleanup failed: {gpu_primary_e}")
+                    
         except Exception as e:
             async_logger.log_batch(f"Warning: Could not clear JAX backends: {e}")
         
@@ -1480,8 +1568,8 @@ class AsyncPruningManager:
             # Force GPU synchronization and cleanup
             for device_id in range(self.n_devices):
                 with jax.default_device(jax.devices()[device_id]):
-                    pass  # This forces device synchronization
-                    
+                    jax.clear_caches()
+
             # Additional memory cleanup
             gc.collect()
             
@@ -1618,12 +1706,6 @@ def run_streaming_pruning_simulation(
                 del checkpoint_state, adjusted_neuron_params, metadata
                 gc.collect()
                 jax.clear_caches()
-                try:
-                    if hasattr(jax, 'clear_backends'):
-                        jax.clear_backends()
-                    print("✅ JAX backends cleared")
-                except Exception as e:
-                    print(f"⚠️  Warning: Could not clear JAX backends: {e}")
                 print(f"📂 Resuming from checkpoint at simulation {start_sim}/{total_sims}")
             except Exception as e:
                 print(f"⚠️  Could not load checkpoint {latest_checkpoint}: {e}")
@@ -1636,14 +1718,6 @@ def run_streaming_pruning_simulation(
     print("🧹 Performing initial memory cleanup for fresh start...")
     jax.clear_caches()
     gc.collect()
-    
-    # Force backend cleanup if available
-    try:
-        if hasattr(jax, 'clear_backends'):
-            jax.clear_backends()
-        print("✅ JAX backends cleared")
-    except Exception as e:
-        print(f"⚠️  Warning: Could not clear JAX backends: {e}")
     
     # GPU memory cleanup and synchronization
     try:
@@ -1690,12 +1764,6 @@ def run_streaming_pruning_simulation(
         # Comprehensive cleanup on failure
         jax.clear_caches()
         gc.collect()
-        
-        try:
-            if hasattr(jax, 'clear_backends'):
-                jax.clear_backends()
-        except:
-            pass
             
         # Clean up manager if it exists
         if manager is not None:
@@ -1774,7 +1842,12 @@ class AsyncRegularSimManager:
         gpu_devices = [d for d in self.devices if 'gpu' in str(d).lower() or 'cuda' in str(d).lower()]
         self.n_gpu_devices = len(gpu_devices)
         
+        # Primary device rotation for distributing coordination overhead
+        self.primary_device_index = 0  # Start with device 0
+        self.coordination_rotation_interval = 25  # Rotate primary device every N simulations
+        
         print(f"Async Regular Sim Manager: {self.n_devices} total devices, {self.n_gpu_devices} GPU devices")
+        print(f"Primary device rotation: every {self.coordination_rotation_interval} simulations")
         
         # Initialize CUDA contexts with memory pre-allocation
         try:
@@ -2515,13 +2588,6 @@ class AsyncRegularSimManager:
         # Comprehensive JAX cleanup
         jax.clear_caches()
         
-        # Force backend cleanup if available
-        try:
-            if hasattr(jax, 'clear_backends'):
-                jax.clear_backends()
-        except Exception as e:
-            async_logger.log_batch(f"Warning: Could not clear JAX backends: {e}")
-        
         # GPU memory cleanup  
         try:
             # Force GPU synchronization and cleanup
@@ -2924,13 +2990,6 @@ class AsyncRegularSimManager:
         # Comprehensive JAX cleanup
         jax.clear_caches()
         
-        # Force backend cleanup if available
-        try:
-            if hasattr(jax, 'clear_backends'):
-                jax.clear_backends()
-        except Exception as e:
-            async_logger.log_batch(f"Warning: Could not clear JAX backends: {e}")
-        
         # GPU memory cleanup  
         try:
             # Force GPU synchronization and cleanup
@@ -3028,14 +3087,6 @@ def run_streaming_regular_simulation(
     jax.clear_caches()
     gc.collect()
     
-    # Force backend cleanup if available
-    try:
-        if hasattr(jax, 'clear_backends'):
-            jax.clear_backends()
-        print("✅ JAX backends cleared")
-    except Exception as e:
-        print(f"⚠️  Warning: Could not clear JAX backends: {e}")
-    
     # GPU memory cleanup and synchronization
     try:
         # Force GPU synchronization on all devices
@@ -3120,12 +3171,6 @@ def run_streaming_regular_simulation(
         jax.clear_caches()
         gc.collect()
         
-        try:
-            if hasattr(jax, 'clear_backends'):
-                jax.clear_backends()
-        except:
-            pass
-            
         # Clean up manager if it exists
         if manager is not None:
             try:

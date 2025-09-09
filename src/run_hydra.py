@@ -6,8 +6,12 @@ os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 # This leaves more headroom for intermediate operations and cleanup
 os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.75"
 # Additional memory management settings for long-running simulations
-os.environ["XLA_PYTHON_CLIENT_ALLOCATOR"] = "platform"
+# os.environ["XLA_PYTHON_CLIENT_ALLOCATOR"] = "platform"
 os.environ["TF_GPU_ALLOCATOR"] = "cuda_malloc_async"  # Better fragmentation handling
+os.environ['XLA_FLAGS'] = (
+    '--xla_gpu_triton_gemm_any=True '
+    '--xla_gpu_enable_latency_hiding_scheduler=true '
+)
 import jax
 import signal
 import sys
