@@ -10,8 +10,13 @@ import os
 import pandas as pd
 from jax.scipy.signal import correlate
 
-def sample_trunc_normal(key, mean, stdev, shape):
+def sample_trunc_normal(key, mean, stdev, shape, lower_bound=0.0):
     """Sample from truncated normal for a single simulation."""
+    
+    # Handle infinite or NaN inputs
+    def handle_invalid_inputs():
+        return jnp.zeros(shape)
+    
     # Handle edge case when stdev is 0 or very small
     def handle_zero_stdev():
         # When stdev is 0, return the mean value (clamped to be non-negative)
@@ -20,33 +25,48 @@ def sample_trunc_normal(key, mean, stdev, shape):
     def handle_normal_case():
         # Use inverse CDF method for truncated normal
         # Truncation points in original scale
-        lower_bound = 0.0  # truncate at 0 (positive values only)
-        upper_bound = mean + 100 * stdev  # effectively infinity
+        # Cap upper bound more aggressively to prevent numerical issues
+        upper_bound = jnp.minimum(mean + jnp.minimum(100 * stdev, 1e6), 1e10)
 
-        # Convert to standardized coordinates
-        a = (lower_bound - mean) / stdev  # left truncation point in standard deviations
-        b = (upper_bound - mean) / stdev  # right truncation point in standard deviations
+        # Convert to standardized coordinates with bounds checking
+        a = jnp.clip((lower_bound - mean) / stdev, -10.0, 10.0)
+        b = jnp.clip((upper_bound - mean) / stdev, -10.0, 10.0)
 
         # Get CDF values at truncation points for standard normal
         cdf_a = jax.scipy.stats.norm.cdf(a)
         cdf_b = jax.scipy.stats.norm.cdf(b)
 
+        # Ensure CDF values are valid and not too close
+        cdf_a = jnp.clip(cdf_a, 1e-10, 1.0 - 1e-10)
+        cdf_b = jnp.clip(cdf_b, 1e-10, 1.0 - 1e-10)
+        cdf_b = jnp.maximum(cdf_b, cdf_a + 1e-10)
+
         # Sample uniform values between the CDF values
         u = jax.random.uniform(key, shape=shape, minval=cdf_a, maxval=cdf_b)
 
-        # Use inverse CDF to get standard normal samples
-        z = jax.scipy.stats.norm.ppf(u)
+        # Use inverse CDF to get standard normal samples with bounds checking
+        z = jax.scipy.stats.norm.ppf(jnp.clip(u, 1e-10, 1.0 - 1e-10))
 
-        # Transform to desired mean and standard deviation
+        # Transform to desired mean and standard deviation with final bounds check
         samples = mean + stdev * z
+        samples = jnp.clip(samples, -1e10, 1e10)
 
         return samples
     
-    # Use conditional to handle zero or near-zero standard deviation
+    # Check for invalid inputs first
+    invalid_inputs = (
+        ~jnp.isfinite(mean) | ~jnp.isfinite(stdev) | 
+        ~jnp.isfinite(lower_bound) | (stdev < 0)
+    )
+    
     return jax.lax.cond(
-        stdev < 1e-10,
-        handle_zero_stdev,
-        handle_normal_case
+        invalid_inputs,
+        handle_invalid_inputs,
+        lambda: jax.lax.cond(
+            stdev < 1e-10,
+            handle_zero_stdev,
+            handle_normal_case
+        )
     )
 
 def set_sizes(sizes, a, threshold):
