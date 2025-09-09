@@ -266,6 +266,12 @@ class AsyncPruningManager:
         # This allows each simulation to run on a different GPU independently
         self.max_workers = max_workers or min(32, (self.n_devices * 2))
         
+        # Create shared thread pool executor to avoid JAX compilation context fragmentation
+        self._shared_executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=min(16, self.n_devices * 2),
+            thread_name_prefix="jax_pruning"
+        )
+        
         # Pre-replicate read-only data across all devices to reduce memory copying
         print("Pre-replicating read-only data across devices...")
         self._setup_shared_data()
@@ -608,11 +614,11 @@ class AsyncPruningManager:
             # Fallback to placing W on the target device
             W_device = jax.device_put(self.neuron_params.W, target_device)
         
-        # Apply the final W_mask using same device context
+        # Apply the final W_mask - streamlined device context
         with jax.default_device(target_device):
-            final_W_mask_device = jax.device_put(final_W_mask, target_device)
+            # Data is already on target_device due to context, no need for explicit device_put
             # Use EXACT same masking operation as in pruning: W * W_mask
-            W_masked = W_device * final_W_mask_device
+            W_masked = W_device * final_W_mask
             
             # Reweight connectivity (same as in pruning iterations)
             W_reweighted = reweight_connectivity(
@@ -706,10 +712,36 @@ class AsyncPruningManager:
         target_device = self.devices[device_id]
         async_logger.log_sim(sim_index, f"Assigned to working device {device_id} ({target_device})", "INIT")
         
-        # Move simulation state to the target device
+        # Move simulation state to the target device - manual transfer to avoid memory explosion
+        # Replace jax.tree.map with explicit field transfers for better memory control
+        old_pruning_state = sim_state.pruning_state
+        
+        # Transfer pruning state fields individually to prevent intermediate memory copies
+        transferred_pruning_state = old_pruning_state._replace(
+            W_mask=jax.device_put(old_pruning_state.W_mask, target_device),
+            total_removed_neurons=jax.device_put(old_pruning_state.total_removed_neurons, target_device),
+            removed_stim_neurons=jax.device_put(old_pruning_state.removed_stim_neurons, target_device),
+            neurons_put_back=jax.device_put(old_pruning_state.neurons_put_back, target_device),
+            prev_put_back=jax.device_put(old_pruning_state.prev_put_back, target_device),
+            last_removed=jax.device_put(old_pruning_state.last_removed, target_device),
+            remove_p=jax.device_put(old_pruning_state.remove_p, target_device),
+            min_circuit=jax.device_put(old_pruning_state.min_circuit, target_device),
+            keys=jax.device_put(old_pruning_state.keys, target_device),
+            last_good_oscillating_removed=jax.device_put(old_pruning_state.last_good_oscillating_removed, target_device),
+            last_good_W_mask=jax.device_put(old_pruning_state.last_good_W_mask, target_device),
+            last_good_oscillation_score=jax.device_put(old_pruning_state.last_good_oscillation_score, target_device),
+            last_good_key=jax.device_put(old_pruning_state.last_good_key, target_device),
+            last_good_stim_idx=jax.device_put(old_pruning_state.last_good_stim_idx, target_device),
+            last_good_param_idx=jax.device_put(old_pruning_state.last_good_param_idx, target_device),
+            level=jax.device_put(old_pruning_state.level, target_device)
+        )
+        
+        # Clear reference to old state to help GC
+        del old_pruning_state
+        
         sim_state = AsyncSimState(
             sim_index=sim_state.sim_index,
-            pruning_state=jax.tree.map(lambda x: jax.device_put(x, target_device), sim_state.pruning_state),
+            pruning_state=transferred_pruning_state,
             is_converged=sim_state.is_converged,
             iteration_count=sim_state.iteration_count,
             last_update_time=sim_state.last_update_time
@@ -747,21 +779,21 @@ class AsyncPruningManager:
                 
                 # Run simulation iteration - ALWAYS use thread pool for true async execution
                 # JAX computations are blocking, so we need to run them in separate threads
+                # Use shared executor to avoid compilation context fragmentation
                 try:
                     loop = asyncio.get_event_loop()
-                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                        future = loop.run_in_executor(
-                            executor,
-                            lambda: self._run_single_pruning_iteration_with_tolerances(
-                                sim_state.pruning_state.W_mask,
-                                sim_index,
-                                device_params['rtol'],
-                                device_params['atol'],
-                                device_id,
-                                sim_state.pruning_state.keys  # Use evolving RNG key for each iteration
-                            )
+                    future = loop.run_in_executor(
+                        self._shared_executor,
+                        lambda: self._run_single_pruning_iteration_with_tolerances(
+                            sim_state.pruning_state.W_mask,
+                            sim_index,
+                            device_params['rtol'],
+                            device_params['atol'],
+                            device_id,
+                            sim_state.pruning_state.keys  # Use evolving RNG key for each iteration
                         )
-                        results = await future
+                    )
+                    results = await future
                 except Exception as e:
                     async_logger.log_sim(sim_index, f"Pruning iteration failed: {e}", "ERROR")
                     raise
@@ -780,10 +812,14 @@ class AsyncPruningManager:
                 traceback.print_exc()
                 raise e
             
-            # Update state
+            # Update state with explicit cleanup of previous state
+            old_pruning_state = sim_state.pruning_state
             sim_state.pruning_state = updated_state
             sim_state.iteration_count = iteration
             sim_state.last_update_time = time.time()
+            
+            # Explicit cleanup to help JAX garbage collection
+            del old_pruning_state
             iteration += 1
             
             # Monitor memory usage more frequently for proactive management
@@ -894,21 +930,19 @@ class AsyncPruningManager:
                 
             try:
                 loop = asyncio.get_event_loop()
-                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                    # CRITICAL: Use the EXACT SAME execution path as pruning iterations
-                    # Pass the final_W_mask but use the exact same function signature
-                    future = loop.run_in_executor(
-                        executor,
-                        lambda: self._run_single_pruning_iteration_with_tolerances(
-                            final_W_mask,  # Use last_good_W_mask instead of current W_mask
-                            sim_index,
-                            device_params['rtol'],
-                            device_params['atol'],
-                            device_id,
+                # Use shared executor to maintain consistent JAX compilation context
+                future = loop.run_in_executor(
+                    self._shared_executor,
+                    lambda: self._run_single_pruning_iteration_with_tolerances(
+                        final_W_mask,  # Use last_good_W_mask instead of current W_mask
+                        sim_index,
+                        device_params['rtol'],
+                        device_params['atol'],
+                        device_id,
                             final_key  # Pass the evolved key that was saved during last_good iteration
                         )
                     )
-                    final_results = await future
+                final_results = await future
             except Exception as e:
                 async_logger.log_sim(sim_index, f"Final simulation failed: {e}", "ERROR")
                 raise
@@ -1024,10 +1058,10 @@ class AsyncPruningManager:
         # Create fallback result to prevent crash
         final_results = jnp.ones((self.sim_params.n_neurons, len(self.sim_params.t_axis))) * 0.002
         
-        # Create fallback mini_circuit (all interneurons active)
+        # Create fallback mini_circuit (all interneurons active) - streamlined device context
         with jax.default_device(target_device):
-            final_results = jax.device_put(final_results, target_device)
-            mn_mask = jax.device_put(self.mn_mask_template, target_device)
+            # Data will be created on target_device due to context, avoid redundant device_put
+            mn_mask = jnp.isin(jnp.arange(self.sim_params.n_neurons), self.neuron_params.mn_idxs)
             mini_circuit = jnp.ones(self.sim_params.n_neurons, dtype=bool) & ~mn_mask
         
         # Create dummy pruning state for fallback
@@ -1824,6 +1858,12 @@ class AsyncRegularSimManager:
         
         self.max_workers = max_workers or min(32, (self.n_devices * 2))
         
+        # Create shared thread pool executor to avoid JAX compilation context fragmentation
+        self._shared_executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=min(16, self.n_devices * 2),
+            thread_name_prefix="jax_regular"
+        )
+        
         # Pre-replicate read-only data across devices with memory efficiency
         print("Pre-replicating read-only data across devices with memory efficiency...")
         self._setup_shared_data()
@@ -2111,12 +2151,12 @@ class AsyncRegularSimManager:
             # JAX computations are blocking, so we need to run them in separate threads
             try:
                 loop = asyncio.get_event_loop()
-                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                    future = loop.run_in_executor(
-                        executor,
-                        lambda: self._run_single_regular_simulation(sim_index, device_id)
-                    )
-                    results = await future
+                # Use shared executor for consistent JAX compilation context
+                future = loop.run_in_executor(
+                    self._shared_executor,
+                    lambda: self._run_single_regular_simulation(sim_index, device_id)
+                )
+                results = await future
             except Exception as e:
                 async_logger.log_sim(sim_index, f"Simulation execution failed: {e}", "ERROR")
                 raise
