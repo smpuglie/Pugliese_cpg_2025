@@ -59,9 +59,8 @@ def reweight_connectivity(W: jnp.ndarray, exc_mult: float, inh_mult: float) -> j
 @jit
 def add_noise_to_weights(W: jnp.ndarray, key: jnp.ndarray, stdv_prop: float) -> jnp.ndarray:
     """Add truncated normal noise to weight matrix."""
-    stdvs = W * stdv_prop
     noise = sample_trunc_normal(key, mean=0.0, lower_bound=-1/stdv_prop, stdev=stdv_prop, shape=W.shape)
-    return W + stdvs * noise
+    return W + W * noise
 
 
 
