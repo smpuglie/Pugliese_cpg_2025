@@ -228,12 +228,8 @@ class AsyncPruningManager:
         gpu_devices = [d for d in self.devices if 'gpu' in str(d).lower() or 'cuda' in str(d).lower()]
         self.n_gpu_devices = len(gpu_devices)
         
-        # Primary device rotation for distributing coordination overhead
-        self.primary_device_index = 0  # Start with device 0
-        self.coordination_rotation_interval = 50  # Rotate primary device every N simulations
         
         print(f"Async Manager: {self.n_devices} total devices, {self.n_gpu_devices} GPU devices")
-        print(f"Primary device rotation: every {self.coordination_rotation_interval} simulations")
         
         # Set initial JAX default device to GPU 0 for coordination
         if self.n_gpu_devices > 0:
@@ -1102,43 +1098,6 @@ class AsyncPruningManager:
             """Get the device with the least number of active simulations."""
             return min(device_load_counts.keys(), key=lambda device_id: device_load_counts[device_id])
         
-        def get_current_primary_device(completed_count):
-            """Get the current primary device based on rotation schedule."""
-            # Rotate primary device every coordination_rotation_interval simulations
-            rotation_cycle = completed_count // self.coordination_rotation_interval
-            primary_idx = rotation_cycle % self.n_devices
-            return primary_idx
-        
-        def rotate_primary_device_if_needed(completed_count, async_logger):
-            """Check if we should rotate primary device and log the change."""
-            new_primary_idx = get_current_primary_device(completed_count)
-            if new_primary_idx != self.primary_device_index:
-                old_primary = self.primary_device_index
-                self.primary_device_index = new_primary_idx
-                
-                # ACTUAL PRIMARY DEVICE ROTATION: Change JAX's global default device
-                try:
-                    # Set the new primary device as JAX's default coordination device
-                    jax.config.update('jax_default_device', jax.devices()[new_primary_idx])
-                    async_logger.log_batch(f"🔄 JAX default device changed: GPU{old_primary} -> GPU{new_primary_idx} at sim {completed_count}")
-                    
-                    # Clear compilation caches on the old primary to prevent stale references
-                    with jax.default_device(self.devices[old_primary]):
-                        jax.clear_caches()
-                    
-                    # Warm up the new primary device
-                    with jax.default_device(self.devices[new_primary_idx]):
-                        # Small computation to initialize compilation on new primary
-                        _ = jax.device_put(jnp.ones(10), self.devices[new_primary_idx])
-                        
-                    async_logger.log_batch(f"🎯 Primary coordination responsibility transferred to GPU{new_primary_idx}")
-                    
-                except Exception as rotation_error:
-                    async_logger.log_batch(f"⚠️ JAX default device rotation failed: {rotation_error}")
-                    async_logger.log_batch(f"🔄 Primary device rotated (cleanup only): GPU{old_primary} -> GPU{new_primary_idx} at sim {completed_count}")
-                
-                return True
-            return False
         
         # Progress tracking (completed_count already set from checkpoint recovery)
         start_time = time.time()
@@ -1202,13 +1161,12 @@ class AsyncPruningManager:
                         active_sims_str = ", ".join([f"Sim{sim_idx}" for sim_idx in active_tasks.values()])
                         async_logger.log_batch(f"Active: {active_sims_str}")
                     
-                    # Show device load balancing with primary device indicator
-                    current_primary = get_current_primary_device(completed_count)
+                    # Show device load balancing
                     load_str = ", ".join([
-                        f"GPU{device_id}: {load}{'*' if device_id == current_primary else ''}" 
+                        f"GPU{device_id}: {load}" 
                         for device_id, load in device_load_counts.items()
                     ])
-                    async_logger.log_batch(f"Device loads: {load_str} (GPU{current_primary}* is primary)")
+                    async_logger.log_batch(f"Device loads: {load_str}")
                     
                     
                     last_report_time = current_time
@@ -1254,12 +1212,9 @@ class AsyncPruningManager:
                         sim_idx_result, final_results, final_state, mini_circuit, final_W_mask = result
                         
                         # Move results to CPU immediately to free GPU memory
-                        # Use current primary device for coordination-heavy data movement
-                        current_primary = get_current_primary_device(completed_count)
-                        with jax.default_device(self.devices[current_primary]):
-                            final_results = jax.device_put(final_results, jax.devices("cpu")[0])
-                            mini_circuit = jax.device_put(mini_circuit, jax.devices("cpu")[0])
-                            final_W_mask = jax.device_put(final_W_mask, jax.devices("cpu")[0])
+                        final_results = jax.device_put(final_results, jax.devices("cpu")[0])
+                        mini_circuit = jax.device_put(mini_circuit, jax.devices("cpu")[0])
+                        final_W_mask = jax.device_put(final_W_mask, jax.devices("cpu")[0])
                         
                         final_state = move_pruning_state_to_cpu(final_state)
                         
@@ -1461,13 +1416,10 @@ class AsyncPruningManager:
                 
                 # Comprehensive memory cleanup after processing completed simulations
                 if done_tasks:
-                    # Current primary device cleanup after each batch of completions
-                    # This helps manage coordination overhead that accumulates on the primary device
+                    # Memory cleanup after each batch of completions
                     if len(done_tasks) > 0:
                         try:
-                            current_primary = get_current_primary_device(completed_count)
-                            with jax.default_device(self.devices[current_primary]):
-                                jax.clear_caches()
+                            jax.clear_caches()
                         except Exception as e:
                             pass  # Silent fail to avoid log spam
                     
@@ -1488,19 +1440,13 @@ class AsyncPruningManager:
                         gc.collect()
                         async_logger.log_batch(f"🧹 Aggressive memory cleanup at sim {completed_count}")
                     
-                    # More frequent primary device-specific backend clearing to handle coordination overhead
+                    # More frequent backend clearing
                     if completed_count > 0 and completed_count % 10 == 0:
                         try:
-                            # Check if we should rotate the primary device
-                            rotate_primary_device_if_needed(completed_count, async_logger)
-                            
-                            # Current primary device often accumulates compilation cache from coordination tasks
-                            current_primary = get_current_primary_device(completed_count)
-                            with jax.default_device(self.devices[current_primary]):
-                                jax.clear_caches()
-                            async_logger.log_batch(f"🎯 Primary device (GPU{current_primary}) backend clearing at sim {completed_count}")
+                            jax.clear_caches()
+                            async_logger.log_batch(f"🧧 Backend clearing at sim {completed_count}")
                         except Exception as e:
-                            async_logger.log_batch(f"⚠️ Primary device backend clearing failed: {e}")
+                            async_logger.log_batch(f"⚠️ Backend clearing failed: {e}")
                     
                     # Log memory cleanup
                     if len(done_tasks) > 0:
@@ -1551,14 +1497,12 @@ class AsyncPruningManager:
         try:
 
                 
-                # Additional cleanup for current primary device coordination overhead
+                # Additional cleanup
                 try:
-                    current_primary = get_current_primary_device(completed_count)
-                    with jax.default_device(self.devices[current_primary]):
-                        jax.clear_caches()
-                    async_logger.log_batch(f"🎯 Final primary device (GPU{current_primary}) backend clearing completed")
-                except Exception as gpu_primary_e:
-                    async_logger.log_batch(f"⚠️ Primary device cleanup failed: {gpu_primary_e}")
+                    jax.clear_caches()
+                    async_logger.log_batch(f"🧧 Final backend clearing completed")
+                except Exception as gpu_cleanup_e:
+                    async_logger.log_batch(f"⚠️ Final cleanup failed: {gpu_cleanup_e}")
                     
         except Exception as e:
             async_logger.log_batch(f"Warning: Could not clear JAX backends: {e}")
@@ -1842,12 +1786,8 @@ class AsyncRegularSimManager:
         gpu_devices = [d for d in self.devices if 'gpu' in str(d).lower() or 'cuda' in str(d).lower()]
         self.n_gpu_devices = len(gpu_devices)
         
-        # Primary device rotation for distributing coordination overhead
-        self.primary_device_index = 0  # Start with device 0
-        self.coordination_rotation_interval = 25  # Rotate primary device every N simulations
         
         print(f"Async Regular Sim Manager: {self.n_devices} total devices, {self.n_gpu_devices} GPU devices")
-        print(f"Primary device rotation: every {self.coordination_rotation_interval} simulations")
         
         # Initialize CUDA contexts with memory pre-allocation
         try:
