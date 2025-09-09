@@ -32,6 +32,8 @@ hydra:
           - load_jobid
           - note
           - sim.noise
+          - experiment.n_replicates
+          - experiment.batch_size
 
   run:
     dir: ${paths.base_dir}/run_id=${run_id}

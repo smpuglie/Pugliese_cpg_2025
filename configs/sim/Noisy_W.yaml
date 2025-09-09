@@ -1,13 +1,13 @@
-# Noisy input configuration for the simulation
+# Noisy W configuration for the simulation
 T: 2.0
 dt: 0.001
 pulseStart: 0.02
 pulseEnd: 1.999
 shuffle: False
-noise: False
+noise: True
 noiseStdvProp: 0.1 
 noiseMean: 0.0 # Mean of input noise
-noiseStdv: 0.1 # Standard deviation of input noise
+noiseStdv: 0.0 # Standard deviation of input noise
 prune_network: False
 adjustStimI: False
 max_adjustment_iters: 10 # Maximum iterations for simulation with adjusted stimulus current
@@ -18,7 +18,7 @@ high_fr_threshold: 100.0 # Upper limit for high frequency neurons
 rtol: 2e-6
 atol: 5e-9
 # Checkpointing configuration
-enable_checkpointing: False # Enable intermediate checkpointing
+enable_checkpointing: True # Enable intermediate checkpointing
 checkpoint_interval: 100 # Save checkpoint every N batches (set to 1 to save after each batch)
 
 async_mode: "streaming"  # Options: "sync", "streaming"

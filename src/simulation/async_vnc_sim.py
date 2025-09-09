@@ -2433,6 +2433,12 @@ class AsyncRegularSimManager:
                             f"Rate: {rate:.2f} sims/sec, ETA: {eta/60:.1f} min | "
                             f"RAM: {memory_percent:.1f}% used, {available_gb:.1f}GB free{gpu_memory_status}{memory_warning}"
                         )
+
+                        try:
+                            log_detailed_gpu_status(lambda msg: async_logger.log_batch(msg), "GPU Detail: ")
+                        except:
+                            pass
+
                     except:
                         # Fallback without memory monitoring
                         async_logger.log_batch(
@@ -2564,7 +2570,6 @@ class AsyncRegularSimManager:
                 # Memory cleanup after processing completed simulations
                 if done_tasks:
                     jax.clear_caches()
-                    import gc
                     gc.collect()
                 
                 # Start new simulations to fill available slots
@@ -2612,7 +2617,6 @@ class AsyncRegularSimManager:
                     pass  # This forces device synchronization
                     
             # Additional memory cleanup
-            import gc
             gc.collect()
             
             # Memory manager cleanup
@@ -2756,6 +2760,11 @@ class AsyncRegularSimManager:
                             f"Rate: {rate:.2f} sims/sec, ETA: {eta/60:.1f} min | "
                             f"RAM: {memory_percent:.1f}% used, {available_gb:.1f}GB free{gpu_memory_status}{memory_warning}"
                         )
+
+                        try:
+                            log_detailed_gpu_status(lambda msg: async_logger.log_batch(msg), "GPU Detail: ")
+                        except:
+                            pass
                     except:
                         # Fallback without memory monitoring
                         async_logger.log_batch(
@@ -3164,7 +3173,6 @@ def run_streaming_regular_simulation(
                 # Perform memory cleanup before attempting to load checkpoint
                 print("🧹 Pre-loading memory cleanup...")
                 jax.clear_caches()
-                import gc
                 for _ in range(3):
                     gc.collect()
                     
