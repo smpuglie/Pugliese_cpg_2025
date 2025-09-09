@@ -231,13 +231,10 @@ class AsyncPruningManager:
         
         print(f"Async Manager: {self.n_devices} total devices, {self.n_gpu_devices} GPU devices")
         
-        # Set initial JAX default device to GPU 0 for coordination
-        if self.n_gpu_devices > 0:
-            try:
-                jax.config.update('jax_default_device', jax.devices()[0])
-                print(f"JAX default device set to: {jax.devices()[0]}")
-            except Exception as e:
-                print(f"Warning: Could not set JAX default device: {e}")
+        # Device rotation counter for distributing coordination tasks
+        self._device_rotation_counter = 0
+        # Let JAX handle default device selection automatically
+        print(f"JAX will distribute operations across {self.n_gpu_devices} GPU devices")
         
         # Add memory pre-allocation to avoid CUDA initialization issues
         try:
@@ -364,6 +361,14 @@ class AsyncPruningManager:
     def _get_device_functions(self, device_id: int):
         """Get the device-specific parameters for a device."""
         return self.device_functions[device_id]
+    
+    def _get_next_coordination_device(self):
+        """Get the next device for coordination tasks to distribute load."""
+        if self.n_gpu_devices > 0:
+            device_id = self._device_rotation_counter % self.n_gpu_devices
+            self._device_rotation_counter += 1
+            return self.devices[device_id]
+        return jax.devices("cpu")[0]
     
     def _create_jit_simulation_function(self, device_id: int):
         """Create a JIT-compiled simulation function for a specific device."""
@@ -987,7 +992,9 @@ class AsyncPruningManager:
             "COMPLETE")
 
         # Cleanup JAX caches and force garbage collection
-        with jax.default_device(target_device):
+        # Use distributed coordination to avoid overloading target_device
+        coord_device = self._get_next_coordination_device()
+        with jax.default_device(coord_device):
             jax.clear_caches()
             gc.collect()
 
@@ -1212,9 +1219,12 @@ class AsyncPruningManager:
                         sim_idx_result, final_results, final_state, mini_circuit, final_W_mask = result
                         
                         # Move results to CPU immediately to free GPU memory
-                        final_results = jax.device_put(final_results, jax.devices("cpu")[0])
-                        mini_circuit = jax.device_put(mini_circuit, jax.devices("cpu")[0])
-                        final_W_mask = jax.device_put(final_W_mask, jax.devices("cpu")[0])
+                        # Use distributed coordination device to avoid GPU0 overload
+                        coord_device = self._get_next_coordination_device()
+                        with jax.default_device(coord_device):
+                            final_results = jax.device_put(final_results, jax.devices("cpu")[0])
+                            mini_circuit = jax.device_put(mini_circuit, jax.devices("cpu")[0])
+                            final_W_mask = jax.device_put(final_W_mask, jax.devices("cpu")[0])
                         
                         final_state = move_pruning_state_to_cpu(final_state)
                         
@@ -1353,9 +1363,11 @@ class AsyncPruningManager:
                         failed_sims.add(sim_idx)
                         async_logger.log_batch(f"❌ Failed Sim {sim_idx} on device {device_id} (load: {device_load_counts[device_id]}): {str(e)}")
                         
-                        # Create proper empty results for failed simulation
+                        # Create proper empty results for failed simulation using distributed device context
                         # Match the format of successful simulation results
-                        empty_result = jnp.zeros((self.sim_params.n_neurons, len(self.sim_params.t_axis)))
+                        coord_device = self._get_next_coordination_device()
+                        with jax.default_device(coord_device):
+                            empty_result = jnp.zeros((self.sim_params.n_neurons, len(self.sim_params.t_axis)))
                         
                         # Create empty mini_circuit (all interneurons inactive)
                         mn_mask = jnp.isin(jnp.arange(self.sim_params.n_neurons), self.neuron_params.mn_idxs)
@@ -1406,8 +1418,10 @@ class AsyncPruningManager:
                         results_dict[sim_idx] = empty_result
                         states_dict[sim_idx] = empty_state
                         mini_circuits_dict[sim_idx] = empty_mini_circuit
-                        # Add empty W_mask for failed simulations to prevent KeyError
-                        empty_W_mask = jnp.ones((self.sim_params.n_neurons, self.sim_params.n_neurons), dtype=jnp.bool)
+                        # Add empty W_mask for failed simulations using distributed device context
+                        coord_device = self._get_next_coordination_device()
+                        with jax.default_device(coord_device):
+                            empty_W_mask = jnp.ones((self.sim_params.n_neurons, self.sim_params.n_neurons), dtype=jnp.bool)
                         empty_W_mask = jax.device_put(empty_W_mask, jax.devices("cpu")[0])
                         w_masks_dict[sim_idx] = empty_W_mask
                         
@@ -1433,9 +1447,10 @@ class AsyncPruningManager:
                     # Aggressive memory cleanup every 50 simulations to prevent OOM
                     if completed_count > 0 and completed_count % 50 == 0:
                         # Force more aggressive cleanup for long-running simulations
-                        for device_id in range(self.n_devices):
-                            with jax.default_device(jax.devices()[device_id]):
-                                jax.clear_caches()
+                        # Use distributed device clearing to avoid GPU0 overload
+                        coord_device = self._get_next_coordination_device()
+                        with jax.default_device(coord_device):
+                            jax.clear_caches()
 
                         gc.collect()
                         async_logger.log_batch(f"🧹 Aggressive memory cleanup at sim {completed_count}")
@@ -1509,10 +1524,10 @@ class AsyncPruningManager:
         
         # GPU memory cleanup  
         try:
-            # Force GPU synchronization and cleanup
-            for device_id in range(self.n_devices):
-                with jax.default_device(jax.devices()[device_id]):
-                    jax.clear_caches()
+            # Force GPU synchronization and cleanup using distributed coordination
+            coord_device = self._get_next_coordination_device()
+            with jax.default_device(coord_device):
+                jax.clear_caches()
 
             # Additional memory cleanup
             gc.collect()
@@ -1789,6 +1804,9 @@ class AsyncRegularSimManager:
         
         print(f"Async Regular Sim Manager: {self.n_devices} total devices, {self.n_gpu_devices} GPU devices")
         
+        # Device rotation counter for distributing coordination tasks
+        self._device_rotation_counter = 0
+        
         # Initialize CUDA contexts with memory pre-allocation
         try:
             for i, device in enumerate(self.devices[:self.n_gpu_devices]):
@@ -1866,6 +1884,14 @@ class AsyncRegularSimManager:
     def _get_device_for_sim(self, sim_index: int) -> int:
         """Assign a device to a simulation based on its index."""
         return sim_index % self.n_devices
+    
+    def _get_next_coordination_device(self):
+        """Get the next device for coordination tasks to distribute load."""
+        if self.n_gpu_devices > 0:
+            device_id = self._device_rotation_counter % self.n_gpu_devices
+            self._device_rotation_counter += 1
+            return self.devices[device_id]
+        return jax.devices("cpu")[0]
     
     def _create_jit_simulation_function(self, device_id: int, r_tol: float, a_tol: float, sim_type: str):
         """Create a JIT-compiled simulation function for a specific device and simulation type."""
@@ -2102,16 +2128,20 @@ class AsyncRegularSimManager:
                 f"Completed - max activity: {max_activity:.3f}, active neurons: {active_neurons}", 
                 "COMPLETE")
             
-            # Move results to CPU to free GPU memory
-            results = jax.device_put(results, jax.devices("cpu")[0])
+            # Move results to CPU to free GPU memory using distributed coordination
+            coord_device = self._get_next_coordination_device()
+            with jax.default_device(coord_device):
+                results = jax.device_put(results, jax.devices("cpu")[0])
             
             return sim_index, results
             
         except Exception as e:
             async_logger.log_sim(sim_index, f"Failed: {e}", "ERROR")
             
-            # Create fallback result
-            fallback_result = jnp.zeros((self.sim_params.n_neurons, len(self.sim_params.t_axis)))
+            # Create fallback result using distributed device context
+            coord_device = self._get_next_coordination_device()
+            with jax.default_device(coord_device):
+                fallback_result = jnp.zeros((self.sim_params.n_neurons, len(self.sim_params.t_axis)))
             fallback_result = jax.device_put(fallback_result, jax.devices("cpu")[0])
             return sim_index, fallback_result
         
@@ -2282,8 +2312,10 @@ class AsyncRegularSimManager:
                         if hasattr(checkpoint_state, 'results_dict') and checkpoint_state.results_dict:
                             results_dict[sim_idx] = checkpoint_state.results_dict[sim_idx]
                         else:
-                            # Create placeholder result for completed simulations without stored results
-                            placeholder_result = jnp.zeros((self.sim_params.n_neurons, len(self.sim_params.t_axis)))
+                            # Create placeholder result using distributed device context
+                            coord_device = self._get_next_coordination_device()
+                            with jax.default_device(coord_device):
+                                placeholder_result = jnp.zeros((self.sim_params.n_neurons, len(self.sim_params.t_axis)))
                             placeholder_result = jax.device_put(placeholder_result, jax.devices("cpu")[0])
                             results_dict[sim_idx] = placeholder_result
                     
@@ -2411,8 +2443,10 @@ class AsyncRegularSimManager:
                         result = await task
                         sim_idx_result, final_results = result
                         
-                        # Move results to CPU immediately to free GPU memory
-                        final_results = jax.device_put(final_results, jax.devices("cpu")[0])
+                        # Move results to CPU immediately to free GPU memory using distributed coordination
+                        coord_device = self._get_next_coordination_device()
+                        with jax.default_device(coord_device):
+                            final_results = jax.device_put(final_results, jax.devices("cpu")[0])
                         
                         results_dict[sim_idx] = final_results
                         
@@ -2479,9 +2513,11 @@ class AsyncRegularSimManager:
                         failed_sims.add(sim_idx)
                         async_logger.log_batch(f"❌ Failed Sim {sim_idx} on device {device_id}: {str(e)}")
                         
-                        # Create empty result for failed simulation
-                        empty_result = jnp.zeros((self.sim_params.n_neurons, len(self.sim_params.t_axis)))
-                        empty_result = jax.device_put(empty_result, jax.devices("cpu")[0])
+                        # Create empty result for failed simulation using distributed coordination
+                        coord_device = self._get_next_coordination_device()
+                        with jax.default_device(coord_device):
+                            empty_result = jnp.zeros((self.sim_params.n_neurons, len(self.sim_params.t_axis)))
+                            empty_result = jax.device_put(empty_result, jax.devices("cpu")[0])
                         results_dict[sim_idx] = empty_result
                         del empty_result
                 
@@ -2725,8 +2761,10 @@ class AsyncRegularSimManager:
                         result = await task
                         sim_idx_result, final_results = result
                         
-                        # Move results to CPU immediately to free GPU memory
-                        final_results = jax.device_put(final_results, jax.devices("cpu")[0])
+                        # Move results to CPU immediately to free GPU memory using distributed coordination
+                        coord_device = self._get_next_coordination_device()
+                        with jax.default_device(coord_device):
+                            final_results = jax.device_put(final_results, jax.devices("cpu")[0])
                         
                         # Analyze activity levels for this simulation
                         max_rates = jnp.max(final_results, axis=-1)  # (n_neurons,)
@@ -2878,9 +2916,11 @@ class AsyncRegularSimManager:
                         completed_count += 1
                         async_logger.log_batch(f"❌ Failed Sim {sim_idx} on device {device_id}: {str(e)}")
                         
-                        # Create empty result for failed simulation
-                        empty_result = jnp.zeros((self.sim_params.n_neurons, len(self.sim_params.t_axis)))
-                        empty_result = jax.device_put(empty_result, jax.devices("cpu")[0])
+                        # Create empty result for failed simulation using distributed coordination
+                        coord_device = self._get_next_coordination_device()
+                        with jax.default_device(coord_device):
+                            empty_result = jnp.zeros((self.sim_params.n_neurons, len(self.sim_params.t_axis)))
+                            empty_result = jax.device_put(empty_result, jax.devices("cpu")[0])
                         results_dict[sim_idx] = empty_result
                         del empty_result
                 
@@ -2973,10 +3013,12 @@ class AsyncRegularSimManager:
             if isinstance(task_result, Exception):
                 failed_sims.append(sim_idx)
                 async_logger.log_batch(f"❌ Batch sim {sim_idx} failed: {task_result}")
-                # Create empty result for failed simulation
-                empty_result = jnp.zeros((self.sim_params.n_neurons, len(self.sim_params.t_axis)))
-                empty_result = jax.device_put(empty_result, jax.devices("cpu")[0])
-                batch_results.append(empty_result)
+                # Create empty result for failed simulation using distributed coordination
+                coord_device = self._get_next_coordination_device()
+                with jax.default_device(coord_device):
+                    empty_result = jnp.zeros((self.sim_params.n_neurons, len(self.sim_params.t_axis)))
+                    empty_result = jax.device_put(empty_result, jax.devices("cpu")[0])
+                    batch_results.append(empty_result)
             else:
                 result_sim_idx, result_array = task_result
                 batch_results.append(result_array)
