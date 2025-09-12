@@ -1761,11 +1761,10 @@ def prepare_neuron_params(cfg: DictConfig, W_table: Any, param_path: Optional[Pa
         print(f"Initial removal of neurons at indices: {cfg.experiment.removeNeurons}")
     elif len(cfg.experiment.keepOnly) > 0:
         mn_mask = jnp.isin(jnp.arange(n_neurons), mn_idxs)
-        keep_neurons = jnp.zeros(n_neurons, dtype=jnp.bool_)
-        keep_neurons = keep_neurons.at[jnp.asarray(cfg.experiment.keepOnly)].set(True)
+        keep_neurons = jnp.zeros((num_sims, n_neurons), dtype=jnp.bool_)
+        keep_neurons = keep_neurons.at[:, jnp.asarray(cfg.experiment.keepOnly)].set(True)
         keep_neurons = jnp.where(keep_neurons | mn_mask, True, False)
-        W_mask = W_mask.at[:, keep_neurons, :].set(True)
-        W_mask = W_mask.at[:, :, keep_neurons].set(True)
+        W_mask = keep_neurons[:, None, :] & keep_neurons[:,:,None]
         print(f"Initial keeping of neurons at indices: {cfg.experiment.keepOnly}")
     if (param_path is not None) and param_path.exists():
         import src.utils.io_dict_to_hdf5 as ioh5
@@ -1774,7 +1773,7 @@ def prepare_neuron_params(cfg: DictConfig, W_table: Any, param_path: Optional[Pa
         return NeuronParams(**nparams)
     else:
         return NeuronParams(
-            W=W, W_mask=W_mask, tau=tau, a=a, threshold=threshold, fr_cap=fr_cap,
+            W=W, W_mask=W_mask.astype(jnp.bool_), tau=tau, a=a, threshold=threshold, fr_cap=fr_cap,
             input_currents=input_currents, seeds=seeds,
             exc_dn_idxs=exc_dn_idxs, inh_dn_idxs=inh_dn_idxs,
             exc_in_idxs=exc_in_idxs, inh_in_idxs=inh_in_idxs, mn_idxs=mn_idxs,
@@ -1816,7 +1815,7 @@ def parse_simulation_config(cfg: DictConfig) -> SimulationConfig:
         sim_type = "shuffle"
     elif getattr(cfg.sim, "noise", False):
         sim_type = "noise"
-    elif getattr(cfg.sim, "prune_network", False) | (len(cfg.experiment.removeNeurons) > 0):
+    elif getattr(cfg.sim, "prune_network", False) | (len(cfg.experiment.removeNeurons) > 0) | (len(cfg.experiment.keepOnly) > 0):
         sim_type = "Wmask"
     
     # Check if pruning is enabled
