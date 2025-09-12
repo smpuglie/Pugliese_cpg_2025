@@ -1,4 +1,4 @@
-name: vnc_cpg
+name: vnc_net
 channels:
   - conda-forge
 dependencies:
