@@ -16,8 +16,8 @@ n_active_upper: 500 # Upper limit for active neurons
 n_active_lower: 5 # Lower limit for active neurons
 n_high_fr_upper: 100 # Upper limit for high frequency neurons
 high_fr_threshold: 100.0 # Upper limit for high frequency neurons
-rtol: 1e-7
-atol: 1e-9
+rtol: 2e-6
+atol: 5e-9
 # Checkpointing configuration
 enable_checkpointing: True # Enable intermediate checkpointing
 checkpoint_interval: 100 # Save checkpoint every N batches (set to 1 to save after each batch)
