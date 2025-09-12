@@ -5,7 +5,6 @@ num_gpus: ''
 run_id: 'walle'
 load_jobid: ''
 note: ''
-ckpt_list: []
 
 # set default task and default training config based on dataset
 defaults:
@@ -32,6 +31,8 @@ hydra:
           - load_jobid
           - note
           - sim.noise
+          - experiment.n_replicates
+          - experiment.batch_size
 
   run:
     dir: ${paths.base_dir}/run_id=${run_id}
