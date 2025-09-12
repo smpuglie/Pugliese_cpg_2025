@@ -286,6 +286,7 @@ def compute_oscillation_score(activity, active_mask, prominence=0.05):
     
     # Calculate mean over active neurons only
     num_active = jnp.sum(active_mask)
+    num_active_freq = jnp.sum(active_mask & (frequencies > 0.0) & jnp.isfinite(frequencies))
     
     # Sum scores for active neurons
     active_score_sum = jnp.sum(score_values * active_mask)
@@ -297,9 +298,10 @@ def compute_oscillation_score(activity, active_mask, prominence=0.05):
         active_score_sum / num_active,
         0.0
     )
+    
     mean_frequency = jnp.where(
         num_active > 0,
-        active_freq_sum / num_active,
+        active_freq_sum / num_active_freq,
         0.0
     )
     
