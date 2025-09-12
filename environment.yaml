@@ -1,4 +1,4 @@
-name: vnc_net
+name: vnc-sim
 channels:
   - conda-forge
 dependencies:
