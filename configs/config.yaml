@@ -1,18 +1,16 @@
 ##### Easy Access Variables #####
 # if set to positive integer, overrides the default
 version: 'debug'
-num_gpus: ''
 run_id: 'Testing'
 load_jobid: ''
 note: ''
-ckpt_list: []
 
 # set default task and default training config based on dataset
 defaults:
   - _self_
   - experiment: DNg100_Stim
   - neuron_params: default
-  - paths: glados
+  - paths: glados # change to your desired path config
   - sim: default
 
 

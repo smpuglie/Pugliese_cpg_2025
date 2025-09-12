@@ -19,17 +19,6 @@ def submit(gpus, partition, job_name, mem, cpus, time, note, experiment, sim, mo
     """
     Construct and submit the SLURM script with the specified parameters.
     """
-        # Define GPU configurations
-    gpu_configs = {
-        'a100': 'gpu:a100:8',
-        'h100': 'nvidia_h100_80gb_hbm3',
-        'a40': 'gpu:a40:8',
-        'l40': 'gpu:l40:8', 
-        'l40s': 'gpu:l40s:8', 
-        # Add more GPU types here if needed
-    }
-
-    gpu_resource = f"gpu:{gpu_configs[gpu_type]}:{gpus}"
 
     """Submit job to cluster."""
     script = f"""#!/bin/bash
@@ -52,7 +41,7 @@ module load cuda/12.6.3
 set -x
 source ~/.bashrc
 nvidia-smi
-conda activate bdn2cpg
+conda activate vnc_cpg
 unset LD_LIBRARY_PATH
 echo $SLURMD_NODENAME
 python -u ./src/run_hydra.py hydra.mode={mode} paths=hyak note={note} version=hyak experiment={experiment} sim={sim} load_jobid={load_jobid} run_id=$SLURM_JOB_ID {override}

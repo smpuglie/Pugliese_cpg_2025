@@ -1,0 +1,65 @@
+[build-system]
+requires = ["setuptools>=66.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vncNet"
+version = "0.1.0"
+description = "VNC Network Simulation with JAX/JIT implementation"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.8"
+authors = [
+    {name = "Your Name", email = "your.email@example.com"}
+]
+keywords = ["neural networks", "simulation", "jax", "neuroscience"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    "jax",
+    "jaxlib",
+    "numpy",
+    "diffrax",
+    "omegaconf",
+    "psutil",
+    "hydra-core",
+    "h5py",
+    "matplotlib",
+    "scipy",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "black",
+    "flake8",
+    "mypy",
+]
+
+[project.urls]
+Homepage = "https://github.com/smpuglie/Pugliese_2025"
+Repository = "https://github.com/smpuglie/Pugliese_2025"
+Issues = "https://github.com/smpuglie/Pugliese_2025/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]  
+include = ["src*"]
+
+[tool.black]
+line-length = 88
+target-version = ['py311']
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true

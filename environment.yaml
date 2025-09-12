@@ -1,15 +1,13 @@
-name: bdn2cpg
+name: vnc_cpg
 channels:
   - conda-forge
 dependencies:
   - jupyter
   - matplotlib
-  - numba
   - numpy
   - pandas
   - scikit-learn
   - scipy
-  - seaborn
   - omegaconf
   - sparse
   - pip
