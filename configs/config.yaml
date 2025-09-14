@@ -1,7 +1,8 @@
 ##### Easy Access Variables #####
 # if set to positive integer, overrides the default
-version: 'debug'
-run_id: 'Testing'
+version: 'walle-smpuglie'
+num_gpus: ''
+run_id: 'walle'
 load_jobid: ''
 note: ''
 
@@ -10,7 +11,7 @@ defaults:
   - _self_
   - experiment: DNg100_Stim
   - neuron_params: default
-  - paths: glados # change to your desired path config
+  - paths: walle-smpuglie
   - sim: default
 
 

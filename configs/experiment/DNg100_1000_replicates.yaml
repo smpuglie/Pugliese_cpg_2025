@@ -1,0 +1,17 @@
+# This is the default configuration for the experiment.
+name: DNg100_1000_replicates_reducedNet
+
+wPath: ${paths.data_dir}/manc t1 connectome data/W_20250724_DNtoMN_unsorted.csv
+dfPath: ${paths.data_dir}/manc t1 connectome data/wTable_20250724_DNtoMN_unsorted_withModules.csv
+n_replicates: 1000
+batch_size: 50
+dn_screen: False
+stimNeurons: 
+  - [25]
+removeNeurons: []
+stimI: 
+  - [250]
+seed: 1336
+saveFigs: False
+useTsp: False
+save_checkpoints: False

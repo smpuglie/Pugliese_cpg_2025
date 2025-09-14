@@ -33,7 +33,7 @@ def sort_motor_modules(neuronData,colName="motor module"):
     return neuronData.sort_values(by=colName)
 
 def get_active_data(R,neuronData):
-    return neuronData.loc[neuronData.index[np.where(np.sum(R,1)>1)]]
+    return neuronData.loc[neuronData.index[np.where(np.max(R,1)>0)]]
 
 def neuron_plot_labels(neuronData,fanc=False):
     if fanc:
@@ -144,11 +144,11 @@ def plot_R_traces_stacked_by_module(R,neuronData,colorMapper=None,figsize=(6,4),
     ax.set_facecolor("None")
     ax.legend(loc="upper left",bbox_to_anchor=[1,1],edgecolor="None",facecolor="None")
     xlimits = ax.get_xlim()
-    plt.vlines(xlimits[0],0,space,"k")
+    # plt.vlines(xlimits[0],0,space,"k")
     plt.yticks([0,space])
     plt.xlim(xlimits)
     ax.spines[["left","top","right"]].set_visible(False)
-    ax.grid(axis="x",color="lightgrey",linestyle="--")
+    # ax.grid(axis="x",color="lightgrey",linestyle="--")
     fig = plt.gcf()
     fig.set_figheight(0.5*nTraces)
 
