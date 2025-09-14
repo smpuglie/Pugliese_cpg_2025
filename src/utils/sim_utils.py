@@ -301,7 +301,8 @@ def compute_oscillation_score(activity, active_mask, prominence=0.05):
     mean_frequency = jnp.where(
         num_active > 0,
         #active_freq_sum / num_active,
-        jnp.nanmean(jnp.where(jnp.isinf(frequencies),jnp.nan,frequencies)), # I think this is better? Will have to test
+        # jnp.nanmean(jnp.where(jnp.isinf(frequencies),jnp.nan,frequencies)), # I think this is better? Will have to test
+        jnp.nanmean(jnp.where((jnp.isinf(frequencies) | (frequencies==0.0)),jnp.nan,frequencies)),
         0.0
     )
     
