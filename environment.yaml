@@ -11,6 +11,7 @@ dependencies:
   - omegaconf
   - sparse
   - pip
+  - seaborn
   - pip:
     - "--editable=."
     - hydra-core
