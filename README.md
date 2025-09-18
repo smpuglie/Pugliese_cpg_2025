@@ -1,6 +1,6 @@
 # VNC Network Simulation
 
-A JAX/JIT implementation for VNC (Ventral Nerve Cord) Connectome network simulation accompanying the preprint ["Connectome simulations identify a central pattern generator circuit for fly walking"](https://www.biorxiv.org/content/10.1101/2025.09.12.675944v1) (Pugliese et al. 2025, biorXiv). Simulation data is available on [Google Drive](https://drive.google.com/drive/folders/1Dgy5W8VZsayL8iVCRC3yfBJIpfxNJkO0?usp=sharing).  We have included Jupyter notebooks that simply load this data to reproduce the analyses, as well as the codebase to run simulations for yourself (see below). This repository is currently a work in progress, please check back for updates!! 🪰
+A JAX/JIT implementation for VNC (Ventral Nerve Cord) Connectome network simulation accompanying the preprint ["Connectome simulations identify a central pattern generator circuit for fly walking"](https://www.biorxiv.org/content/10.1101/2025.09.12.675944v1) (Pugliese et al. 2025, biorXiv). Simulation data is available on [Google Drive](https://drive.google.com/drive/folders/1Dgy5W8VZsayL8iVCRC3yfBJIpfxNJkO0?usp=sharing).  We have included Jupyter notebooks that simply load this data to reproduce the analyses, as well as the codebase to run simulations for yourself (see below). We also have two notebooks that will help demonstrate how to run simulations yourself, `Run simple simulations in a notebook.ipynb` and `Basic_Usage.ipynb`. This repository is currently a work in progress, please check back for updates!! 🪰
 
 ## Installation
 
