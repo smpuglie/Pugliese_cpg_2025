@@ -339,7 +339,7 @@ def load_config_with_path_template(config_path, paths_template=None, experiment=
     
     return cfg
 
-def create_fresh_config_with_paths(experiment, paths_template="glados", version="debug", run_id="Testing", config_dir="../configs", verbose=True):
+def create_fresh_config_with_paths(experiment, paths_template="glados", version="debug", run_id="Testing", config_dir="../../configs", verbose=True):
     """
     Create a fresh config using Hydra with specified paths template.
     
