@@ -1,0 +1,7 @@
+base_dir: /home/smpuglie/Pugliese_2025/data/simulation output
+ckpt_dir: ${paths.save_dir}/ckpt/
+cwd_dir: /home/smpuglie/Pugliese_2025
+data_dir: /home/smpuglie/Pugliese_2025/data/
+fig_dir: ${paths.save_dir}/figures/
+log_dir: ${paths.save_dir}/logs/
+save_dir: ${paths.base_dir}/run_id=${run_id}

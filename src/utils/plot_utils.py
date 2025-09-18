@@ -35,17 +35,20 @@ def sort_motor_modules(neuronData,colName="motor module"):
 def get_active_data(R,neuronData):
     return neuronData.loc[neuronData.index[np.where(np.max(R,1)>0)]]
 
-def neuron_plot_labels(neuronData,fanc=False):
-    if fanc:
-        # label = [f'{neuronData.loc[i,"w_type"].replace("_"," ")} ({neuronData.loc[i,"pt_root_id"]})' for i in neuronData.index]
-        label = [f'{neuronData.loc[i,"w_type"].replace("_"," ")}' for i in neuronData.index]
+def neuron_plot_labels(neuronData,fanc=False,labels=True):
+    if not labels:
+        return [""]*len(neuronData)
     else:
-        label = [f'{neuronData.loc[i,"somaSide"][0]} {neuronData.loc[i,"type"]} ({neuronData.loc[i,"bodyId"]})' for i in neuronData.index]
-        # label = [f'{neuronData.loc[i,"type"]}' for i in neuronData.index]
+        if fanc:
+            # label = [f'{neuronData.loc[i,"w_type"].replace("_"," ")} ({neuronData.loc[i,"pt_root_id"]})' for i in neuronData.index]
+            label = [f'{neuronData.loc[i,"w_type"].replace("_"," ")}' for i in neuronData.index]
+        else:
+            label = [f'{neuronData.loc[i,"somaSide"][0]} {neuronData.loc[i,"type"]} ({neuronData.loc[i,"bodyId"]})' for i in neuronData.index]
+            # label = [f'{neuronData.loc[i,"type"]}' for i in neuronData.index]
 
-    return label
+        return label
 
-def plot_R_heatmap(R,neuronData,figsize=None,cmap="viridis",activeOnly=False,fanc=False,ax=None):
+def plot_R_heatmap(R,neuronData,figsize=None,cmap="viridis",activeOnly=False,fanc=False,ax=None,labels=True):
     """plots a heatmap of rate data (R) over time for the neurons in neuronData"""
     if "motor module" in neuronData:
         # make it so that motor module sorts from proximal to distal leg
@@ -73,7 +76,7 @@ def plot_R_heatmap(R,neuronData,figsize=None,cmap="viridis",activeOnly=False,fan
 
     return ax
 
-def plot_R_traces(R,neuronData,cmap="tab10",figsize=(6,4),activeOnly=False,colors=None,fanc=False,ax=None):
+def plot_R_traces(R,neuronData,cmap="tab10",figsize=(6,4),activeOnly=False,colors=None,fanc=False,ax=None,labels=True):
 
     idxs = neuronData.index
     # R = R[idxs]
@@ -94,16 +97,17 @@ def plot_R_traces(R,neuronData,cmap="tab10",figsize=(6,4),activeOnly=False,color
         except:
             colors = cmap.resampled(len(neuronData)+1)
         for i in range(len(idxs)):
-            ax.plot(R[i],c=colors(i),label=neuron_plot_labels(neuronData.iloc[[i]],fanc=fanc)[0])
+            ax.plot(R[i],c=colors(i),label=neuron_plot_labels(neuronData.iloc[[i]],fanc=fanc,labels=labels)[0])
     else:
         for i in range(len(idxs)):
-            ax.plot(R[i],c=colors[i],label=neuron_plot_labels(neuronData.iloc[[i]],fanc=fanc)[0])
+            ax.plot(R[i],c=colors[i],label=neuron_plot_labels(neuronData.iloc[[i]],fanc=fanc,labels=labels)[0])
     
     ax = plt.gca()
     ax.set_xticks([])
     ax.set_ylabel("firing rate")
     ax.set_facecolor("None")
-    ax.legend(loc="upper left",bbox_to_anchor=[1,1],edgecolor="None",facecolor="None")
+    if labels:
+        ax.legend(loc="upper left",bbox_to_anchor=[1,1],edgecolor="None",facecolor="None")
     plt.gcf().set_figheight(figsize[1])
     plt.gcf().set_figwidth(figsize[0])
 
