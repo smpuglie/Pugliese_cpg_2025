@@ -19,7 +19,7 @@ A JAX/JIT implementation for VNC (Ventral Nerve Cord) Connectome network simulat
 
 2. **Create and activate the conda environment**
    ```bash
-   conda env create -f environment.yml
+   conda env create -f environment.yaml
    conda activate vnc_cpg
    ```
 
