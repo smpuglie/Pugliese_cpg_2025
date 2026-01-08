@@ -1734,8 +1734,8 @@ def prepare_neuron_params(cfg: DictConfig, W_table: Any, param_path: Optional[Pa
     # Initialize W_mask for pruning if needed
     W_mask = jnp.ones((num_sims, W.shape[0], W.shape[1]), dtype=jnp.bool_)
     if len(cfg.experiment.removeNeurons) > 0:
-        W_mask = W_mask.at[:, cfg.experiment.removeNeurons, :].set(False)
-        W_mask = W_mask.at[:, :, cfg.experiment.removeNeurons].set(False)
+        W_mask = W_mask.at[:, jnp.asarray(cfg.experiment.removeNeurons), :].set(False)
+        W_mask = W_mask.at[:, :, jnp.asarray(cfg.experiment.removeNeurons)].set(False)
         print(f"Initial removal of neurons at indices: {cfg.experiment.removeNeurons}")
     elif len(cfg.experiment.keepOnly) > 0:
         mn_mask = jnp.isin(jnp.arange(n_neurons), mn_idxs)
