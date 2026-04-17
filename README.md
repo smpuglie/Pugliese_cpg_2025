@@ -9,6 +9,8 @@ A JAX/JIT implementation for VNC (Ventral Nerve Cord) Connectome network simulat
 - Python 3.8 or higher
 - Conda or Miniconda
 
+JAX/Jaxlib compatability with Windows is currently **experimental or CPU-only**. We recommend setup on Linux or MacOS platforms. See https://docs.jax.dev/en/latest/installation.html#supported-platforms for more information and instructions for installation on Windows.
+
 ### Setup Instructions
 
 1. **Clone the repository**
@@ -36,6 +38,11 @@ pip uninstall jax jaxlib
 pip install jax[cuda12] -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
 ```
 
+## Getting started
+
+We encourage first-time users to look at the tutorials `Run simple simulations in a notebook.ipynb` (**1**) and `Basic_Usage.ipynb` (**2**).
+
+To begin running simulations, **users will need to create or update a `paths` config file to match their local file structure**. This can be done manually, or at the beginning of the first tutorial notebook under the "Specify or create paths" heading.
 
 ## Usage
 
@@ -95,7 +102,7 @@ Use the Hydra-based runner to execute simulations:
 python src/run_hydra.py
 
 # Override specific parameters
-python src/run_hydra.py experiment=DNg100_Stim  experiment.n_replicates=128 exerpiment.batch_size=16
+python src/run_hydra.py experiment=DNg100_Stim  experiment.n_replicates=128 experiment.batch_size=16
 
 # Run parameter sweeps
 python src/run_hydra.py -m experiment=DNg100_Stim sim.noise=true,false

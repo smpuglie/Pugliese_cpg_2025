@@ -340,7 +340,7 @@ def main(cfg: DictConfig):
             ##### Save results #####
             print('Saving results to:', cfg.paths.ckpt_dir)
             if cfg.experiment.dn_screen==False:
-                sparse.save_npz(cfg.paths.ckpt_dir / f"{cfg.experiment.name}_Rs.npz", sparse.COO.from_numpy(results))
+                sparse.save_npz(cfg.paths.ckpt_dir / f"{cfg.experiment.name}_Rs.npz", sparse.COO.from_numpy(jax.numpy.asarray(results)))
             ioh5.save(cfg.paths.ckpt_dir / 'neuron_params.h5', neuron_params._asdict())
             if final_mini_circuits is not None:
                 sparse.save_npz(cfg.paths.ckpt_dir / f"{cfg.experiment.name}_mini_circuits.npz", sparse.COO.from_numpy(final_mini_circuits))
