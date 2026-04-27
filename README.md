@@ -40,7 +40,7 @@ pip install jax[cuda12] -f https://storage.googleapis.com/jax-releases/jax_cuda_
 
 ## Getting started
 
-We encourage first-time users to look at the tutorials `Run simple simulations in a notebook.ipynb` (**1**) and `Basic_Usage.ipynb` (**2**).
+We encourage first-time users to look at the two tutorials in the notebooks folder ([Run simple simulations in a notebook](<notebooks/Tutorial 1: Run simple simulations in a notebook.ipynb>) and [Run and configure simulations from the command line](<notebooks/Tutorial 2: Run and configure simulations from the command line.ipynb>)).
 
 To begin running simulations, **users will need to create or update a `paths` config file to match their local file structure**. This can be done manually, or at the beginning of the first tutorial notebook under the "Specify or create paths" heading.
 
