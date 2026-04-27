@@ -19,7 +19,10 @@ import gc
 
 # Configure JAX for better performance
 jax.config.update("jax_enable_x64", False)  # Use float32 for better GPU performance
-print('Gpu devices:', len(jax.devices('gpu')) if jax.devices('gpu') else len(jax.devices('cpu')))
+try: 
+    print('Gpu devices:', len(jax.devices('gpu')) if jax.devices('gpu') else len(jax.devices('cpu')))
+except:
+    print('Cpu devices:', len(jax.devices('cpu')))
 
 import hydra
 import sparse
@@ -206,7 +209,10 @@ def main(cfg: DictConfig):
         # Log initial information to file only
         logger.info("=== VNC Simulation Run Started ===")
         logger.info(f"Logging to file: {log_file}")
-        logger.info(f"GPU devices: {len(jax.devices('gpu')) if jax.devices('gpu') else len(jax.devices('cpu'))}")
+        try:
+            logger.info(f"GPU devices: {len(jax.devices('gpu')) if jax.devices('gpu') else len(jax.devices('cpu'))}")
+        except:
+            logger.info(f"CPU devices: {len(jax.devices('cpu'))}")
         
         # Show clean startup info on console
         print(f"Logging to: {log_file}")

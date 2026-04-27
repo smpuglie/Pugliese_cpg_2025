@@ -9,7 +9,7 @@ A JAX/JIT implementation for VNC (Ventral Nerve Cord) Connectome network simulat
 - Python 3.8 or higher
 - Conda or Miniconda
 
-JAX/Jaxlib compatability with Windows is currently **experimental or CPU-only**. We recommend setup on Linux or MacOS platforms. See https://docs.jax.dev/en/latest/installation.html#supported-platforms for more information and instructions for installation on Windows.
+JAX/Jaxlib compatibility with Windows and MacOS is currently **CPU-only and otherwise experimental**. There is also a possibility of `pip` installation failure with the `jaxlib` library on Windows. We recommend setup on Linux for best performance, and otherwise MacOS. See https://docs.jax.dev/en/latest/installation.html#supported-platforms for more information about installation on Windows.
 
 ### Setup Instructions
 
@@ -22,7 +22,7 @@ JAX/Jaxlib compatability with Windows is currently **experimental or CPU-only**.
 2. **Create and activate the conda environment**
    ```bash
    conda env create -f environment.yaml
-   conda activate vnc_cpg
+   conda activate vnc-sim
    ```
 
 3. **Install the package in development mode**
@@ -169,7 +169,7 @@ python slurm_run.py --gpus 2 --mem 256 --cpus 32 --time "12:00:00" --experiment 
 | `--cpus` | 64 | Number of CPU cores |
 | `--time` | 2-00:00:00 | Time limit (days-hours:minutes:seconds) |
 | `--partition` | gpu-l40s | SLURM partition |
-| `--job_name` | vnc_cpg | Job name |
+| `--job_name` | vnc-sim | Job name |
 | `--experiment` | stim_neurons | Experiment configuration |
 | `--sim` | default | Simulation configuration |
 

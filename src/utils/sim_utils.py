@@ -71,11 +71,11 @@ def sample_trunc_normal(key, mean, stdev, shape, lower_bound=0.0):
     )
 
 def set_sizes(sizes, a, threshold):
-    """Should correspond to surface area. This method is going to need a lot of improvement, very much testing out"""
 
+    sizes = np.asarray(sizes, copy=True)
     normSize = np.nanmedian(sizes)  # jnp.nanmean(sizes)
     sizes[np.isnan(sizes)] = normSize
-    sizes[sizes == 0] = normSize  # TODO this isn't great
+    sizes[sizes == 0] = normSize
     sizes = sizes / normSize
     sizes = np.asarray(sizes)
 

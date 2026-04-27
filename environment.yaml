@@ -8,15 +8,16 @@ dependencies:
   - pandas
   - scikit-learn
   - scipy
-  - omegaconf
-  - sparse
+  - omegaconf>=2.3,<2.4
+  - sparse>=0.17.0,<0.19
   - pip
   - seaborn
+  - pyarrow
   - pip:
     - "--editable=."
-    - hydra-core
-    - diffrax
-    - jax[cuda12]
+    - hydra-core>=1.3,<2.0
+    - diffrax==0.7.0
+    - jax>=0.6.2,<0.10
     - h5py
     - natsort
     - nvidia-ml-py3

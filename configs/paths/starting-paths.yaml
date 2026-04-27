@@ -1,7 +1,8 @@
-base_dir: /home/smpuglie/Pugliese_2025/data/simulation output
+base_dir: /Users/sarahpugliese/Documents/python/Pugliese_cpg_2025/data/simulation
+  output/${experiment.name}/${version}
 ckpt_dir: ${paths.save_dir}/ckpt/
-cwd_dir: /home/smpuglie/Pugliese_2025
-data_dir: /home/smpuglie/Pugliese_2025/data/
+cwd_dir: /Users/sarahpugliese/Documents/python/Pugliese_cpg_2025
+data_dir: /Users/sarahpugliese/Documents/python/Pugliese_cpg_2025/data/
 fig_dir: ${paths.save_dir}/figures/
 log_dir: ${paths.save_dir}/logs/
-save_dir: ${paths.base_dir}/run_id=${run_id}
+save_dir: ${multirun_save_dir:${paths.base_dir},${run_id}}

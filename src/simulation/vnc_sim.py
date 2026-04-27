@@ -1151,8 +1151,8 @@ def _adjust_stimulation_for_batch(
     """Adjust stimulation for a specific batch."""
     
     adjusted_neuron_params = neuron_params
-    next_highest = None
-    next_lowest = None
+    next_highest = jnp.full(adjusted_neuron_params.input_currents[...,0].shape,jnp.nan,dtype=jnp.float32)
+    next_lowest = jnp.full(adjusted_neuron_params.input_currents[...,0].shape,jnp.nan,dtype=jnp.float32)
     
     for adjust_iter in range(sim_config.max_adjustment_iters):
         test_results = batch_func(adjusted_neuron_params, sim_params, batch_indices) # (Devices, Batch, Neurons, Time)
@@ -1189,17 +1189,23 @@ def _adjust_stimulation_for_batch(
 
             if (sim_active > sim_config.n_active_upper) or (sim_high_fr > sim_config.n_high_fr_upper):
                 # Too strong - reduce stimulation
-                if next_lowest is None:
+                # if next_lowest is None:
+                if jnp.isnan(next_lowest[stim_idx,replicate_idx]):
                     new_inputs = new_inputs.at[stim_idx, replicate_idx].set(sim_input / 2)
                 else:
-                    new_inputs = new_inputs.at[stim_idx, replicate_idx].set((sim_input + next_lowest[stim_idx, replicate_idx]) / 2)
+                    lower_bound_input = sim_input.at[sim_input>0].set(next_lowest[stim_idx, replicate_idx])
+                    new_inputs = new_inputs.at[stim_idx, replicate_idx].set((sim_input + lower_bound_input) / 2)
+                next_highest = next_highest.at[stim_idx, replicate_idx].set(jnp.max(sim_input))
                 needs_adjustment = needs_adjustment.at[sim_idx].set(True)
             elif sim_active < sim_config.n_active_lower:
                 # Too weak - increase stimulation
-                if next_highest is None:
+                # if next_highest is None:
+                if jnp.isnan(next_highest[stim_idx,replicate_idx]):
                     new_inputs = new_inputs.at[stim_idx, replicate_idx].set(sim_input * 2)
                 else:
-                    new_inputs = new_inputs.at[stim_idx, replicate_idx].set((sim_input + next_highest[stim_idx, replicate_idx]) / 2)
+                    upper_bound_input = sim_input.at[sim_input>0].set(next_highest[stim_idx, replicate_idx])
+                    new_inputs = new_inputs.at[stim_idx, replicate_idx].set((sim_input + upper_bound_input) / 2)
+                next_lowest = next_lowest.at[stim_idx, replicate_idx].set(jnp.max(sim_input))
                 needs_adjustment = needs_adjustment.at[sim_idx].set(True)
             # else: just right, no adjustment needed
 
@@ -1247,26 +1253,35 @@ def _run_stim_neurons(
     adjusted_neuron_params = neuron_params
     
     if sim_config.enable_checkpointing and (checkpoint_dir is not None):
-        latest_checkpoint, base_name = find_latest_checkpoint(checkpoint_dir)
-        if latest_checkpoint:
-            print(f"🔍 Found checkpoint: {latest_checkpoint}")
-            
-            # Perform memory cleanup before attempting to load checkpoint
-            print("🧹 Pre-loading memory cleanup...")
-            jax.clear_caches()
-            import gc
-            for _ in range(3):
-                gc.collect()
-                
-            try:
-                checkpoint_state, adjusted_neuron_params, metadata = load_checkpoint(latest_checkpoint, base_name, neuron_params)
-                start_batch = checkpoint_state.batch_index + 1
-                print(f"Resuming from batch {start_batch}/{n_batches}")
-            except Exception as e:
-                print(f"Warning: Could not load checkpoint {latest_checkpoint}: {e}")
-                print("Starting from beginning...")
-                start_batch = 0
-                all_results = []
+        try:
+            latest_checkpoint, base_name = find_latest_checkpoint(checkpoint_dir)
+        except:
+            print("no checkpoint")
+        else:
+            if latest_checkpoint:
+                print(f"🔍 Found checkpoint: {latest_checkpoint}")
+
+                # Perform memory cleanup before attempting to load checkpoint
+                print("🧹 Pre-loading memory cleanup...")
+                jax.clear_caches()
+                import gc
+                for _ in range(3):
+                    gc.collect()
+                    
+                try:
+                    checkpoint_state, adjusted_neuron_params, metadata = load_checkpoint(latest_checkpoint, base_name, neuron_params)
+                    start_batch = checkpoint_state.batch_index + 1
+                    print(f"Resuming from batch {start_batch}/{n_batches}")
+                except Exception as e:
+                    print(f"Warning: Could not load checkpoint {latest_checkpoint}: {e}")
+                    print("Starting from beginning...")
+                    start_batch = 0
+                    all_results = []
+
+    if start_batch >= n_batches:
+        print("All batches already complete.")
+    else:
+        print(f'Starting Initial Batch: {start_batch}')
 
     for i in range(start_batch, n_batches):
         start_idx = i * batch_size
@@ -1314,7 +1329,7 @@ def _run_stim_neurons(
                 total_batches=n_batches,
                 n_result_batches=len(all_results),
                 accumulated_mini_circuits=None,
-                neuron_params=neuron_params,
+                neuron_params=adjusted_neuron_params,
                 pruning_state=None
             )
             checkpoint_path = checkpoint_dir / f"checkpoint_batch_{i}.h5"
@@ -1336,6 +1351,7 @@ def _run_stim_neurons(
 
         # Enhanced memory cleanup for large simulations
         del batch_results  # Free memory
+        import gc
         gc.collect()  # Force garbage collection
         
         # More aggressive cleanup for large batch simulations to prevent OOM
@@ -1400,7 +1416,7 @@ def _run_stim_neurons(
             # Move to CPU to save memory
             final_batch_results = jax.device_put(final_batch_results, jax.devices("cpu")[0])
             final_all_results.append(np.asarray(final_batch_results))
-            sparse.save_npz(results_dir / f"Final_batch_Rs_{i}.npz", sparse.COO.from_numpy(final_batch_results))
+            sparse.save_npz(results_dir / f"Final_batch_Rs_{i}.npz", sparse.COO.from_numpy(final_batch_results.__array__()))
             print(f"Final batch {i + 1}/{n_batches} completed")
             
             # Clean up memory
@@ -1417,10 +1433,10 @@ def _run_stim_neurons(
         gc.collect()
     else:
         # Combine results from adjustment phase
-        results = jnp.concatenate(all_results, axis=0)
-    
-    # Combine results
-    # results = jnp.concatenate(all_results, axis=0)
+        if len(all_results) > 0:
+            results = jnp.concatenate(all_results, axis=0)
+        else:
+            return jnp.asarray(all_results), None, adjusted_neuron_params
 
     # Reshape to (n_stim_configs, n_param_sets, n_neurons, n_timepoints)
     return results.reshape(
@@ -1668,6 +1684,15 @@ def prepare_neuron_params(cfg: DictConfig, W_table: Any, param_path: Optional[Pa
     """Prepare neuron parameters from configuration."""
     # Load connectivity
     W = jnp.array(load_W(cfg.experiment.wPath))
+
+    # separate glutamate weighting hack... 
+    gluMultiplier = getattr(cfg.neuron_params, "glutamateMultiplier", None)
+    if gluMultiplier is not None:
+        gluRatio = gluMultiplier/getattr(cfg.neuron_params, "inhibitoryMultiplier")
+        gluIdxs =  jnp.array(W_table.loc[W_table["predictedNt"] == "glutamate"].index)
+        gluMask = jnp.zeros(W.shape[0],dtype=bool)
+        gluMask = gluMask.at[gluIdxs].set(True)
+        W = W.at[gluMask,:].set(W[gluMask,:]*gluRatio)
     
     # Sample parameters
     num_sims = cfg.experiment.n_replicates
@@ -1851,11 +1876,36 @@ def prepare_vnc_simulation_params(cfg: DictConfig):
     
     # Handle DN screening if specified
     if getattr(cfg.experiment, "dn_screen", False):
-        all_exc_dns = W_table.loc[
-            (W_table["class"] == "descending neuron") & 
-            (W_table["predictedNt"] == "acetylcholine")
-        ]
-        stim_neurons = [[neuron] for neuron in all_exc_dns.index.to_list()]
+        try:
+            all_exc_dns = W_table.loc[
+                    (W_table["class"] == "descending neuron") & 
+                    (W_table["predictedNt"] == "acetylcholine")
+                ]
+        except:
+            all_exc_dns = W_table.loc[
+                (W_table["super_class"]=="descending") &
+                ((W_table["neurotransmitter_verified"] == "acetylcholine") |
+                    ((W_table["neurotransmitter_verified"].isna()) & (W_table["neurotransmitter_predicted"] == "acetylcholine")))
+            ]
+        max_dn_test = getattr(cfg.sim, 'max_dn_test', None)
+        dns_by_type = getattr(cfg.sim, 'dns_by_type', False) # activate all neurons of a given type simultaneously
+        if dns_by_type:
+            try:
+                dnTypes = all_exc_dns["type"].unique().astype(str)
+                dnTypes = dnTypes[dnTypes!="nan"]
+                stim_neurons = [all_exc_dns.loc[all_exc_dns["type"]==dnType].index.tolist() for dnType in dnTypes]
+            except:
+                dnTypes = all_exc_dns["cell_type"].unique().astype(str)
+                dnTypes = dnTypes[dnTypes!="nan"]
+                stim_neurons = [all_exc_dns.loc[all_exc_dns["cell_type"]==dnType].index.tolist() for dnType in dnTypes]
+        else:
+            stim_neurons = [[neuron] for neuron in all_exc_dns.index.to_list()]
+            
+        if max_dn_test is not None and max_dn_test > 0:
+            original_n_dns = len(all_exc_dns)
+            stim_neurons = stim_neurons[:max_dn_test]
+            print(f"Limited DN screening from {original_n_dns} to {max_dn_test} DNs for testing")
+
         stim_inputs = [cfg.experiment.stimI[0]] * len(stim_neurons)
         cfg.experiment.stimNeurons = stim_neurons
         cfg.experiment.stimI = stim_inputs
