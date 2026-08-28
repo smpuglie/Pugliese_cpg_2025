@@ -1,0 +1,124 @@
+minimalWidx,bodyId,type,class,subclass,hemilineage,size,predictedNt,predictedNtProb,somaSide,motor module,step contribution
+0,10093,BDN2,descending neuron,xl,,7124816452,acetylcholine,0.9575194719223212,LHS,,
+1,10707,IN17A001,intrinsic neuron,IR,17A,3939072421,acetylcholine,0.9157359016474068,LHS,,
+2,11751,IN15A001,intrinsic neuron,IR,15A,2180476120,acetylcholine,0.9035433709149836,LHS,,
+3,13905,IN16B007,intrinsic neuron,IR,16B,1314155373,glutamate,0.9537449107119031,LHS,,
+4,155853,Sternal adductor MN,motor neuron,fl,TBD,1242893166,gaba,0.5775821797084063,LHS,coxa swing,swing
+5,26566,Sternal anterior rotator MN,motor neuron,fl,TBD,2643221949,glutamate,0.4408789708375417,LHS,coxa swing,swing
+6,17176,Sternal anterior rotator MN,motor neuron,fl,TBD,2454641901,glutamate,0.4227557587665134,LHS,coxa swing,swing
+7,13490,Tergopleural/Pleural promotor MN,motor neuron,fl,TBD,1382555654,glutamate,0.5968959778547287,LHS,coxa swing,swing
+8,12686,Tergopleural/Pleural promotor MN,motor neuron,fl,TBD,2832306624,glutamate,0.373590006978734,LHS,coxa swing,swing
+9,12396,Tergopleural/Pleural promotor MN,motor neuron,fl,08A,1539817788,glutamate,0.5697814068570733,LHS,coxa swing,swing
+10,13628,Pleural remotor/abductor MN,motor neuron,fl,TBD,1893845608,glutamate,0.4400208608944643,LHS,coxa stance,stance
+11,12096,Pleural remotor/abductor MN,motor neuron,fl,TBD,1663258320,glutamate,0.4501934036415173,LHS,coxa stance,stance
+12,19667,Sternal posterior rotator MN,motor neuron,fl,20B.21B.22B,1452231312,glutamate,0.4835343475814067,LHS,coxa stance,stance
+13,163719,Sternal posterior rotator MN,motor neuron,fl,20B.21B.22B,919564661,glutamate,0.3478606437350175,LHS,coxa stance,stance
+14,29689,Sternal posterior rotator MN,motor neuron,fl,20B.21B.22B,1137807744,glutamate,0.4275443787975088,LHS,coxa stance,stance
+15,21753,Tergotr. MN,motor neuron,fl,TBD,939939415,glutamate,0.4946538918327702,LHS,femur/tr extend,swing
+16,19652,Tergotr. MN,motor neuron,fl,TBD,1512963557,glutamate,0.6171104757132817,LHS,femur/tr extend,swing
+17,166309,Tergotr. MN,motor neuron,fl,TBD,1034853103,glutamate,0.4617707939892584,LHS,femur/tr extend,swing
+18,155633,Tergotr. MN,motor neuron,fl,17X.18X,1427129172,glutamate,0.6102183060087871,LHS,femur/tr extend,swing
+19,173560,Tr extensor MN,motor neuron,fl,TBD,1398357045,glutamate,0.4263565459734071,LHS,femur/tr extend,swing
+20,19929,Tr extensor MN,motor neuron,fl,19A,1113227297,glutamate,0.4183128309052656,LHS,femur/tr extend,swing
+21,25475,Acc. tr flexor MN,motor neuron,fl,TBD,554391556,glutamate,0.531174328786702,LHS,femur/tr flex,stance
+22,23048,Acc. tr flexor MN,motor neuron,fl,TBD,702849042,glutamate,0.360793743802545,LHS,femur/tr flex,stance
+23,17226,Tr flexor MN,motor neuron,fl,24B.25B,1064809270,glutamate,0.4894951814905,LHS,femur/tr flex,stance
+24,163686,Tr flexor MN,motor neuron,fl,24B.25B,1021572292,glutamate,0.3714602638113622,LHS,femur/tr flex,stance
+25,158694,Tr flexor MN,motor neuron,fl,20B.21B.22B,471274315,glutamate,0.5026994587055275,LHS,femur/tr flex,stance
+26,16963,Tr flexor MN,motor neuron,fl,24B.25B,1127250919,glutamate,0.4651302275553462,LHS,femur/tr flex,stance
+27,19771,Tr flexor MN,motor neuron,fl,24B.25B,1095090429,glutamate,0.502017691950979,LHS,femur/tr flex,stance
+28,26613,Tr flexor MN,motor neuron,fl,20B.21B.22B,349203772,glutamate,0.4307083662395598,LHS,femur/tr flex,stance
+29,23299,Tr flexor MN,motor neuron,fl,24B.25B,1364384081,glutamate,0.3973739488218917,LHS,femur/tr flex,stance
+30,156857,Fe reductor MN,motor neuron,fl,24B.25B,1966540853,glutamate,0.4388438478002653,LHS,femur reductor,other
+31,21944,Fe reductor MN,motor neuron,fl,24B.25B,1456938071,glutamate,0.4539264072190212,LHS,femur reductor,other
+32,14949,Fe reductor MN,motor neuron,fl,24B.25B,1257379314,glutamate,0.4362886592691865,LHS,femur reductor,other
+33,13920,Fe reductor MN,motor neuron,fl,TBD,1303771183,glutamate,0.5517309895067504,LHS,femur reductor,other
+34,11657,Ti extensor MN,motor neuron,fl,TBD,2785439407,glutamate,0.4693001440402302,LHS,tibia extend,swing
+35,12704,Ti extensor MN,motor neuron,fl,TBD,2334494392,glutamate,0.5728493644543978,LHS,tibia extend,swing
+36,166374,Acc. ti flexor MN,motor neuron,fl,15B,211944766,glutamate,0.560880442460378,LHS,tibia flex,stance
+37,15023,Acc. ti flexor MN,motor neuron,fl,15B,972314058,glutamate,0.6949069102605184,LHS,tibia flex,stance
+38,18554,Acc. ti flexor MN,motor neuron,fl,15B,281008269,glutamate,0.6945877015590668,LHS,tibia flex,stance
+39,23698,Acc. ti flexor MN,motor neuron,fl,15B,474682563,glutamate,0.5707311034202576,LHS,tibia flex,stance
+40,13397,Acc. ti flexor MN,motor neuron,fl,15B,1561293008,glutamate,0.4593210975707431,LHS,tibia flex,stance
+41,101043,Acc. ti flexor MN,motor neuron,fl,15B,1044040687,glutamate,0.397457986820133,LHS,tibia flex,stance
+42,18412,Acc. ti flexor MN,motor neuron,fl,15B,753393003,glutamate,0.492508220175902,LHS,tibia flex,stance
+43,17885,Acc. ti flexor MN,motor neuron,fl,15B,821782786,glutamate,0.4459426179528236,LHS,tibia flex,stance
+44,16632,Acc. ti flexor MN,motor neuron,fl,15B,1035921298,gaba,0.467718836851418,LHS,tibia flex,stance
+45,15791,Acc. ti flexor MN,motor neuron,fl,15B,1203327479,glutamate,0.3821359594456023,LHS,tibia flex,stance
+46,14798,Ti flexor MN,motor neuron,fl,15B,1408598760,glutamate,0.4267293574909369,LHS,tibia flex,stance
+47,15149,Ti flexor MN,motor neuron,fl,15B,1423802746,glutamate,0.6140691043195746,LHS,tibia flex,stance
+48,12134,Ti flexor MN,motor neuron,fl,15B,2781749098,glutamate,0.4511475317017175,LHS,tibia flex,stance
+49,15321,Ti flexor MN,motor neuron,fl,15B,1390466503,glutamate,0.3672624837763444,LHS,tibia flex,stance
+50,19092,ltm MN,motor neuron,fl,15B,783942851,glutamate,0.5095332115888596,LHS,substrate grip,other
+51,13156,ltm MN,motor neuron,fl,15B,924726200,glutamate,0.4750258523899202,LHS,substrate grip,other
+52,14069,ltm MN,motor neuron,fl,15B,1661386505,acetylcholine,0.5193873703479767,LHS,substrate grip,other
+53,20612,ltm1-tibia MN,motor neuron,fl,15B,614689513,glutamate,0.374162603848769,LHS,substrate grip,other
+54,13952,ltm1-tibia MN,motor neuron,fl,15B,1551478953,glutamate,0.6213024895766686,LHS,substrate grip,other
+55,16711,ltm2-femur MN,motor neuron,fl,15B,1109405729,glutamate,0.4954133998980978,LHS,substrate grip,other
+56,15818,ltm2-femur MN,motor neuron,fl,15B,1314487340,glutamate,0.5070045945855478,LHS,substrate grip,other
+57,29554,Ta depressor MN,motor neuron,fl,15B,235146430,glutamate,0.4965388498773488,LHS,tarsus control,other
+58,21749,Ta depressor MN,motor neuron,fl,15B,539765744,glutamate,0.4701568625039524,LHS,tarsus control,other
+59,29487,Ta depressor MN,motor neuron,fl,15B,258978004,glutamate,0.5731076002120972,LHS,tarsus control,other
+60,25674,Ta depressor MN,motor neuron,fl,15B,397353548,gaba,0.4431314170360565,LHS,tarsus control,other
+61,157320,Ta levator MN,motor neuron,fl,15B,560749545,glutamate,0.4219423322938382,LHS,tarsus control,other
+62,22358,Ta levator MN,motor neuron,fl,TBD,469570782,glutamate,0.4671947062015533,LHS,tarsus control,other
+63,14549,ADNM2 MN,motor neuron,nm,TBD,1406476915,glutamate,0.4961585647498185,LHS,,
+64,24975,FNM2,motor neuron,nm,16X,2034146125,glutamate,0.408434249382646,LHS,,
+65,17664,MNfl10,motor neuron,fl,TBD,1518766112,glutamate,0.5788395471612712,LHS,,
+66,18579,Sternotrochanter MN,motor neuron,fl,17X.18X,2498444229,glutamate,0.4633469409568608,LHS,,
+67,100515,Sternotrochanter MN,motor neuron,fl,TBD,1957691112,glutamate,0.5163041054892044,LHS,,
+68,21718,Sternal adductor MN,motor neuron,fl,TBD,1450798397,glutamate,0.380655146674986,RHS,coxa swing,swing
+69,13300,Sternal anterior rotator MN,motor neuron,fl,TBD,2100729574,glutamate,0.3916445660547146,RHS,coxa swing,swing
+70,22215,Sternal anterior rotator MN,motor neuron,fl,TBD,2302201650,glutamate,0.516093965228877,RHS,coxa swing,swing
+71,13464,Tergopleural/Pleural promotor MN,motor neuron,fl,TBD,1376211589,glutamate,0.5187972958254463,RHS,coxa swing,swing
+72,20386,Tergopleural/Pleural promotor MN,motor neuron,fl,08A,1953422843,glutamate,0.4968851994020505,RHS,coxa swing,swing
+73,12628,Tergopleural/Pleural promotor MN,motor neuron,fl,TBD,2157027729,glutamate,0.4327607494119154,RHS,coxa swing,swing
+74,16419,Pleural remotor/abductor MN,motor neuron,fl,TBD,1572821971,glutamate,0.3620561715496062,RHS,coxa stance,stance
+75,14346,Pleural remotor/abductor MN,motor neuron,fl,TBD,1612930098,glutamate,0.4264658363235573,RHS,coxa stance,stance
+76,25767,Sternal posterior rotator MN,motor neuron,fl,20B.21B.22B,1046096743,glutamate,0.3715005331683815,RHS,coxa stance,stance
+77,21241,Sternal posterior rotator MN,motor neuron,fl,20B.21B.22B,1161079791,glutamate,0.412997699582151,RHS,coxa stance,stance
+78,25892,Sternal posterior rotator MN,motor neuron,fl,20B.21B.22B,798208989,glutamate,0.3599617394673474,RHS,coxa stance,stance
+79,22126,Tergotr. MN,motor neuron,fl,TBD,992519561,glutamate,0.4688784812654679,RHS,femur/tr extend,swing
+80,23318,Tergotr. MN,motor neuron,fl,TBD,656674498,glutamate,0.4636506292508178,RHS,femur/tr extend,swing
+81,14536,Tr extensor MN,motor neuron,fl,TBD,2807820861,glutamate,0.4297769270376123,RHS,femur/tr extend,swing
+82,27028,Tr extensor MN,motor neuron,fl,19A,540774548,acetylcholine,0.3820707385756952,RHS,femur/tr extend,swing
+83,14783,Acc. tr flexor MN,motor neuron,fl,TBD,1761077763,glutamate,0.3700938198374139,RHS,femur/tr flex,stance
+84,22729,Acc. tr flexor MN,motor neuron,fl,TBD,831635824,glutamate,0.4156436848209304,RHS,femur/tr flex,stance
+85,19886,Tr flexor MN,motor neuron,fl,24B.25B,1541345862,glutamate,0.3916340025581708,RHS,femur/tr flex,stance
+86,20572,Tr flexor MN,motor neuron,fl,24B.25B,970075541,glutamate,0.4369405449230086,RHS,femur/tr flex,stance
+87,41933,Tr flexor MN,motor neuron,fl,24B.25B,862972153,glutamate,0.4566786859591957,RHS,femur/tr flex,stance
+88,21612,Tr flexor MN,motor neuron,fl,24B.25B,994483781,glutamate,0.4572619896044831,RHS,femur/tr flex,stance
+89,20673,Tr flexor MN,motor neuron,fl,24B.25B,1054868803,glutamate,0.4030021951221761,RHS,femur/tr flex,stance
+90,18440,Tr flexor MN,motor neuron,fl,24B.25B,1526753094,glutamate,0.537420330717313,RHS,femur/tr flex,stance
+91,29484,Fe reductor MN,motor neuron,fl,TBD,195482530,glutamate,0.5556105226278305,RHS,femur reductor,other
+92,28884,Fe reductor MN,motor neuron,fl,TBD,204105650,acetylcholine,0.4606454409658909,RHS,femur reductor,other
+93,18983,Fe reductor MN,motor neuron,fl,24B.25B,1593653915,glutamate,0.5044118946235459,RHS,femur reductor,other
+94,11226,Fe reductor MN,motor neuron,fl,24B.25B,1926501092,glutamate,0.4496162285157029,RHS,femur reductor,other
+95,12891,Fe reductor MN,motor neuron,fl,TBD,1675146188,glutamate,0.3724923098891261,RHS,femur reductor,other
+96,11706,Ti extensor MN,motor neuron,fl,TBD,4174841466,glutamate,0.4723596479573513,RHS,tibia extend,swing
+97,13115,Ti extensor MN,motor neuron,fl,TBD,3412954288,glutamate,0.440905261278241,RHS,tibia extend,swing
+98,12761,Acc. ti flexor MN,motor neuron,fl,15B,1802189988,glutamate,0.4414961542811637,RHS,tibia flex,stance
+99,13819,Acc. ti flexor MN,motor neuron,fl,15B,1379023476,glutamate,0.3460553092882037,RHS,tibia flex,stance
+100,14824,Acc. ti flexor MN,motor neuron,fl,15B,929985695,glutamate,0.491180778081928,RHS,tibia flex,stance
+101,20373,Acc. ti flexor MN,motor neuron,fl,15B,655665844,glutamate,0.3261611620065472,RHS,tibia flex,stance
+102,19048,Acc. ti flexor MN,motor neuron,fl,15B,959998713,glutamate,0.454625313575552,RHS,tibia flex,stance
+103,15367,Acc. ti flexor MN,motor neuron,fl,15B,1191575067,glutamate,0.3525657564665986,RHS,tibia flex,stance
+104,20605,Acc. ti flexor MN,motor neuron,fl,15B,848053386,gaba,0.4794340403750539,RHS,tibia flex,stance
+105,18963,Acc. ti flexor MN,motor neuron,fl,15B,1366914671,acetylcholine,0.3543970710598383,RHS,tibia flex,stance
+106,13399,Ti flexor MN,motor neuron,fl,15B,1832574066,glutamate,0.6011782017137323,RHS,tibia flex,stance
+107,13283,Ti flexor MN,motor neuron,fl,15B,1599802354,glutamate,0.5441502485967552,RHS,tibia flex,stance
+108,16658,ltm MN,motor neuron,fl,15B,950406220,glutamate,0.3682248744581426,RHS,substrate grip,other
+109,11786,ltm MN,motor neuron,fl,15B,2176701414,glutamate,0.444450120076391,RHS,substrate grip,other
+110,154803,ltm MN,motor neuron,fl,15B,298698895,gaba,0.4737425148487091,RHS,substrate grip,other
+111,27078,ltm MN,motor neuron,fl,15B,240974580,glutamate,0.671208381652832,RHS,substrate grip,other
+112,15720,ltm1-tibia MN,motor neuron,fl,15B,1173497024,gaba,0.4029675507474513,RHS,substrate grip,other
+113,17050,ltm2-femur MN,motor neuron,fl,15B,1292080233,glutamate,0.4582557172736499,RHS,substrate grip,other
+114,15317,ltm2-femur MN,motor neuron,fl,15B,1473326602,glutamate,0.4336190695563952,RHS,substrate grip,other
+115,16492,Ta depressor MN,motor neuron,fl,15B,1127073870,glutamate,0.525244142969975,RHS,tarsus control,other
+116,154804,Ta depressor MN,motor neuron,fl,15B,431405159,glutamate,0.3811370469629764,RHS,tarsus control,other
+117,16897,Ta depressor MN,motor neuron,fl,15B,925656198,glutamate,0.4945720864925533,RHS,tarsus control,other
+118,15434,Ta depressor MN,motor neuron,fl,15B,1060771006,glutamate,0.3643680235595963,RHS,tarsus control,other
+119,15446,Ta levator MN,motor neuron,fl,15B,954308862,glutamate,0.4647673841100186,RHS,tarsus control,other
+120,18483,MNfl10,motor neuron,fl,TBD,1288610909,glutamate,0.6873295363172738,RHS,,
+121,18717,MNnm12,motor neuron,nm,16X,1941093175,glutamate,0.4105412702223375,RHS,,
+122,20615,Sternotrochanter MN,motor neuron,fl,TBD,1022896332,glutamate,0.4577549556270242,RHS,,
